@@ -3,6 +3,7 @@ name = "conch_app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Cross-platform terminal emulator with SSH session management"
 
 [[bin]]
 name = "conch"
