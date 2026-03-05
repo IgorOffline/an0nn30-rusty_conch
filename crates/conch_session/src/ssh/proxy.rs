@@ -20,8 +20,18 @@ pub async fn connect_via_proxy(
         .replace("%p", &params.port.to_string());
 
     // Spawn the proxy command
+    #[cfg(not(windows))]
     let child = Command::new("sh")
         .arg("-c")
+        .arg(&expanded)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("Failed to spawn ProxyCommand")?;
+    #[cfg(windows)]
+    let child = Command::new("cmd")
+        .arg("/C")
         .arg(&expanded)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

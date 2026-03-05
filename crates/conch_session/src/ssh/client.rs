@@ -194,6 +194,7 @@ async fn try_key_auth(
 }
 
 /// Try authenticating via SSH agent.
+#[cfg(unix)]
 async fn try_agent_auth(
     handle: &mut Handle<ClientHandler>,
     user: &str,
@@ -225,6 +226,15 @@ async fn try_agent_auth(
         }
     }
 
+    Ok(false)
+}
+
+/// SSH agent auth is not available on Windows (no Unix domain socket).
+#[cfg(not(unix))]
+async fn try_agent_auth(
+    _handle: &mut Handle<ClientHandler>,
+    _user: &str,
+) -> Result<bool> {
     Ok(false)
 }
 

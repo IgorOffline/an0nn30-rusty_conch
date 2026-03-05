@@ -76,6 +76,8 @@ impl LocalSession {
             working_directory: None,
             drain_on_exit: true,
             env,
+            #[cfg(target_os = "windows")]
+            escape_args: false,
         };
 
         // Create the PTY
@@ -83,7 +85,11 @@ impl LocalSession {
             .context("Failed to create PTY")?;
 
         // Extract child PID before EventLoop takes ownership of the Pty.
+        // Windows ConPTY doesn't expose child(); use 0 sentinel (CWD polling is macOS-only).
+        #[cfg(not(windows))]
         let child_pid = pty.child().id();
+        #[cfg(windows)]
+        let child_pid = 0u32;
 
         // Create the event loop
         let event_loop = EventLoop::new(
