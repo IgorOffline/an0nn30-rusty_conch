@@ -61,6 +61,7 @@ jobs:
           cp target/release/conch "$APP/Contents/MacOS/"
           cp packaging/macos/Info.plist "$APP/Contents/"
           cp crates/conch_app/icons/conch.icns "$APP/Contents/Resources/"
+          codesign --force --deep --sign - "$APP"
           hdiutil create -volname "Conch" -srcfolder "$APP" -ov -format UDZO \
             "Conch-${{ steps.version.outputs.version }}-macos-arm64.dmg"
 
@@ -99,6 +100,7 @@ jobs:
           cp target/x86_64-apple-darwin/release/conch "$APP/Contents/MacOS/"
           cp packaging/macos/Info.plist "$APP/Contents/"
           cp crates/conch_app/icons/conch.icns "$APP/Contents/Resources/"
+          codesign --force --deep --sign - "$APP"
           hdiutil create -volname "Conch" -srcfolder "$APP" -ov -format UDZO \
             "Conch-${{ steps.version.outputs.version }}-macos-x86_64.dmg"
 
