@@ -70,19 +70,21 @@ jobs:
           path: "*.dmg"
 
   # ---------------------------------------------------------------------------
-  # macOS x86_64
+  # macOS x86_64 (cross-compiled on ARM64 runner)
   # ---------------------------------------------------------------------------
   build-macos-x86:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
-    runs-on: macos-13
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release -p conch_app
+        run: cargo build --release -p conch_app --target x86_64-apple-darwin
 
       - name: Extract version
         id: version
@@ -94,7 +96,7 @@ jobs:
         run: |
           APP="Conch.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp target/release/conch "$APP/Contents/MacOS/"
+          cp target/x86_64-apple-darwin/release/conch "$APP/Contents/MacOS/"
           cp packaging/macos/Info.plist "$APP/Contents/"
           cp crates/conch_app/icons/conch.icns "$APP/Contents/Resources/"
           hdiutil create -volname "Conch" -srcfolder "$APP" -ov -format UDZO \
