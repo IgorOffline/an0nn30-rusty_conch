@@ -24,8 +24,6 @@ pub struct SshSession {
     event_rx: Option<mpsc::UnboundedReceiver<alacritty_terminal::event::Event>>,
     /// SSH handle for opening additional channels (SFTP, tunnels).
     ssh_handle: Arc<Handle<ClientHandler>>,
-    /// Receiver for CWD updates extracted from OSC 7 sequences in SSH output.
-    cwd_rx: Option<std::sync::mpsc::Receiver<String>>,
 }
 
 enum SshInput {
@@ -52,11 +50,11 @@ impl SshSession {
         params: &ConnectParams,
         cols: u16,
         rows: u16,
+        term_config: term::Config,
     ) -> Result<Self> {
         let (event_proxy, event_rx) = EventProxy::new();
 
         // Create terminal state
-        let term_config = term::Config::default();
         let term_size = TermSize {
             columns: cols as usize,
             lines: rows as usize,
@@ -74,9 +72,6 @@ impl SshSession {
         // Create input channel
         let (input_tx, input_rx) = mpsc::unbounded_channel();
 
-        // Create CWD tracking channel (OSC 7 extracted from raw SSH output)
-        let (cwd_tx, cwd_rx) = std::sync::mpsc::channel();
-
         // Spawn the bridge task
         let term_clone = Arc::clone(&term);
         tokio::spawn(ssh_bridge_task(
@@ -84,7 +79,6 @@ impl SshSession {
             term_clone,
             event_proxy,
             input_rx,
-            cwd_tx,
         ));
 
         Ok(Self {
@@ -92,7 +86,6 @@ impl SshSession {
             input_tx,
             event_rx: Some(event_rx),
             ssh_handle,
-            cwd_rx: Some(cwd_rx),
         })
     }
 
@@ -122,11 +115,6 @@ impl SshSession {
     /// Get a reference to the underlying SSH handle (for spawning SFTP workers, etc.).
     pub fn ssh_handle(&self) -> &Arc<Handle<ClientHandler>> {
         &self.ssh_handle
-    }
-
-    /// Take the CWD receiver (can only be called once).
-    pub fn take_cwd_rx(&mut self) -> Option<std::sync::mpsc::Receiver<String>> {
-        self.cwd_rx.take()
     }
 
     /// Open an SFTP session over this SSH connection.
@@ -159,7 +147,6 @@ async fn ssh_bridge_task(
     term: Arc<FairMutex<Term<EventProxy>>>,
     event_proxy: EventProxy,
     mut input_rx: mpsc::UnboundedReceiver<SshInput>,
-    cwd_tx: std::sync::mpsc::Sender<String>,
 ) {
     let mut processor: Processor = Processor::new();
     let (mut reader, writer) = channel.split();
@@ -170,16 +157,8 @@ async fn ssh_bridge_task(
             msg = reader.wait() => {
                 match msg {
                     Some(ChannelMsg::Data { data }) => {
-                        // Extract OSC 7 CWD updates and strip them from the
-                        // byte stream before VTE processing (matches Java
-                        // Conch's OscParser approach — prevents VTE side-effects
-                        // from interfering with zsh's PROMPT_SP detection).
-                        let (cwd, cleaned) = crate::shell_integration::extract_and_strip_osc7(&data);
-                        if let Some(path) = cwd {
-                            let _ = cwd_tx.send(path);
-                        }
                         let mut term_lock = term.lock();
-                        processor.advance(&mut *term_lock, &cleaned);
+                        processor.advance(&mut *term_lock, &data);
                         drop(term_lock);
                         event_proxy.send_event(alacritty_terminal::event::Event::Wakeup);
                     }

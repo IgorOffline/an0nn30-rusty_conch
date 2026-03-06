@@ -39,6 +39,8 @@ pub struct NewConnectionForm {
     pub proxy_type: ProxyType,
     pub proxy_value: String,
     pub folder_index: usize,
+    /// Auto-focus the host field on first render.
+    pub focus_host: bool,
 }
 
 impl Default for NewConnectionForm {
@@ -55,6 +57,7 @@ impl Default for NewConnectionForm {
             proxy_type: ProxyType::None,
             proxy_value: String::new(),
             folder_index: 0,
+            focus_host: true,
         }
     }
 }
@@ -179,10 +182,14 @@ pub fn show_new_connection(
                     // Host / Port
                     ui.label("Host / IP:");
                     ui.horizontal(|ui| {
-                        ui.add(
+                        let host_resp = ui.add(
                             crate::ui::widgets::text_edit(&mut form.host)
                                 .desired_width(ui.available_width() - 80.0),
                         );
+                        if form.focus_host {
+                            host_resp.request_focus();
+                            form.focus_host = false;
+                        }
                         ui.label(":");
                         ui.add(
                             crate::ui::widgets::text_edit(&mut form.port)

@@ -68,6 +68,7 @@ pub struct ResolvedShortcuts {
     pub toggle_left_sidebar: Option<KeyBinding>,
     pub toggle_right_sidebar: Option<KeyBinding>,
     pub focus_quick_connect: Option<KeyBinding>,
+    pub focus_plugin_search: Option<KeyBinding>,
 }
 
 impl ResolvedShortcuts {
@@ -81,6 +82,7 @@ impl ResolvedShortcuts {
             toggle_left_sidebar: KeyBinding::parse(&config.toggle_left_sidebar),
             toggle_right_sidebar: KeyBinding::parse(&config.toggle_right_sidebar),
             focus_quick_connect: KeyBinding::parse(&config.focus_quick_connect),
+            focus_plugin_search: KeyBinding::parse(&config.focus_plugin_search),
         }
     }
 
@@ -94,6 +96,7 @@ impl ResolvedShortcuts {
             &self.toggle_left_sidebar,
             &self.toggle_right_sidebar,
             &self.focus_quick_connect,
+            &self.focus_plugin_search,
         ];
         if bindings.iter().any(|b| b.as_ref().is_some_and(|kb| kb.matches(key, modifiers))) {
             return true;
@@ -110,11 +113,16 @@ impl ResolvedShortcuts {
 /// Convert an egui key event into bytes to send to the PTY.
 ///
 /// Returns `None` for events that are app shortcuts or have no terminal mapping.
+///
+/// `app_cursor` should be `true` when the terminal is in application cursor mode
+/// (DECCKM / `TermMode::APP_CURSOR`). This changes arrow keys and Home/End from
+/// CSI sequences (`\x1b[A`) to SS3 sequences (`\x1bOA`).
 pub fn key_to_bytes(
     key: &Key,
     modifiers: &Modifiers,
     text: Option<&str>,
     shortcuts: &ResolvedShortcuts,
+    app_cursor: bool,
 ) -> Option<Vec<u8>> {
     // Suppress app shortcuts from reaching the terminal.
     if shortcuts.is_app_shortcut(key, modifiers) {
@@ -148,15 +156,17 @@ pub fn key_to_bytes(
         Key::Delete => return Some(b"\x1b[3~".to_vec()),
         Key::Insert => return Some(b"\x1b[2~".to_vec()),
         Key::Home if modifiers.ctrl => return Some(b"\x1b[1;5H".to_vec()),
+        Key::Home if app_cursor => return Some(b"\x1bOH".to_vec()),
         Key::Home => return Some(b"\x1b[H".to_vec()),
         Key::End if modifiers.ctrl => return Some(b"\x1b[1;5F".to_vec()),
+        Key::End if app_cursor => return Some(b"\x1bOF".to_vec()),
         Key::End => return Some(b"\x1b[F".to_vec()),
         Key::PageUp => return Some(b"\x1b[5~".to_vec()),
         Key::PageDown => return Some(b"\x1b[6~".to_vec()),
-        Key::ArrowUp => return Some(arrow_key(b'A', modifiers)),
-        Key::ArrowDown => return Some(arrow_key(b'B', modifiers)),
-        Key::ArrowRight => return Some(arrow_key(b'C', modifiers)),
-        Key::ArrowLeft => return Some(arrow_key(b'D', modifiers)),
+        Key::ArrowUp => return Some(arrow_key(b'A', modifiers, app_cursor)),
+        Key::ArrowDown => return Some(arrow_key(b'B', modifiers, app_cursor)),
+        Key::ArrowRight => return Some(arrow_key(b'C', modifiers, app_cursor)),
+        Key::ArrowLeft => return Some(arrow_key(b'D', modifiers, app_cursor)),
         Key::F1 => return Some(b"\x1bOP".to_vec()),
         Key::F2 => return Some(b"\x1bOQ".to_vec()),
         Key::F3 => return Some(b"\x1bOR".to_vec()),
@@ -295,10 +305,16 @@ fn key_to_char(key: &Key) -> Option<char> {
 }
 
 /// Build an arrow-key escape sequence with modifier parameters.
-fn arrow_key(dir: u8, modifiers: &Modifiers) -> Vec<u8> {
+///
+/// In application cursor mode (no extra modifiers), arrows use SS3: `\x1bOA`.
+/// With modifiers or in normal mode, arrows use CSI: `\x1b[A` or `\x1b[1;2A`.
+fn arrow_key(dir: u8, modifiers: &Modifiers, app_cursor: bool) -> Vec<u8> {
     let modifier = modifier_param(modifiers);
     if modifier > 1 {
+        // Modifiers always use CSI format, even in app cursor mode.
         format!("\x1b[1;{modifier}{}", dir as char).into_bytes()
+    } else if app_cursor {
+        vec![0x1b, b'O', dir]
     } else {
         vec![0x1b, b'[', dir]
     }

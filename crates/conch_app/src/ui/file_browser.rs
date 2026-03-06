@@ -10,11 +10,13 @@ pub struct FileBrowserState {
     pub local_path_edit: String,
     pub local_back_stack: Vec<PathBuf>,
     pub local_forward_stack: Vec<PathBuf>,
+    pub local_selected: Option<usize>,
     pub remote_path: Option<PathBuf>,
     pub remote_entries: Vec<FileListEntry>,
     pub remote_path_edit: String,
     pub remote_back_stack: Vec<PathBuf>,
     pub remote_forward_stack: Vec<PathBuf>,
+    pub remote_selected: Option<usize>,
 }
 
 /// A single file or directory entry.
@@ -49,11 +51,13 @@ impl Default for FileBrowserState {
             local_path_edit,
             local_back_stack: Vec::new(),
             local_forward_stack: Vec::new(),
+            local_selected: None,
             remote_path: None,
             remote_entries: Vec::new(),
             remote_path_edit: String::new(),
             remote_back_stack: Vec::new(),
             remote_forward_stack: Vec::new(),
+            remote_selected: None,
         }
     }
 }

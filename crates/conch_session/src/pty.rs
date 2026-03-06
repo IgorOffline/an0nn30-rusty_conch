@@ -50,12 +50,17 @@ impl LocalSession {
     /// Spawn a new local PTY session.
     ///
     /// If `shell` is `Some`, the given program + args are used instead of `$SHELL`.
+    /// `extra_env` is merged on top of the defaults (`TERM`, `COLORTERM`), so
+    /// user-specified values override the built-in ones.
+    /// `term_config` allows setting cursor style and other terminal options.
     pub fn new(
         cols: u16,
         rows: u16,
         cell_width: u16,
         cell_height: u16,
         shell: Option<tty::Shell>,
+        extra_env: &HashMap<String, String>,
+        term_config: term::Config,
     ) -> Result<Self> {
         let window_size = WindowSize {
             num_lines: rows,
@@ -67,7 +72,6 @@ impl LocalSession {
         let (event_proxy, event_rx) = EventProxy::new();
 
         // Terminal state
-        let term_config = term::Config::default();
         let term_size = TermSize {
             columns: cols as usize,
             lines: rows as usize,
@@ -75,13 +79,16 @@ impl LocalSession {
         let term = Term::new(term_config, &term_size, event_proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        // PTY options
+        // PTY options — defaults first, then user overrides.
         let mut env = HashMap::new();
         env.insert("TERM".into(), "xterm-256color".into());
         env.insert("COLORTERM".into(), "truecolor".into());
+        for (k, v) in extra_env {
+            env.insert(k.clone(), v.clone());
+        }
         let options = tty::Options {
             shell,
-            working_directory: None,
+            working_directory: Some(dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))),
             drain_on_exit: true,
             env,
             #[cfg(target_os = "windows")]

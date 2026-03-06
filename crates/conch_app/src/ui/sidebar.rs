@@ -14,7 +14,7 @@ use egui::{
 use egui_extras::{TableBuilder, Column};
 
 use crate::icons::{Icon, IconCache};
-use crate::ui::file_browser::{FileBrowserState, display_size, format_modified};
+use crate::ui::file_browser::{FileBrowserState, FileListEntry, display_size, format_modified};
 
 /// Which tab is active in the left sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -39,9 +39,28 @@ pub enum SidebarAction {
     GoForwardLocal,
     GoBackRemote,
     GoForwardRemote,
+    /// Upload a local file to the current remote directory.
+    Upload { local_path: PathBuf, remote_dir: PathBuf },
+    /// Download a remote file to the current local directory.
+    Download { remote_path: PathBuf, local_dir: PathBuf },
+    /// Cancel an in-progress transfer by filename.
+    CancelTransfer(String),
     RunPlugin(usize),
     StopPlugin(usize),
     RefreshPlugins,
+}
+
+/// Transfer progress shown in the sidebar.
+#[derive(Clone)]
+pub struct TransferStatus {
+    pub filename: String,
+    pub upload: bool,
+    pub done: bool,
+    pub error: Option<String>,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
+    /// Set to true to cancel this transfer.
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Width of the vertical tab strip in pixels.
@@ -69,8 +88,9 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
             let base_bg = style.visuals.panel_fill;
             let darker_bg = darken_color(base_bg, 18);
             let accent_color = Color32::from_rgb(47, 101, 202);
-            let text_color = style.visuals.text_color();
-            let font_id = FontId::new(11.0, FontFamily::Proportional);
+            // Strong text: black in light mode, white in dark mode.
+            let text_color = style.visuals.strong_text_color();
+            let font_id = FontId::new(13.0, FontFamily::Proportional);
 
             let tab_height = panel_rect.height() / TABS.len() as f32;
 
@@ -187,6 +207,9 @@ pub fn show_sidebar_content(
     plugins: &[PluginDisplayInfo],
     plugin_output: &[String],
     selected_plugin: &mut Option<usize>,
+    transfers: &[TransferStatus],
+    plugin_search_query: &mut String,
+    plugin_search_focus: &mut bool,
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
 
@@ -194,13 +217,16 @@ pub fn show_sidebar_content(
         .resizable(true)
         .default_width(200.0)
         .min_width(100.0)
+        .max_width(400.0)
         .show(ctx, |ui| {
-            // Fill the panel width so content never shrinks the panel.
-            ui.set_min_width(ui.available_width());
+            // Lock content to the panel width — never grow wider.
+            let w = ui.available_width();
+            ui.set_min_width(w);
+            ui.set_max_width(w);
 
             action = match active_tab {
-                SidebarTab::Files => show_files_panel(ui, file_browser_state, icons),
-                SidebarTab::Plugins => show_plugins_panel(ui, plugins, plugin_output, selected_plugin, icons),
+                SidebarTab::Files => show_files_panel(ui, file_browser_state, icons, transfers),
+                SidebarTab::Plugins => show_plugins_panel(ui, plugins, plugin_output, selected_plugin, icons, plugin_search_query, plugin_search_focus),
             };
         });
 
@@ -213,6 +239,8 @@ fn show_plugins_panel(
     output: &[String],
     selected: &mut Option<usize>,
     icons: Option<&IconCache>,
+    search_query: &mut String,
+    search_focus: &mut bool,
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
     let dark_mode = ui.visuals().dark_mode;
@@ -237,11 +265,50 @@ fn show_plugins_panel(
     });
     ui.separator();
 
+    // Search bar
+    let search_resp = ui.add(
+        crate::ui::widgets::text_edit(search_query)
+            .hint_text("Search plugins...")
+            .desired_width(ui.available_width()),
+    );
+    if *search_focus {
+        search_resp.request_focus();
+        *search_focus = false;
+    }
+
+    // Build filtered list: (original_index, &PluginDisplayInfo)
+    let query_lower = search_query.to_lowercase();
+    let filtered: Vec<(usize, &PluginDisplayInfo)> = plugins
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            query_lower.is_empty()
+                || p.name.to_lowercase().contains(&query_lower)
+                || p.description.to_lowercase().contains(&query_lower)
+        })
+        .collect();
+
+    // Enter on search bar → run first matching plugin
+    if search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if let Some(&(orig_idx, plugin)) = filtered.first() {
+            *selected = Some(orig_idx);
+            if plugin.is_running {
+                action = SidebarAction::StopPlugin(orig_idx);
+            } else {
+                action = SidebarAction::RunPlugin(orig_idx);
+            }
+        }
+    }
+
+    ui.add_space(2.0);
+
     if plugins.is_empty() {
         ui.weak("No plugins found");
         ui.add_space(4.0);
         ui.weak("Place .lua files in:");
         ui.small("~/.config/conch/plugins/");
+    } else if filtered.is_empty() {
+        ui.weak("No matching plugins");
     } else {
         // Clamp selection if plugin list changed.
         if let Some(sel) = *selected {
@@ -261,7 +328,7 @@ fn show_plugins_panel(
             .id_salt("plugin_list")
             .max_height(list_height)
             .show(ui, |ui| {
-                for (i, plugin) in plugins.iter().enumerate() {
+                for &(i, plugin) in &filtered {
                     let is_selected = *selected == Some(i);
 
                     let resp = ui.push_id(i, |ui| {
@@ -270,7 +337,6 @@ fn show_plugins_panel(
                             Sense::click(),
                         );
 
-                        // Layout the text to measure its height.
                         let name_galley = ui.painter().layout_no_wrap(
                             plugin.name.clone(),
                             FontId::new(12.0, FontFamily::Proportional),
@@ -293,7 +359,6 @@ fn show_plugins_panel(
                             + desc_galley.as_ref().map_or(0.0, |g| g.size().y + 2.0)
                             + padding;
 
-                        // Re-allocate with the actual height.
                         let row_rect = Rect::from_min_size(
                             rect.min,
                             Vec2::new(rect.width(), total_h),
@@ -301,7 +366,6 @@ fn show_plugins_panel(
                         ui.allocate_rect(row_rect, Sense::hover());
                         let resp = ui.interact(row_rect, ui.id().with(("plugin_row", i)), Sense::click());
 
-                        // Draw highlight.
                         if is_selected {
                             ui.painter().rect_filled(
                                 row_rect,
@@ -316,7 +380,6 @@ fn show_plugins_panel(
                             );
                         }
 
-                        // Running indicator.
                         let name_text = if plugin.is_running {
                             format!("{} (running)", plugin.name)
                         } else {
@@ -345,7 +408,6 @@ fn show_plugins_panel(
                         ).size().y;
 
                         if let Some(desc_g) = desc_galley {
-                            // Re-layout with correct color for selection.
                             let desc_galley2 = ui.painter().layout(
                                 plugin.description.clone(),
                                 FontId::new(10.0, FontFamily::Proportional),
@@ -368,7 +430,6 @@ fn show_plugins_panel(
                         resp
                     }).inner;
 
-                    // Click to select, double-click to run.
                     if resp.clicked() {
                         *selected = Some(i);
                     }
@@ -385,7 +446,7 @@ fn show_plugins_panel(
                 }
             });
 
-        // Button bar: single Run / Stop button for the selected plugin.
+        // Button bar
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -435,15 +496,20 @@ fn show_files_panel(
     ui: &mut egui::Ui,
     state: &mut FileBrowserState,
     icons: Option<&IconCache>,
+    transfers: &[TransferStatus],
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
 
     let available = ui.available_height();
     let remote_connected = state.remote_path.is_some();
 
+    // Reserve space for transfer buttons, transfer progress, etc.
+    let transfer_height = if transfers.is_empty() { 0.0 } else { 100.0 };
+    let button_bar_height = if remote_connected { 28.0 } else { 0.0 };
+
     if remote_connected {
-        // Both panes active — split evenly.
-        let pane_height = (available - 8.0) / 2.0;
+        // Both panes active — split evenly around a button bar.
+        let pane_height = ((available - button_bar_height - 12.0 - transfer_height) / 2.0).max(60.0);
 
         ui.allocate_ui(Vec2::new(ui.available_width(), pane_height), |ui| {
             ui.push_id("remote_pane", |ui| {
@@ -454,7 +520,48 @@ fn show_files_panel(
             });
         });
 
-        ui.separator();
+        // Upload / Download button bar between the panes.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+
+            // Upload: selected local entry → current remote dir.
+            let can_upload = state.local_selected.is_some() && state.remote_path.is_some();
+            if ui
+                .add_enabled(can_upload, egui::Button::new("\u{2191} Upload").small())
+                .on_hover_text("Upload selected local item to remote directory")
+                .clicked()
+            {
+                if let (Some(idx), Some(remote_dir)) =
+                    (state.local_selected, state.remote_path.clone())
+                {
+                    if let Some(entry) = state.local_entries.get(idx) {
+                        action = SidebarAction::Upload {
+                            local_path: entry.path.clone(),
+                            remote_dir,
+                        };
+                    }
+                }
+            }
+
+            // Download: selected remote entry → current local dir.
+            let can_download = state.remote_selected.is_some();
+            if ui
+                .add_enabled(can_download, egui::Button::new("\u{2193} Download").small())
+                .on_hover_text("Download selected remote item to local directory")
+                .clicked()
+            {
+                if let Some(idx) = state.remote_selected {
+                    if let Some(entry) = state.remote_entries.get(idx) {
+                        action = SidebarAction::Download {
+                            remote_path: entry.path.clone(),
+                            local_dir: state.local_path.clone(),
+                        };
+                    }
+                }
+            }
+        });
+        ui.add_space(2.0);
 
         ui.allocate_ui(Vec2::new(ui.available_width(), pane_height), |ui| {
             ui.push_id("local_pane", |ui| {
@@ -474,6 +581,84 @@ fn show_files_panel(
         });
     }
 
+    // Transfer progress area at the bottom.
+    if !transfers.is_empty() {
+        ui.separator();
+        ui.small("Transfers");
+        egui::ScrollArea::vertical()
+            .id_salt("transfer_progress")
+            .max_height(100.0)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for ts in transfers {
+                    let arrow = if ts.upload { "\u{2191}" } else { "\u{2193}" };
+                    if ts.done {
+                        let (label, color) = if let Some(e) = &ts.error {
+                            (format!("{arrow} {} — {e}", ts.filename), Color32::from_rgb(255, 100, 100))
+                        } else {
+                            (
+                                format!("{arrow} {} — {} done", ts.filename, display_size(ts.total_bytes)),
+                                Color32::from_rgb(100, 200, 100),
+                            )
+                        };
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(label).size(10.0).color(color),
+                        ).truncate());
+                    } else {
+                        // In-progress: filename row with cancel button.
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(format!("{arrow} {}", ts.filename))
+                                    .size(10.0),
+                            ).truncate());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .add(egui::Button::new(
+                                        egui::RichText::new("\u{2715}").size(9.0),
+                                    ).small().frame(false))
+                                    .on_hover_text("Cancel transfer")
+                                    .clicked()
+                                {
+                                    action = SidebarAction::CancelTransfer(ts.filename.clone());
+                                }
+                            });
+                        });
+                        // Thin progress bar + size label.
+                        let frac = if ts.total_bytes > 0 {
+                            ts.bytes_transferred as f32 / ts.total_bytes as f32
+                        } else {
+                            0.0
+                        };
+                        let size_text = format!(
+                            "{} / {}",
+                            display_size(ts.bytes_transferred),
+                            display_size(ts.total_bytes),
+                        );
+                        ui.horizontal(|ui| {
+                            let bar_width = (ui.available_width() - 90.0).max(20.0);
+                            let bar_height = 6.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                Vec2::new(bar_width, bar_height),
+                                Sense::hover(),
+                            );
+                            let track_color = ui.visuals().widgets.inactive.bg_fill;
+                            ui.painter().rect_filled(rect, 3.0, track_color);
+                            if frac > 0.0 {
+                                let fill_rect = Rect::from_min_size(
+                                    rect.min,
+                                    Vec2::new(rect.width() * frac, bar_height),
+                                );
+                                let accent = ui.visuals().selection.bg_fill;
+                                ui.painter().rect_filled(fill_rect, 3.0, accent);
+                            }
+                            ui.label(egui::RichText::new(size_text).size(9.0).weak());
+                        });
+                        ui.add_space(2.0);
+                    }
+                }
+            });
+    }
+
     action
 }
 
@@ -485,19 +670,20 @@ fn show_file_pane(
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
 
-    use crate::ui::file_browser::FileListEntry;
-    let (label, entries, current_path, path_edit): (&str, &[FileListEntry], Option<&PathBuf>, &mut String) = match kind {
+    let (label, entries, current_path, path_edit, selected): (&str, &[FileListEntry], Option<&PathBuf>, &mut String, &mut Option<usize>) = match kind {
         PaneKind::Remote => (
             "Remote",
             &state.remote_entries as &[_],
             state.remote_path.as_ref(),
             &mut state.remote_path_edit,
+            &mut state.remote_selected,
         ),
         PaneKind::Local => (
             "Local",
             &state.local_entries as &[_],
             Some(&state.local_path),
             &mut state.local_path_edit,
+            &mut state.local_selected,
         ),
     };
 
@@ -511,10 +697,6 @@ fn show_file_pane(
         return action;
     }
 
-    // Toolbar + path edit — all on one row, vertically centered.
-    // Layout: [back] [forward] [path textbox] [home] [refresh]
-    // Use right-to-left outer layout so home/refresh consume exact space from the
-    // right edge, then a nested left-to-right layout fills the rest — no guessing.
     let dark_mode = ui.visuals().dark_mode;
     let (back_stack, forward_stack) = match kind {
         PaneKind::Local => (&state.local_back_stack, &state.local_forward_stack),
@@ -561,7 +743,6 @@ fn show_file_pane(
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.add_space(2.0);
 
-            // Back button
             back_clicked = if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::GoPrevious, dark_mode)) {
                 let btn = ui.add_enabled(has_back, egui::ImageButton::new(img).frame(false));
                 btn.on_hover_text("Back").clicked()
@@ -570,7 +751,6 @@ fn show_file_pane(
                 btn.on_hover_text("Back").clicked()
             };
 
-            // Forward button
             forward_clicked = if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::GoNext, dark_mode)) {
                 let btn = ui.add_enabled(has_forward, egui::ImageButton::new(img).frame(false));
                 btn.on_hover_text("Forward").clicked()
@@ -579,7 +759,6 @@ fn show_file_pane(
                 btn.on_hover_text("Forward").clicked()
             };
 
-            // Path edit field — fills all remaining space exactly.
             let response = ui.add(
                 crate::ui::widgets::text_edit(path_edit)
                     .desired_width(ui.available_width()),
@@ -622,16 +801,16 @@ fn show_file_pane(
         }
     }
 
-    // File table with aligned, resizable columns
+    // File table
     let status_bar_height = 18.0;
     let table_height = (ui.available_height() - status_bar_height).max(0.0);
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .max_scroll_height(table_height)
-        .column(Column::initial(100.0).at_least(60.0).resizable(true))  // Name
-        .column(Column::auto().at_least(40.0).resizable(true))         // Size
-        .column(Column::remainder().at_least(70.0))                    // Modified — fills remaining
+        .column(Column::initial(100.0).at_least(60.0).resizable(true))
+        .column(Column::auto().at_least(40.0).resizable(true))
+        .column(Column::remainder().at_least(70.0))
         .header(16.0, |mut header| {
             header.col(|ui| { ui.label(egui::RichText::new("Name").strong().size(10.0)); });
             header.col(|ui| { ui.label(egui::RichText::new("Size").strong().size(10.0)); });
@@ -641,44 +820,43 @@ fn show_file_pane(
             body.rows(16.0, entries.len(), |mut row| {
                 let idx = row.index();
                 let entry = &entries[idx];
+                let is_selected = *selected == Some(idx);
 
-                // Name column: icon + clickable label
                 row.col(|ui| {
+                    // Draw selection highlight behind the entry.
+                    if is_selected {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.painter().rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
+                    }
+
                     let resp = ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
-                        if entry.is_dir {
-                            if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::SidebarFolder, dark_mode)) {
-                                ui.add(img.fit_to_exact_size(Vec2::new(14.0, 14.0)));
-                            }
-                        } else if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::File, dark_mode)) {
+                        let icon = if entry.is_dir { Icon::SidebarFolder } else { Icon::File };
+                        if let Some(img) = icons.and_then(|ic| ic.themed_image(icon, dark_mode)) {
                             ui.add(img.fit_to_exact_size(Vec2::new(14.0, 14.0)));
                         }
                         ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&entry.name).size(12.0),
-                            )
-                            .truncate()
-                            .sense(Sense::click()),
+                            egui::Label::new(egui::RichText::new(&entry.name).size(12.0))
+                                .truncate()
+                                .sense(Sense::click()),
                         )
                     }).inner;
 
+                    // Single click → select.
                     if resp.clicked() {
-                        if entry.is_dir {
-                            match kind {
-                                PaneKind::Local => {
-                                    action = SidebarAction::NavigateLocal(entry.path.clone());
-                                }
-                                PaneKind::Remote => {
-                                    action = SidebarAction::NavigateRemote(entry.path.clone());
-                                }
-                            }
-                        } else {
-                            action = SidebarAction::SelectFile(entry.path.clone());
+                        *selected = Some(idx);
+                    }
+
+                    // Double click on directory → navigate.
+                    if resp.double_clicked() && entry.is_dir {
+                        *selected = None;
+                        match kind {
+                            PaneKind::Local => action = SidebarAction::NavigateLocal(entry.path.clone()),
+                            PaneKind::Remote => action = SidebarAction::NavigateRemote(entry.path.clone()),
                         }
                     }
                 });
 
-                // Size column
                 row.col(|ui| {
                     let size_text = if entry.is_dir {
                         "<DIR>".to_string()
@@ -688,7 +866,6 @@ fn show_file_pane(
                     ui.label(egui::RichText::new(size_text).size(11.0).weak());
                 });
 
-                // Modified column
                 row.col(|ui| {
                     ui.add(
                         egui::Label::new(

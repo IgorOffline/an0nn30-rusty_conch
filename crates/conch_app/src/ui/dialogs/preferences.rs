@@ -39,6 +39,8 @@ pub struct PreferencesForm {
     // Appearance
     pub ui_font_family: String,
     pub ui_font_size: String,
+    /// "dark", "light", or "system"
+    pub appearance_mode: String,
 }
 
 impl PreferencesForm {
@@ -66,6 +68,7 @@ impl PreferencesForm {
             window_lines: format!("{}", config.window.dimensions.lines),
             ui_font_family: config.conch.ui.font_family.clone(),
             ui_font_size: format!("{}", config.conch.ui.font_size),
+            appearance_mode: config.colors.appearance_mode.clone(),
         }
     }
 
@@ -77,6 +80,7 @@ impl PreferencesForm {
             }
         }
         config.colors.theme = self.theme_name.clone();
+        config.colors.appearance_mode = self.appearance_mode.clone();
 
         // [terminal.shell]
         config.terminal.shell.program = self.shell_program.trim().to_string();
@@ -223,6 +227,29 @@ fn show_appearance_section(ui: &mut egui::Ui, form: &mut PreferencesForm) {
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
+            ui.label("Appearance:");
+            ui.horizontal(|ui| {
+                let is_system = form.appearance_mode == "system";
+                let dark_sel = !is_system && form.appearance_mode == "dark";
+                let light_sel = !is_system && form.appearance_mode == "light";
+
+                if ui.selectable_label(dark_sel, "Dark").clicked() {
+                    form.appearance_mode = "dark".into();
+                }
+                if ui.selectable_label(light_sel, "Light").clicked() {
+                    form.appearance_mode = "light".into();
+                }
+                ui.separator();
+                if ui.selectable_label(is_system, "Follow System").clicked() {
+                    form.appearance_mode = "system".into();
+                }
+            });
+            ui.end_row();
+
+            ui.separator();
+            ui.separator();
+            ui.end_row();
+
             ui.label("UI Font Family:");
             ui.add(text_edit(&mut form.ui_font_family).desired_width(200.0));
             ui.end_row();

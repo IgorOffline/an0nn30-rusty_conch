@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 /// A file entry returned by listing a directory.
@@ -154,25 +156,58 @@ impl SftpFileProvider {
         Ok(entries)
     }
 
+    /// Download a remote file to a local path with chunked progress reporting.
     pub async fn download(
         &self,
         remote_path: &Path,
         local_path: &Path,
         progress: Option<mpsc::UnboundedSender<TransferProgress>>,
+        cancel: &AtomicBool,
     ) -> Result<()> {
         let remote_str = remote_path.to_string_lossy().into_owned();
-        let data = self
+
+        // Open remote file and get its size.
+        let mut remote_file = self
             .sftp
-            .read(remote_str)
+            .open(&remote_str)
             .await
-            .with_context(|| format!("SFTP: failed to read {}", remote_path.display()))?;
-
-        let total = data.len() as u64;
-        tokio::fs::write(local_path, &data)
+            .with_context(|| format!("SFTP: failed to open {}", remote_path.display()))?;
+        let meta = remote_file
+            .metadata()
             .await
-            .with_context(|| format!("Failed to write {}", local_path.display()))?;
+            .with_context(|| format!("SFTP: failed to stat {}", remote_path.display()))?;
+        let total = meta.len();
 
-        if let Some(tx) = progress {
+        // Create local file.
+        let mut local_file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("Failed to create {}", local_path.display()))?;
+
+        let mut transferred: u64 = 0;
+        let mut buf = vec![0u8; 256 * 1024]; // 256 KB chunks
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("cancelled");
+            }
+            let n = remote_file.read(&mut buf).await
+                .with_context(|| format!("SFTP: read error on {}", remote_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            local_file.write_all(&buf[..n]).await
+                .with_context(|| format!("Failed to write {}", local_path.display()))?;
+            transferred += n as u64;
+            if let Some(tx) = &progress {
+                let _ = tx.send(TransferProgress {
+                    bytes_transferred: transferred,
+                    total_bytes: total,
+                });
+            }
+        }
+        local_file.flush().await?;
+
+        // Ensure final 100% progress is sent.
+        if let Some(tx) = &progress {
             let _ = tx.send(TransferProgress {
                 bytes_transferred: total,
                 total_bytes: total,
@@ -182,24 +217,56 @@ impl SftpFileProvider {
         Ok(())
     }
 
+    /// Upload a local file to a remote path with chunked progress reporting.
     pub async fn upload(
         &self,
         local_path: &Path,
         remote_path: &Path,
         progress: Option<mpsc::UnboundedSender<TransferProgress>>,
+        cancel: &AtomicBool,
     ) -> Result<()> {
-        let data = tokio::fs::read(local_path)
+        // Open local file and get its size.
+        let mut local_file = tokio::fs::File::open(local_path)
             .await
-            .with_context(|| format!("Failed to read {}", local_path.display()))?;
+            .with_context(|| format!("Failed to open {}", local_path.display()))?;
+        let local_meta = local_file.metadata().await
+            .with_context(|| format!("Failed to stat {}", local_path.display()))?;
+        let total = local_meta.len();
 
-        let total = data.len() as u64;
+        // Create remote file.
         let remote_str = remote_path.to_string_lossy().into_owned();
-        self.sftp
-            .write(remote_str, &data)
+        let mut remote_file = self
+            .sftp
+            .create(&remote_str)
             .await
-            .with_context(|| format!("SFTP: failed to write {}", remote_path.display()))?;
+            .with_context(|| format!("SFTP: failed to create {}", remote_path.display()))?;
 
-        if let Some(tx) = progress {
+        let mut transferred: u64 = 0;
+        let mut buf = vec![0u8; 256 * 1024]; // 256 KB chunks
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("cancelled");
+            }
+            let n = local_file.read(&mut buf).await
+                .with_context(|| format!("Failed to read {}", local_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            remote_file.write_all(&buf[..n]).await
+                .with_context(|| format!("SFTP: write error on {}", remote_path.display()))?;
+            transferred += n as u64;
+            if let Some(tx) = &progress {
+                let _ = tx.send(TransferProgress {
+                    bytes_transferred: transferred,
+                    total_bytes: total,
+                });
+            }
+        }
+        remote_file.shutdown().await
+            .with_context(|| format!("SFTP: failed to close {}", remote_path.display()))?;
+
+        // Ensure final 100% progress is sent.
+        if let Some(tx) = &progress {
             let _ = tx.send(TransferProgress {
                 bytes_transferred: total,
                 total_bytes: total,
@@ -249,6 +316,18 @@ impl SftpFileProvider {
 pub enum SftpCmd {
     /// List the given remote directory.
     List(PathBuf),
+    /// Upload a local file to a remote directory.
+    Upload {
+        local_path: PathBuf,
+        remote_dir: PathBuf,
+        cancel: Arc<AtomicBool>,
+    },
+    /// Download a remote file to a local directory.
+    Download {
+        remote_path: PathBuf,
+        local_dir: PathBuf,
+        cancel: Arc<AtomicBool>,
+    },
     /// Shut down the SFTP worker.
     Shutdown,
 }
@@ -260,12 +339,30 @@ pub struct SftpListing {
     pub home: PathBuf,
 }
 
+/// Events sent from the SFTP worker back to the UI.
+pub enum SftpEvent {
+    /// A directory listing completed.
+    Listing(SftpListing),
+    /// Incremental transfer progress update.
+    TransferProgress {
+        filename: String,
+        bytes_transferred: u64,
+        total_bytes: u64,
+    },
+    /// A file transfer completed (upload or download).
+    TransferComplete {
+        filename: String,
+        success: bool,
+        error: Option<String>,
+    },
+}
+
 /// Long-running async task that owns an `SftpFileProvider` and serves listing
-/// requests over channels.
+/// and transfer requests over channels.
 pub async fn run_sftp_worker(
     ssh_handle: Arc<russh::client::Handle<crate::ssh::client::ClientHandler>>,
     mut cmd_rx: mpsc::UnboundedReceiver<SftpCmd>,
-    result_tx: std::sync::mpsc::Sender<SftpListing>,
+    result_tx: std::sync::mpsc::Sender<SftpEvent>,
 ) {
     // Open an SFTP channel.
     let channel = match ssh_handle.channel_open_session().await {
@@ -299,27 +396,114 @@ pub async fn run_sftp_worker(
 
     // List home directory immediately.
     if let Ok(entries) = provider.list(&home).await {
-        let _ = result_tx.send(SftpListing {
+        let _ = result_tx.send(SftpEvent::Listing(SftpListing {
             path: home.clone(),
             entries,
             home: home.clone(),
-        });
+        }));
     }
 
     // Command loop.
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             SftpCmd::List(path) => {
-                match provider.list(&path).await {
+                // Resolve relative paths (e.g. ".") to absolute via SFTP canonicalize.
+                let resolved = if path.is_relative() {
+                    let p = path.to_string_lossy();
+                    match provider.sftp.canonicalize(p.as_ref()).await {
+                        Ok(abs) => PathBuf::from(abs),
+                        Err(_) => path.clone(),
+                    }
+                } else {
+                    path.clone()
+                };
+                match provider.list(&resolved).await {
                     Ok(entries) => {
-                        let _ = result_tx.send(SftpListing {
-                            path,
+                        let _ = result_tx.send(SftpEvent::Listing(SftpListing {
+                            path: resolved,
                             entries,
                             home: home.clone(),
+                        }));
+                    }
+                    Err(e) => {
+                        log::error!("SFTP: list failed for {}: {e}", resolved.display());
+                    }
+                }
+            }
+            SftpCmd::Upload { local_path, remote_dir, cancel } => {
+                let filename = local_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let remote_path = remote_dir.join(&filename);
+
+                // Progress channel: forward incremental updates to the UI.
+                let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<TransferProgress>();
+                let prog_result_tx = result_tx.clone();
+                let prog_filename = filename.clone();
+                let prog_handle = tokio::spawn(async move {
+                    while let Some(p) = prog_rx.recv().await {
+                        let _ = prog_result_tx.send(SftpEvent::TransferProgress {
+                            filename: prog_filename.clone(),
+                            bytes_transferred: p.bytes_transferred,
+                            total_bytes: p.total_bytes,
+                        });
+                    }
+                });
+
+                match provider.upload(&local_path, &remote_path, Some(prog_tx), &cancel).await {
+                    Ok(()) => {
+                        let _ = result_tx.send(SftpEvent::TransferComplete {
+                            filename,
+                            success: true,
+                            error: None,
                         });
                     }
                     Err(e) => {
-                        log::error!("SFTP: list failed for {}: {e}", path.display());
+                        let _ = result_tx.send(SftpEvent::TransferComplete {
+                            filename,
+                            success: false,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+                let _ = prog_handle.await;
+            }
+            SftpCmd::Download { remote_path, local_dir, cancel } => {
+                let filename = remote_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let local_path = local_dir.join(&filename);
+
+                // Progress channel: forward incremental updates to the UI.
+                let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<TransferProgress>();
+                let prog_result_tx = result_tx.clone();
+                let prog_filename = filename.clone();
+                let prog_handle = tokio::spawn(async move {
+                    while let Some(p) = prog_rx.recv().await {
+                        let _ = prog_result_tx.send(SftpEvent::TransferProgress {
+                            filename: prog_filename.clone(),
+                            bytes_transferred: p.bytes_transferred,
+                            total_bytes: p.total_bytes,
+                        });
+                    }
+                });
+
+                match provider.download(&remote_path, &local_path, Some(prog_tx), &cancel).await {
+                    Ok(()) => {
+                        let _ = result_tx.send(SftpEvent::TransferComplete {
+                            filename,
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = result_tx.send(SftpEvent::TransferComplete {
+                            filename,
+                            success: false,
+                            error: Some(e.to_string()),
+                        });
                     }
                 }
             }

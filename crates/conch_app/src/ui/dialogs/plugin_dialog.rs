@@ -79,11 +79,13 @@ pub enum ActivePluginDialog {
         title: String,
         fields: Vec<FormFieldState>,
         resp_tx: mpsc::UnboundedSender<PluginResponse>,
+        focus_first: bool,
     },
     Prompt {
         message: String,
         input: String,
         resp_tx: mpsc::UnboundedSender<PluginResponse>,
+        focus_first: bool,
     },
     Confirm {
         message: String,
@@ -117,11 +119,11 @@ pub enum ActivePluginDialog {
 /// (submitted or cancelled) and should be removed.
 pub fn show_plugin_dialog(ctx: &egui::Context, dialog: &mut ActivePluginDialog) -> bool {
     match dialog {
-        ActivePluginDialog::Form { title, fields, resp_tx } => {
-            show_form(ctx, title, fields, resp_tx)
+        ActivePluginDialog::Form { title, fields, resp_tx, focus_first } => {
+            show_form(ctx, title, fields, resp_tx, focus_first)
         }
-        ActivePluginDialog::Prompt { message, input, resp_tx } => {
-            show_prompt(ctx, message, input, resp_tx)
+        ActivePluginDialog::Prompt { message, input, resp_tx, focus_first } => {
+            show_prompt(ctx, message, input, resp_tx, focus_first)
         }
         ActivePluginDialog::Confirm { message, resp_tx } => {
             show_confirm(ctx, message, resp_tx)
@@ -146,8 +148,10 @@ fn show_form(
     title: &str,
     fields: &mut [FormFieldState],
     resp_tx: &mpsc::UnboundedSender<PluginResponse>,
+    focus_first: &mut bool,
 ) -> bool {
     let mut closed = false;
+    let want_focus = *focus_first;
 
     egui::Window::new(title)
         .collapsible(false)
@@ -155,6 +159,7 @@ fn show_form(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .min_size([420.0, 200.0])
         .show(ctx, |ui| {
+            let mut first_focused = false;
             egui::Grid::new("plugin_form_grid")
                 .num_columns(2)
                 .spacing([8.0, 6.0])
@@ -163,19 +168,27 @@ fn show_form(
                         match field {
                             FormFieldState::Text { label, value, .. } => {
                                 ui.label(label.as_str());
-                                ui.add(
+                                let resp = ui.add(
                                     crate::ui::widgets::text_edit(value)
                                         .desired_width(250.0),
                                 );
+                                if want_focus && !first_focused {
+                                    resp.request_focus();
+                                    first_focused = true;
+                                }
                                 ui.end_row();
                             }
                             FormFieldState::Password { label, value, .. } => {
                                 ui.label(label.as_str());
-                                ui.add(
+                                let resp = ui.add(
                                     egui::TextEdit::singleline(value)
                                         .password(true)
                                         .desired_width(250.0),
                                 );
+                                if want_focus && !first_focused {
+                                    resp.request_focus();
+                                    first_focused = true;
+                                }
                                 ui.end_row();
                             }
                             FormFieldState::ComboBox {
@@ -220,6 +233,9 @@ fn show_form(
                         }
                     }
                 });
+            if first_focused {
+                *focus_first = false;
+            }
 
             ui.add_space(8.0);
             ui.separator();
@@ -252,6 +268,7 @@ fn show_prompt(
     message: &str,
     input: &mut String,
     resp_tx: &mpsc::UnboundedSender<PluginResponse>,
+    focus_first: &mut bool,
 ) -> bool {
     let mut closed = false;
 
@@ -266,6 +283,10 @@ fn show_prompt(
             let resp = ui.add(
                 crate::ui::widgets::text_edit(input).desired_width(ui.available_width()),
             );
+            if *focus_first {
+                resp.request_focus();
+                *focus_first = false;
+            }
             let enter = resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
 

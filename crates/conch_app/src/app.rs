@@ -6,13 +6,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use alacritty_terminal::event::Event as TermEvent;
 use conch_core::{config, ssh_config};
 use conch_core::models::SavedTunnel;
-use conch_session::shell_integration;
-use conch_session::{LocalSession, SftpCmd, SftpListing, SshSession, TunnelManager, run_sftp_worker};
+use conch_session::{LocalSession, SftpCmd, SftpEvent, SshSession, TunnelManager, run_sftp_worker};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
@@ -75,10 +75,14 @@ struct PendingSsh {
     rx: std::sync::mpsc::Receiver<Result<SshSession, String>>,
 }
 
-/// Tracks two-phase SSH shell integration injection.
-struct SshInjectionState {
-    connect_time: Instant,
-    phase1_sent: bool,
+/// Display info for a pending SSH connection (shown in the connecting tab).
+struct PendingSshInfo {
+    /// Short name for the tab title and heading, e.g. "dustin-vm"
+    label: String,
+    /// Detail line, e.g. "dustin@lab.nexxuscraft.com:22"
+    detail: String,
+    /// When the connection was initiated (for the bouncing progress bar).
+    started: Instant,
 }
 
 /// Mouse text selection state for the active terminal.
@@ -144,27 +148,15 @@ pub struct ConchApp {
 
     // Async SSH connection results
     pending_ssh_connections: Vec<PendingSsh>,
+    pending_ssh_info: HashMap<Uuid, PendingSshInfo>,
 
-    // SFTP worker state
+    // SFTP worker state (auto-spawned on SSH connect, drives sidebar remote pane)
     sftp_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<SftpCmd>>,
-    sftp_result_rx: Option<std::sync::mpsc::Receiver<SftpListing>>,
+    sftp_result_rx: Option<std::sync::mpsc::Receiver<SftpEvent>>,
     sftp_session_id: Option<Uuid>,
     remote_home: Option<PathBuf>,
-
-    // CWD tracking per SSH session (OSC 7)
-    ssh_cwd_receivers: HashMap<Uuid, std::sync::mpsc::Receiver<String>>,
-    session_last_cwd: HashMap<Uuid, PathBuf>,
     last_active_tab: Option<Uuid>,
-
-    // Two-phase SSH shell integration injection:
-    // Phase 1 (400ms): send `stty -echo` to suppress echo
-    // Phase 2 (600ms): send function definition + `stty echo` + cleanup escapes
-    ssh_pending_injection: HashMap<Uuid, SshInjectionState>,
-
-    // Local session CWD polling via macOS proc_pidinfo
-    local_pids: HashMap<Uuid, u32>,
-    local_last_cwd: HashMap<Uuid, PathBuf>,
-    last_cwd_poll: Instant,
+    transfers: Vec<sidebar::TransferStatus>,
 
     // Icons
     icon_cache: Option<IconCache>,
@@ -173,6 +165,13 @@ pub struct ConchApp {
     session_panel_state: SessionPanelState,
 
     // Transient UI state
+    use_native_menu: bool,
+    /// The right sidebar was opened temporarily for quick connect (Cmd+/).
+    quick_connect_opened_sidebar: bool,
+    /// The left sidebar was opened temporarily for plugin search (Cmd+Shift+P).
+    plugin_search_opened_sidebar: bool,
+    plugin_search_query: String,
+    plugin_search_focus: bool,
     show_about: bool,
     quit_requested: bool,
     style_applied: bool,
@@ -216,17 +215,16 @@ impl ConchApp {
         let initial_path = state.file_browser.local_path.clone();
         state.file_browser.local_entries = load_local_entries(&initial_path);
 
-        let mut local_pids = HashMap::new();
-        if let Some((id, pid)) = open_local_terminal(&mut state) {
-            local_pids.insert(id, pid);
-        }
+        let _ = open_local_terminal(&mut state);
 
         // Discover plugins — check both native config dir and legacy ~/.config/conch/
         let discovered_plugins = scan_plugin_dirs();
 
-        // Set up native macOS menu bar.
+        // Set up native macOS menu bar (if enabled in config).
+        let use_native_menu = cfg!(target_os = "macos")
+            && state.user_config.conch.ui.native_menu_bar;
         #[cfg(target_os = "macos")]
-        {
+        if use_native_menu {
             let names: Vec<String> = discovered_plugins.iter().map(|p| p.name.clone()).collect();
             crate::macos_menu::setup_menu_bar(&names);
         }
@@ -244,19 +242,20 @@ impl ConchApp {
             last_rows: DEFAULT_ROWS,
             selection: Selection::default(),
             pending_ssh_connections: Vec::new(),
+            pending_ssh_info: HashMap::new(),
             sftp_cmd_tx: None,
             sftp_result_rx: None,
             sftp_session_id: None,
             remote_home: None,
-            ssh_cwd_receivers: HashMap::new(),
-            session_last_cwd: HashMap::new(),
             last_active_tab: None,
-            ssh_pending_injection: HashMap::new(),
-            local_pids,
-            local_last_cwd: HashMap::new(),
-            last_cwd_poll: Instant::now(),
+            transfers: Vec::new(),
             icon_cache: None,
             session_panel_state: SessionPanelState::default(),
+            use_native_menu,
+            quick_connect_opened_sidebar: false,
+            plugin_search_opened_sidebar: false,
+            plugin_search_query: String::new(),
+            plugin_search_focus: false,
             show_about: false,
             quit_requested: false,
             style_applied: false,
@@ -296,9 +295,10 @@ impl ConchApp {
             self.remove_session(id);
         }
 
-        // Auto-open a local terminal if all sessions closed.
+        // Quit when the last session exits.
         if self.state.sessions.is_empty() {
-            self.open_local_tab();
+            self.quit_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
         // Poll pending SSH connections.
@@ -320,32 +320,28 @@ impl ConchApp {
         // Remove in reverse order to keep indices valid.
         for (i, id, ssh_opt) in completed.into_iter().rev() {
             self.pending_ssh_connections.remove(i);
+            self.pending_ssh_info.remove(&id);
             if let Some(mut ssh_session) = ssh_opt {
-                // Spawn SFTP worker for this SSH session.
+                let event_rx = ssh_session.take_event_rx();
+
+                // Spawn SFTP worker for the new SSH session.
                 let handle = Arc::clone(ssh_session.ssh_handle());
-                // Shut down any existing SFTP worker.
-                if let Some(tx) = self.sftp_cmd_tx.take() {
-                    let _ = tx.send(SftpCmd::Shutdown);
-                }
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (result_tx, result_rx) = std::sync::mpsc::channel();
                 self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx));
+
+                // Request initial listing of the remote home directory.
+                let _ = cmd_tx.send(SftpCmd::List(PathBuf::from(".")));
+
+                // Tear down any previous SFTP worker.
+                if let Some(old_tx) = self.sftp_cmd_tx.take() {
+                    let _ = old_tx.send(SftpCmd::Shutdown);
+                }
                 self.sftp_cmd_tx = Some(cmd_tx);
                 self.sftp_result_rx = Some(result_rx);
                 self.sftp_session_id = Some(id);
+                self.remote_home = None;
 
-                // Take the CWD receiver for OSC 7 tracking.
-                if let Some(cwd_rx) = ssh_session.take_cwd_rx() {
-                    self.ssh_cwd_receivers.insert(id, cwd_rx);
-                }
-
-                // Schedule two-phase shell integration injection.
-                self.ssh_pending_injection.insert(id, SshInjectionState {
-                    connect_time: Instant::now(),
-                    phase1_sent: false,
-                });
-
-                let event_rx = ssh_session.take_event_rx();
                 let session = Session {
                     id,
                     title: "SSH".into(),
@@ -354,130 +350,124 @@ impl ConchApp {
                     event_rx,
                 };
                 self.state.sessions.insert(id, session);
-                self.state.tab_order.push(id);
-                self.state.active_tab = Some(id);
-            }
-        }
-
-        // Poll SFTP results.
-        if let Some(rx) = &self.sftp_result_rx {
-            while let Ok(listing) = rx.try_recv() {
-                self.remote_home = Some(listing.home);
-                let path_str = listing.path.to_string_lossy().into_owned();
-                self.state.file_browser.remote_path = Some(listing.path);
-                self.state.file_browser.remote_path_edit = path_str;
-                self.state.file_browser.remote_entries =
-                    listing.entries.into_iter().map(Into::into).collect();
-            }
-        }
-
-        // Two-phase SSH shell integration injection.
-        // Phase 1 (400ms): `stty -echo` to suppress terminal echo
-        // Phase 2 (600ms): function definition + `stty echo` + printf cleanup
-        const PHASE1_DELAY_MS: u128 = 400;
-        const PHASE2_DELAY_MS: u128 = 600;
-        let now = Instant::now();
-        let mut phase1_ids = Vec::new();
-        let mut phase2_ids = Vec::new();
-        for (id, inj) in &self.ssh_pending_injection {
-            let elapsed = now.duration_since(inj.connect_time).as_millis();
-            if !inj.phase1_sent && elapsed >= PHASE1_DELAY_MS {
-                phase1_ids.push(*id);
-            } else if inj.phase1_sent && elapsed >= PHASE2_DELAY_MS {
-                phase2_ids.push(*id);
-            }
-        }
-        for id in phase1_ids {
-            if let Some(session) = self.state.sessions.get(&id) {
-                session.backend.write(b"stty -echo\n");
-            }
-            if let Some(inj) = self.ssh_pending_injection.get_mut(&id) {
-                inj.phase1_sent = true;
-            }
-        }
-        for id in phase2_ids {
-            self.ssh_pending_injection.remove(&id);
-            if let Some(session) = self.state.sessions.get(&id) {
-                session.backend.write(
-                    shell_integration::ssh_osc7_injection().as_bytes(),
-                );
-            }
-        }
-
-        // Poll local session CWD via macOS proc_pidinfo (~1 second interval).
-        #[cfg(target_os = "macos")]
-        {
-            const CWD_POLL_INTERVAL_MS: u128 = 1000;
-            if now.duration_since(self.last_cwd_poll).as_millis() >= CWD_POLL_INTERVAL_MS {
-                self.last_cwd_poll = now;
-                if let Some(id) = self.state.active_tab {
-                    if let Some(&pid) = self.local_pids.get(&id) {
-                        if let Some(cwd) = shell_integration::get_process_cwd(pid) {
-                            let changed = self
-                                .local_last_cwd
-                                .get(&id)
-                                .map_or(true, |prev| *prev != cwd);
-                            if changed {
-                                self.state.file_browser.local_entries =
-                                    load_local_entries(&cwd);
-                                self.state.file_browser.local_path_edit =
-                                    cwd.to_string_lossy().into_owned();
-                                self.state.file_browser.local_path = cwd.clone();
-                                self.local_last_cwd.insert(id, cwd);
-                            }
-                        }
-                    }
+                // Tab already exists in tab_order from start_ssh_connect.
+            } else {
+                // Connection failed — remove the tab.
+                self.state.tab_order.retain(|&tab_id| tab_id != id);
+                if self.state.active_tab == Some(id) {
+                    self.state.active_tab = self.state.tab_order.last().copied();
                 }
             }
         }
 
-        // Poll CWD updates from OSC 7 scanning for the active SSH session.
-        if let Some(id) = self.state.active_tab {
-            if let Some(rx) = self.ssh_cwd_receivers.get(&id) {
-                let mut latest_cwd = None;
-                while let Ok(cwd_str) = rx.try_recv() {
-                    latest_cwd = Some(cwd_str);
-                }
-                if let Some(cwd_str) = latest_cwd {
-                    let cwd = PathBuf::from(&cwd_str);
-                    self.session_last_cwd.insert(id, cwd.clone());
-                    if let Some(tx) = &self.sftp_cmd_tx {
-                        let _ = tx.send(SftpCmd::List(cwd));
-                    }
-                }
-            }
-        }
-
-        // Detect tab switches and update SFTP worker / remote pane accordingly.
+        // Manage SFTP worker on tab switch.
         if self.state.active_tab != self.last_active_tab {
             self.last_active_tab = self.state.active_tab;
             if let Some(id) = self.state.active_tab {
-                // Check if this is an SSH session (borrow ends before mutations below).
-                let ssh_handle = self.state.sessions.get(&id).and_then(|s| match &s.backend {
-                    SessionBackend::Ssh(ssh) => Some(Arc::clone(ssh.ssh_handle())),
-                    _ => None,
-                });
-                if let Some(handle) = ssh_handle {
-                    if self.sftp_session_id != Some(id) {
-                        // Shut down old SFTP worker, start new one for this session.
-                        if let Some(tx) = self.sftp_cmd_tx.take() {
-                            let _ = tx.send(SftpCmd::Shutdown);
+                if let Some(session) = self.state.sessions.get(&id) {
+                    match &session.backend {
+                        SessionBackend::Ssh(ssh) => {
+                            if self.sftp_session_id != Some(id) {
+                                // Different SSH tab — tear down old worker, spawn new.
+                                if let Some(old_tx) = self.sftp_cmd_tx.take() {
+                                    let _ = old_tx.send(SftpCmd::Shutdown);
+                                }
+                                let handle = Arc::clone(ssh.ssh_handle());
+                                let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                                let (result_tx, result_rx) = std::sync::mpsc::channel();
+                                self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx));
+                                let _ = cmd_tx.send(SftpCmd::List(PathBuf::from(".")));
+                                self.sftp_cmd_tx = Some(cmd_tx);
+                                self.sftp_result_rx = Some(result_rx);
+                                self.sftp_session_id = Some(id);
+                                self.remote_home = None;
+                                self.state.file_browser.remote_entries.clear();
+                                self.state.file_browser.remote_path = None;
+                                self.transfers.clear();
+                            } else if self.state.file_browser.remote_path.is_none() {
+                                // Same SSH tab but remote state was cleared — re-request listing.
+                                if let Some(tx) = &self.sftp_cmd_tx {
+                                    let _ = tx.send(SftpCmd::List(
+                                        self.remote_home.clone().unwrap_or_else(|| PathBuf::from(".")),
+                                    ));
+                                }
+                            }
                         }
-                        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-                        let (result_tx, result_rx) = std::sync::mpsc::channel();
-                        self.rt.spawn(run_sftp_worker(handle, cmd_rx, result_tx));
-                        if let Some(cwd) = self.session_last_cwd.get(&id) {
-                            let _ = cmd_tx.send(SftpCmd::List(cwd.clone()));
+                        SessionBackend::Local(_) => {
+                            // Local tab — hide remote pane but keep SFTP worker alive.
+                            self.state.file_browser.remote_path = None;
+                            self.state.file_browser.remote_entries.clear();
                         }
-                        self.sftp_cmd_tx = Some(cmd_tx);
-                        self.sftp_result_rx = Some(result_rx);
-                        self.sftp_session_id = Some(id);
                     }
-                } else {
-                    // Local session — clear remote pane.
-                    self.state.file_browser.remote_path = None;
-                    self.state.file_browser.remote_entries.clear();
-                    self.state.file_browser.remote_path_edit.clear();
+                }
+            }
+        }
+
+        // Poll SFTP results into the sidebar file browser.
+        if let Some(rx) = &self.sftp_result_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    SftpEvent::Listing(listing) => {
+                        self.state.file_browser.remote_path_edit =
+                            listing.path.to_string_lossy().into_owned();
+                        self.state.file_browser.remote_path = Some(listing.path);
+                        self.state.file_browser.remote_entries =
+                            listing.entries.into_iter().map(Into::into).collect();
+                        self.state.file_browser.remote_selected = None;
+                        if self.remote_home.is_none() {
+                            self.remote_home = Some(listing.home);
+                        }
+                    }
+                    SftpEvent::TransferProgress {
+                        filename,
+                        bytes_transferred,
+                        total_bytes,
+                    } => {
+                        if let Some(ts) = self
+                            .transfers
+                            .iter_mut()
+                            .find(|t| t.filename == filename && !t.done)
+                        {
+                            ts.bytes_transferred = bytes_transferred;
+                            ts.total_bytes = total_bytes;
+                        }
+                    }
+                    SftpEvent::TransferComplete {
+                        filename,
+                        success,
+                        error,
+                    } => {
+                        // Update matching in-progress transfer, or add a new entry.
+                        if let Some(ts) = self
+                            .transfers
+                            .iter_mut()
+                            .find(|t| t.filename == filename && !t.done)
+                        {
+                            ts.done = true;
+                            ts.error = if success { None } else { error };
+                            if success {
+                                ts.bytes_transferred = ts.total_bytes;
+                            }
+                        } else {
+                            self.transfers.push(sidebar::TransferStatus {
+                                filename,
+                                upload: true,
+                                done: true,
+                                error: if success { None } else { error },
+                                bytes_transferred: 0,
+                                total_bytes: 0,
+                                cancel: Arc::new(AtomicBool::new(false)),
+                            });
+                        }
+                        // Refresh both panes after a transfer completes.
+                        if let Some(tx) = &self.sftp_cmd_tx {
+                            if let Some(rp) = &self.state.file_browser.remote_path {
+                                let _ = tx.send(SftpCmd::List(rp.clone()));
+                            }
+                        }
+                        let local = self.state.file_browser.local_path.clone();
+                        self.state.file_browser.local_entries = load_local_entries(&local);
+                    }
                 }
             }
         }
@@ -667,12 +657,14 @@ impl ConchApp {
                     title,
                     fields: field_states,
                     resp_tx,
+                    focus_first: true,
                 }
             }
             PluginCommand::ShowPrompt { message } => ActivePluginDialog::Prompt {
                 message,
                 input: String::new(),
                 resp_tx,
+                focus_first: true,
             },
             PluginCommand::ShowConfirm { message } => ActivePluginDialog::Confirm {
                 message,
@@ -755,9 +747,69 @@ impl ConchApp {
         self.discovered_plugins = scan_plugin_dirs();
     }
 
+    /// Returns true when any modal dialog is open and should steal focus from the terminal.
+    fn any_dialog_open(&self) -> bool {
+        self.state.new_connection_form.is_some()
+            || self.show_about
+            || self.rename_tab_id.is_some()
+            || self.preferences_form.is_some()
+            || self.tunnel_dialog.is_some()
+            || self.active_plugin_dialog.is_some()
+            || self.plugin_progress.is_some()
+    }
+
+    /// Close the topmost dialog. Returns true if a dialog was closed.
+    fn close_topmost_dialog(&mut self) -> bool {
+        // Close in reverse visual stacking order (plugin dialogs on top, then others).
+        if let Some(dialog) = self.active_plugin_dialog.take() {
+            // Send a cancel/close response so the plugin coroutine doesn't hang.
+            send_plugin_dialog_cancel(&dialog);
+            return true;
+        }
+        if self.plugin_progress.is_some() {
+            self.plugin_progress = None;
+            return true;
+        }
+        if self.show_about {
+            self.show_about = false;
+            return true;
+        }
+        if self.rename_tab_id.is_some() {
+            self.rename_tab_id = None;
+            self.rename_tab_buf.clear();
+            return true;
+        }
+        if self.preferences_form.is_some() {
+            self.preferences_form = None;
+            return true;
+        }
+        if self.tunnel_dialog.is_some() {
+            self.tunnel_dialog = None;
+            return true;
+        }
+        if self.state.new_connection_form.is_some() {
+            self.state.new_connection_form = None;
+            return true;
+        }
+        false
+    }
+
     /// Process keyboard events: app shortcuts always run, PTY forwarding
     /// only when `forward_to_pty` is true (i.e. no text widget has focus).
     fn handle_keyboard(&mut self, ctx: &egui::Context, forward_to_pty: bool) {
+        use alacritty_terminal::term::TermMode;
+
+        // Read terminal mode before entering the input closure so we know
+        // whether the shell has enabled application cursor mode (DECCKM).
+        let app_cursor = forward_to_pty
+            && self.state.active_session().map_or(false, |s| {
+                s.backend
+                    .term()
+                    .lock()
+                    .mode()
+                    .contains(TermMode::APP_CURSOR)
+            });
+
         ctx.input(|input| {
             for event in &input.events {
                 match event {
@@ -767,6 +819,13 @@ impl ConchApp {
                         modifiers,
                         ..
                     } => {
+                        // ESC closes the topmost dialog (when no text field has focus).
+                        if *key == egui::Key::Escape && !modifiers.command && !modifiers.alt && !modifiers.shift {
+                            if self.close_topmost_dialog() {
+                                return;
+                            }
+                        }
+
                         // Command+number → switch to tab N (checked first).
                         // Cmd on macOS, Ctrl on Linux/Windows.
                         if modifiers.command && !modifiers.alt && !modifiers.shift {
@@ -820,8 +879,22 @@ impl ConchApp {
                         }
                         if let Some(ref kb) = self.shortcuts.focus_quick_connect {
                             if kb.matches(key, modifiers) {
+                                if !self.state.show_right_sidebar {
+                                    self.quick_connect_opened_sidebar = true;
+                                }
                                 self.state.show_right_sidebar = true;
                                 self.session_panel_state.quick_connect_focus = true;
+                                return;
+                            }
+                        }
+                        if let Some(ref kb) = self.shortcuts.focus_plugin_search {
+                            if kb.matches(key, modifiers) {
+                                if !self.state.show_left_sidebar {
+                                    self.plugin_search_opened_sidebar = true;
+                                }
+                                self.state.show_left_sidebar = true;
+                                self.state.sidebar_tab = sidebar::SidebarTab::Plugins;
+                                self.plugin_search_focus = true;
                                 return;
                             }
                         }
@@ -834,7 +907,7 @@ impl ConchApp {
 
                         // Forward to active terminal only when no text widget has focus.
                         if forward_to_pty {
-                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &self.shortcuts) {
+                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &self.shortcuts, app_cursor) {
                                 if let Some(session) = self.state.active_session() {
                                     session.backend.write(&bytes);
                                 }
@@ -868,9 +941,24 @@ impl ConchApp {
         let id = Uuid::new_v4();
         let (tx, rx) = std::sync::mpsc::channel();
 
+        // Build display info for the connecting tab.
+        let label = host.clone();
+        let detail = format!("{user}@{host}:{port}");
+        self.pending_ssh_info.insert(id, PendingSshInfo {
+            label,
+            detail,
+            started: Instant::now(),
+        });
+
+        // Create a tab immediately so the user sees the connecting screen.
+        self.state.tab_order.push(id);
+        self.state.active_tab = Some(id);
+
+        let host_clone = host.clone();
+        let term_config = build_term_config(&self.state.user_config.terminal.cursor);
         self.rt.spawn(async move {
             let params = conch_session::ConnectParams {
-                host: host.clone(),
+                host: host_clone,
                 port,
                 user,
                 identity_file: identity_file.map(std::path::PathBuf::from),
@@ -878,7 +966,7 @@ impl ConchApp {
                 proxy_command,
                 proxy_jump,
             };
-            let result = SshSession::connect(&params, DEFAULT_COLS, DEFAULT_ROWS)
+            let result = SshSession::connect(&params, DEFAULT_COLS, DEFAULT_ROWS, term_config)
                 .await
                 .map_err(|e| format!("{host}: {e}"));
             let _ = tx.send(result);
@@ -915,14 +1003,7 @@ impl ConchApp {
             self.state.active_tab = self.state.tab_order.last().copied();
         }
 
-        // Clean up CWD tracking for this session.
-        self.ssh_cwd_receivers.remove(&id);
-        self.session_last_cwd.remove(&id);
-        self.ssh_pending_injection.remove(&id);
-        self.local_pids.remove(&id);
-        self.local_last_cwd.remove(&id);
-
-        // Clean up SFTP worker if it belonged to this session.
+        // Shut down SFTP worker if it belonged to this session.
         if self.sftp_session_id == Some(id) {
             if let Some(tx) = self.sftp_cmd_tx.take() {
                 let _ = tx.send(SftpCmd::Shutdown);
@@ -932,15 +1013,16 @@ impl ConchApp {
             self.remote_home = None;
             self.state.file_browser.remote_path = None;
             self.state.file_browser.remote_entries.clear();
-            self.state.file_browser.remote_path_edit.clear();
+            self.transfers.clear();
         }
+
+        // Clean up pending connection info if closing a connecting tab.
+        self.pending_ssh_info.remove(&id);
     }
 
-    /// Open a new local terminal tab and track its child PID for CWD polling.
+    /// Open a new local terminal tab.
     fn open_local_tab(&mut self) {
-        if let Some((id, pid)) = open_local_terminal(&mut self.state) {
-            self.local_pids.insert(id, pid);
-        }
+        let _ = open_local_terminal(&mut self.state);
     }
 
     /// Collect all SSH server entries from sidebar folders + ssh_config hosts.
@@ -1043,25 +1125,27 @@ impl eframe::App for ConchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Apply custom style: sharp corners everywhere.
         if !self.style_applied {
-            if let Some((_name, font_data)) =
-                crate::fonts::load_system_ui_font(&self.state.user_config.conch.ui.font_family)
-            {
-                let mut font_defs = egui::FontDefinitions::default();
-                font_defs.font_data.insert(
-                    "system_ui".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
-                font_defs
-                    .families
-                    .entry(egui::FontFamily::Proportional)
-                    .or_default()
-                    .insert(0, "system_ui".to_owned());
-                ctx.set_fonts(font_defs);
-            }
+            // Use egui's bundled default font (no system font override).
+            // System font loading via font-kit + ab_glyph lacks hinting,
+            // causing blurry rendering compared to the native rasterizer.
 
-            ctx.set_visuals(egui::Visuals::dark());
-            ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::Dark);
-            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+            match self.state.user_config.colors.appearance_mode.as_str() {
+                "light" => {
+                    ctx.set_visuals(egui::Visuals::light());
+                    ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::Light);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Light));
+                }
+                "system" => {
+                    ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::System);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::SystemDefault));
+                }
+                _ => {
+                    // "dark" or any unrecognized value
+                    ctx.set_visuals(egui::Visuals::dark());
+                    ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::Dark);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+                }
+            }
             let mut style = (*ctx.style()).clone();
             style.visuals.window_corner_radius = egui::CornerRadius::ZERO;
             style.visuals.menu_corner_radius = egui::CornerRadius::ZERO;
@@ -1070,17 +1154,81 @@ impl eframe::App for ConchApp {
             style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
             style.visuals.widgets.active.corner_radius = egui::CornerRadius::ZERO;
             style.visuals.widgets.open.corner_radius = egui::CornerRadius::ZERO;
+
+            // Stronger text colors: black in light mode, white in dark mode
+            // (egui defaults to grey which looks washed out vs native rendering).
+            // Also add a thin border to text fields (like Java JTextField).
+            if style.visuals.dark_mode {
+                let fg = egui::Color32::from_gray(240);
+                style.visuals.widgets.noninteractive.fg_stroke.color = fg;
+                style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(220);
+                style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+                style.visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+                style.visuals.widgets.open.fg_stroke.color = fg;
+
+                let border = egui::Color32::from_gray(80);
+                let border_focus = egui::Color32::from_gray(140);
+                style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+                style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border_focus);
+                style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, border_focus);
+            } else {
+                // FlatLaf-inspired light mode: #F2F2F2 base, #FFFFFF accents.
+                let base = egui::Color32::from_gray(0xF2); // panel/window bg
+                let accent = egui::Color32::WHITE;          // text fields, interactive bg
+
+                style.visuals.panel_fill = base;
+                style.visuals.window_fill = base;
+                style.visuals.extreme_bg_color = accent;
+                style.visuals.faint_bg_color = egui::Color32::from_gray(0xE8);
+
+                // Widget backgrounds: white for interactive, base for non-interactive.
+                style.visuals.widgets.noninteractive.bg_fill = base;
+                style.visuals.widgets.inactive.bg_fill = accent;
+                style.visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(0xE8);
+                style.visuals.widgets.active.bg_fill = egui::Color32::from_gray(0xDD);
+                style.visuals.widgets.open.bg_fill = accent;
+
+                // Text colors.
+                let fg = egui::Color32::from_gray(10);
+                style.visuals.widgets.noninteractive.fg_stroke.color = fg;
+                style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(30);
+                style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::BLACK;
+                style.visuals.widgets.active.fg_stroke.color = egui::Color32::BLACK;
+                style.visuals.widgets.open.fg_stroke.color = fg;
+
+                // Thin border on text fields.
+                let border = egui::Color32::from_gray(180);
+                let border_focus = egui::Color32::from_gray(120);
+                style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+                style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border_focus);
+                style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, border_focus);
+            }
+
             ctx.set_style(style);
             self.icon_cache = Some(IconCache::load(ctx));
+
+            // Restore persisted zoom factor.
+            let zoom = self.state.persistent.layout.zoom_factor;
+            if zoom > 0.0 && zoom != 1.0 {
+                ctx.set_zoom_factor(zoom);
+            }
+
+            // Make the title bar transparent when not using native menu bar.
+            #[cfg(target_os = "macos")]
+            if !self.use_native_menu {
+                crate::macos_menu::set_titlebar_transparent();
+            }
+
             self.style_applied = true;
         }
 
         // Measure cell size from the monospace font on the first frame.
         if !self.cell_size_measured {
             let (cw, ch) = measure_cell_size(ctx, self.state.user_config.font.size);
+            let offset = &self.state.user_config.font.offset;
             if cw > 0.0 && ch > 0.0 {
-                self.cell_width = cw;
-                self.cell_height = ch;
+                self.cell_width = (cw + offset.x).max(1.0);
+                self.cell_height = (ch + offset.y).max(1.0);
                 self.cell_size_measured = true;
                 // Force a resize on the next render pass.
                 self.last_cols = 0;
@@ -1098,9 +1246,9 @@ impl eframe::App for ConchApp {
 
         self.poll_events(ctx);
 
-        // Handle native macOS menu actions.
+        // Handle native macOS menu actions (only when native menu bar is active).
         #[cfg(target_os = "macos")]
-        {
+        if self.use_native_menu {
             for action in crate::macos_menu::drain_actions() {
                 self.handle_macos_menu_action(action, ctx);
             }
@@ -1116,7 +1264,7 @@ impl eframe::App for ConchApp {
         // update() runs, so we must also undo the focus change after panels render.
         let consumed_tab_for_pty;
         {
-            let no_widget_focused = !ctx.memory(|m| m.focused().is_some());
+            let no_widget_focused = !ctx.memory(|m| m.focused().is_some()) && !self.any_dialog_open();
             if no_widget_focused {
                 let mut tab_bytes: Option<Vec<u8>> = None;
                 ctx.input_mut(|i| {
@@ -1164,6 +1312,12 @@ impl eframe::App for ConchApp {
         // Keyboard/paste forwarding is deferred until after all panels render,
         // so that egui's focus state reflects the current frame (see end of update).
 
+        // Save window state before closing.
+        let closing = self.quit_requested
+            || ctx.input(|i| i.viewport().close_requested());
+        if closing {
+            self.save_window_state(ctx);
+        }
         if self.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -1394,85 +1548,106 @@ impl eframe::App for ConchApp {
         // -- Panels --
 
         // Menu bar (File, Sessions, Tools, View, Help).
-        // On macOS, menus are in the native menu bar. On other platforms, show in-window.
-        #[cfg(not(target_os = "macos"))]
-        egui::TopBottomPanel::top("menu_bar")
-            .frame(egui::Frame::side_top_panel(ctx.style().as_ref())
-                .inner_margin(egui::Margin { top: 4, bottom: 4, ..egui::Margin::same(8) }))
-            .show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.add(egui::Button::new("New Connection...").shortcut_text(cmd_shortcut("N"))).clicked() {
-                        self.state.new_connection_form =
-                            Some(NewConnectionForm::with_defaults());
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.add(egui::Button::new("Quit Conch").shortcut_text(cmd_shortcut("Q"))).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        ui.close_menu();
-                    }
-                });
+        // Shown in-window when native macOS menu bar is disabled (or on non-macOS).
+        // On macOS with fullsize_content_view, the menu lives inside the title bar area.
+        if !self.use_native_menu {
+            // On macOS with transparent title bar, add top padding to clear the
+            // title bar chrome and left padding for the traffic light buttons.
+            let in_titlebar = cfg!(target_os = "macos");
+            // On macOS, the title bar is ~28px. Traffic light centers are at ~14px.
+            // We pad top so menu text aligns vertically with them.
+            let top_pad: i8 = if in_titlebar { 7 } else { 4 };
+            let bottom_pad: i8 = if in_titlebar { 6 } else { 4 };
+            let left_pad: i8 = if in_titlebar { 72 } else { 8 };
 
-                ui.menu_button("Sessions", |ui| {
-                    if ui.add(egui::Button::new("New Local Terminal").shortcut_text(cmd_shortcut("T"))).clicked() {
-                        self.open_local_tab();
-                        ui.close_menu();
+            egui::TopBottomPanel::top("menu_bar")
+                .frame(egui::Frame::side_top_panel(ctx.style().as_ref())
+                    .inner_margin(egui::Margin { top: top_pad, bottom: bottom_pad, left: left_pad, right: 8 }))
+                .show(ctx, |ui| {
+                egui::menu::bar(ui, |ui| {
+                    // App title on the left (next to traffic lights).
+                    if in_titlebar {
+                        ui.label(egui::RichText::new("Conch").color(ui.visuals().weak_text_color()));
+                        ui.add_space(4.0);
                     }
-                    if ui.add(egui::Button::new("New SSH Session...").shortcut_text(cmd_shortcut("N"))).clicked() {
-                        self.state.new_connection_form =
-                            Some(NewConnectionForm::with_defaults());
-                        ui.close_menu();
-                    }
-                });
 
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("SSH Tunnels...").clicked() {
-                        self.tunnel_dialog = Some(TunnelManagerState::new());
-                        ui.close_menu();
-                    }
-                    if !self.discovered_plugins.is_empty() {
-                        ui.separator();
-                        let mut run_idx = None;
-                        for (i, meta) in self.discovered_plugins.iter().enumerate() {
-                            if ui.button(&meta.name).clicked() {
-                                run_idx = Some(i);
+                    // Menu buttons right-aligned.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Render in reverse order (right-to-left).
+                        ui.menu_button("Help", |ui| {
+                            if ui.button("About Conch").clicked() {
+                                self.show_about = true;
                                 ui.close_menu();
                             }
-                        }
-                        if let Some(idx) = run_idx {
-                            self.run_plugin_by_index(idx);
-                        }
-                    }
-                });
+                        });
 
-                ui.menu_button("View", |ui| {
-                    let left_check = if self.state.show_left_sidebar { "✓ " } else { "   " };
-                    if ui.add(egui::Button::new(format!("{left_check}Left Toolbar")).shortcut_text(cmd_shortcut("1"))).clicked() {
-                        self.toggle_left_sidebar();
-                        ui.close_menu();
-                    }
-                    let right_check = if self.state.show_right_sidebar { "✓ " } else { "   " };
-                    if ui.add(egui::Button::new(format!("{right_check}Right Toolbar")).shortcut_text(cmd_shortcut("2"))).clicked() {
-                        self.toggle_right_sidebar();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Preferences...").clicked() {
-                        self.preferences_form =
-                            Some(PreferencesForm::from_config(&self.state.user_config));
-                        ui.close_menu();
-                    }
-                });
+                        ui.menu_button("View", |ui| {
+                            let left_check = if self.state.show_left_sidebar { "✓ " } else { "   " };
+                            if ui.add(egui::Button::new(format!("{left_check}Left Toolbar")).shortcut_text(cmd_shortcut("1"))).clicked() {
+                                self.toggle_left_sidebar();
+                                ui.close_menu();
+                            }
+                            let right_check = if self.state.show_right_sidebar { "✓ " } else { "   " };
+                            if ui.add(egui::Button::new(format!("{right_check}Right Toolbar")).shortcut_text(cmd_shortcut("2"))).clicked() {
+                                self.toggle_right_sidebar();
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Preferences...").clicked() {
+                                self.preferences_form =
+                                    Some(PreferencesForm::from_config(&self.state.user_config));
+                                ui.close_menu();
+                            }
+                        });
 
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About Conch").clicked() {
-                        self.show_about = true;
-                        ui.close_menu();
-                    }
+                        ui.menu_button("Tools", |ui| {
+                            if ui.button("SSH Tunnels...").clicked() {
+                                self.tunnel_dialog = Some(TunnelManagerState::new());
+                                ui.close_menu();
+                            }
+                            if !self.discovered_plugins.is_empty() {
+                                ui.separator();
+                                let mut run_idx = None;
+                                for (i, meta) in self.discovered_plugins.iter().enumerate() {
+                                    if ui.button(&meta.name).clicked() {
+                                        run_idx = Some(i);
+                                        ui.close_menu();
+                                    }
+                                }
+                                if let Some(idx) = run_idx {
+                                    self.run_plugin_by_index(idx);
+                                }
+                            }
+                        });
+
+                        ui.menu_button("Sessions", |ui| {
+                            if ui.add(egui::Button::new("New Local Terminal").shortcut_text(cmd_shortcut("T"))).clicked() {
+                                self.open_local_tab();
+                                ui.close_menu();
+                            }
+                            if ui.add(egui::Button::new("New SSH Session...").shortcut_text(cmd_shortcut("N"))).clicked() {
+                                self.state.new_connection_form =
+                                    Some(NewConnectionForm::with_defaults());
+                                ui.close_menu();
+                            }
+                        });
+
+                        ui.menu_button("File", |ui| {
+                            if ui.add(egui::Button::new("New Connection...").shortcut_text(cmd_shortcut("N"))).clicked() {
+                                self.state.new_connection_form =
+                                    Some(NewConnectionForm::with_defaults());
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.add(egui::Button::new("Quit Conch").shortcut_text(cmd_shortcut("Q"))).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                ui.close_menu();
+                            }
+                        });
+                    });
                 });
             });
-        });
+        } // end if !use_native_menu
 
         // Left sidebar: narrow tab strip + resizable content panel.
         let icons = self.icon_cache.as_ref();
@@ -1501,6 +1676,9 @@ impl eframe::App for ConchApp {
                 &plugin_display,
                 &self.plugin_output_lines,
                 &mut self.selected_plugin,
+                &self.transfers,
+                &mut self.plugin_search_query,
+                &mut self.plugin_search_focus,
             )
         } else {
             SidebarAction::None
@@ -1520,6 +1698,7 @@ impl eframe::App for ConchApp {
                 self.state.file_browser.local_entries = load_local_entries(&path);
                 self.state.file_browser.local_path_edit = path.to_string_lossy().into_owned();
                 self.state.file_browser.local_path = path;
+                self.state.file_browser.local_selected = None;
             }
             SidebarAction::GoBackLocal => {
                 if let Some(prev) = self.state.file_browser.local_back_stack.pop() {
@@ -1528,6 +1707,7 @@ impl eframe::App for ConchApp {
                     self.state.file_browser.local_entries = load_local_entries(&prev);
                     self.state.file_browser.local_path_edit = prev.to_string_lossy().into_owned();
                     self.state.file_browser.local_path = prev;
+                    self.state.file_browser.local_selected = None;
                 }
             }
             SidebarAction::GoForwardLocal => {
@@ -1537,11 +1717,13 @@ impl eframe::App for ConchApp {
                     self.state.file_browser.local_entries = load_local_entries(&next);
                     self.state.file_browser.local_path_edit = next.to_string_lossy().into_owned();
                     self.state.file_browser.local_path = next;
+                    self.state.file_browser.local_selected = None;
                 }
             }
             SidebarAction::RefreshLocal => {
                 let path = self.state.file_browser.local_path.clone();
                 self.state.file_browser.local_entries = load_local_entries(&path);
+                self.state.file_browser.local_selected = None;
             }
             SidebarAction::GoHomeLocal => {
                 let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
@@ -1551,16 +1733,17 @@ impl eframe::App for ConchApp {
                 self.state.file_browser.local_entries = load_local_entries(&home);
                 self.state.file_browser.local_path_edit = home.to_string_lossy().into_owned();
                 self.state.file_browser.local_path = home;
+                self.state.file_browser.local_selected = None;
             }
             SidebarAction::SelectFile(path) => {
                 log::info!("File selected: {}", path.display());
             }
             SidebarAction::NavigateRemote(path) => {
+                if let Some(old) = self.state.file_browser.remote_path.clone() {
+                    self.state.file_browser.remote_back_stack.push(old);
+                    self.state.file_browser.remote_forward_stack.clear();
+                }
                 if let Some(tx) = &self.sftp_cmd_tx {
-                    if let Some(old) = self.state.file_browser.remote_path.clone() {
-                        self.state.file_browser.remote_back_stack.push(old);
-                        self.state.file_browser.remote_forward_stack.clear();
-                    }
                     let _ = tx.send(SftpCmd::List(path));
                 }
             }
@@ -1586,20 +1769,67 @@ impl eframe::App for ConchApp {
             }
             SidebarAction::RefreshRemote => {
                 if let Some(tx) = &self.sftp_cmd_tx {
-                    if let Some(path) = self.state.file_browser.remote_path.clone() {
-                        let _ = tx.send(SftpCmd::List(path));
+                    if let Some(rp) = &self.state.file_browser.remote_path {
+                        let _ = tx.send(SftpCmd::List(rp.clone()));
                     }
                 }
             }
             SidebarAction::GoHomeRemote => {
-                if let Some(tx) = &self.sftp_cmd_tx {
-                    if let Some(home) = self.remote_home.clone() {
-                        if let Some(old) = self.state.file_browser.remote_path.clone() {
-                            self.state.file_browser.remote_back_stack.push(old);
-                            self.state.file_browser.remote_forward_stack.clear();
-                        }
+                if let Some(home) = self.remote_home.clone() {
+                    if let Some(old) = self.state.file_browser.remote_path.clone() {
+                        self.state.file_browser.remote_back_stack.push(old);
+                        self.state.file_browser.remote_forward_stack.clear();
+                    }
+                    if let Some(tx) = &self.sftp_cmd_tx {
                         let _ = tx.send(SftpCmd::List(home));
                     }
+                }
+            }
+            SidebarAction::Upload { local_path, remote_dir } => {
+                let filename = local_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.transfers.push(sidebar::TransferStatus {
+                    filename,
+                    upload: true,
+                    done: false,
+                    error: None,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    cancel: cancel.clone(),
+                });
+                if let Some(tx) = &self.sftp_cmd_tx {
+                    let _ = tx.send(SftpCmd::Upload { local_path, remote_dir, cancel });
+                }
+            }
+            SidebarAction::Download { remote_path, local_dir } => {
+                let filename = remote_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.transfers.push(sidebar::TransferStatus {
+                    filename,
+                    upload: false,
+                    done: false,
+                    error: None,
+                    bytes_transferred: 0,
+                    total_bytes: 0,
+                    cancel: cancel.clone(),
+                });
+                if let Some(tx) = &self.sftp_cmd_tx {
+                    let _ = tx.send(SftpCmd::Download { remote_path, local_dir, cancel });
+                }
+            }
+            SidebarAction::CancelTransfer(filename) => {
+                if let Some(ts) = self
+                    .transfers
+                    .iter_mut()
+                    .find(|t| t.filename == filename && !t.done)
+                {
+                    ts.cancel.store(true, Ordering::Relaxed);
                 }
             }
             SidebarAction::RunPlugin(_)
@@ -1638,6 +1868,11 @@ impl eframe::App for ConchApp {
                     req.proxy_jump,
                     req.password,
                 );
+                // Restore sidebar if it was opened temporarily for quick connect.
+                if self.quick_connect_opened_sidebar {
+                    self.state.show_right_sidebar = false;
+                    self.quick_connect_opened_sidebar = false;
+                }
             }
             SessionPanelAction::CreateFolder { parent_path, name } => {
                 let folder = conch_core::models::ServerFolder::new(name);
@@ -1699,6 +1934,10 @@ impl eframe::App for ConchApp {
             SessionPanelAction::EditServer { .. } => {
                 // Stub — will open edit dialog in a future change.
             }
+            SessionPanelAction::OpenNewConnectionDialog => {
+                self.state.new_connection_form =
+                    Some(NewConnectionForm::with_defaults());
+            }
             SessionPanelAction::None => {}
         }
 
@@ -1740,7 +1979,15 @@ impl eframe::App for ConchApp {
                 let mut rename_id = None;
 
                 for (tab_idx, &id) in self.state.tab_order.iter().enumerate() {
-                    if let Some(session) = self.state.sessions.get(&id) {
+                    // Determine the tab title — either from the session or from pending info.
+                    let tab_title_str: Option<String> = if let Some(session) = self.state.sessions.get(&id) {
+                        Some(session.custom_title.as_deref().unwrap_or(&session.title).to_string())
+                    } else if let Some(info) = self.pending_ssh_info.get(&id) {
+                        Some(format!("{}...", info.label))
+                    } else {
+                        None
+                    };
+                    if let Some(title) = tab_title_str {
                         let selected = self.state.active_tab == Some(id);
                         let tab_rect = egui::Rect::from_min_size(
                             egui::Pos2::new(x, panel_rect.min.y),
@@ -1810,7 +2057,6 @@ impl eframe::App for ConchApp {
                         );
 
                         // Tab label — pixel-based truncation with "…".
-                        let title = session.custom_title.as_deref().unwrap_or(&session.title);
                         let label_color = if selected { text_color } else { dim_text };
                         let left_pad = 6.0;
                         let max_text_w = hint_x - tab_rect.min.x - left_pad - 2.0;
@@ -1933,7 +2179,7 @@ impl eframe::App for ConchApp {
             });
         } // end tab bar (multi-tab only)
 
-        // Central panel (active terminal).
+        // Central panel (active terminal or connecting screen).
         let font_size = self.state.user_config.font.size;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -1967,6 +2213,10 @@ impl eframe::App for ConchApp {
                             size_info.columns() as u16,
                             size_info.rows() as u16,
                         );
+                    } else if let Some(info) = self.pending_ssh_info.get(&id) {
+                        // Connecting screen.
+                        show_connecting_screen(ui, info);
+                        ctx.request_repaint();
                     }
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -1986,7 +2236,7 @@ impl eframe::App for ConchApp {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
         }
-        let forward_to_pty = !ctx.memory(|m| m.focused().is_some());
+        let forward_to_pty = !ctx.memory(|m| m.focused().is_some()) && !self.any_dialog_open();
 
         if let Some(text) = paste_text {
             if forward_to_pty {
@@ -2001,13 +2251,23 @@ impl eframe::App for ConchApp {
         // Handle deferred plugin sidebar actions (after all borrows are released).
         if let Some(action) = deferred_plugin_action {
             match action {
-                SidebarAction::RunPlugin(idx) => self.run_plugin_by_index(idx),
+                SidebarAction::RunPlugin(idx) => {
+                    self.run_plugin_by_index(idx);
+                    if self.plugin_search_opened_sidebar {
+                        self.state.show_left_sidebar = false;
+                        self.plugin_search_opened_sidebar = false;
+                    }
+                }
                 SidebarAction::StopPlugin(idx) => {
                     if let Some(meta) = self.discovered_plugins.get(idx) {
                         let path = meta.path.clone();
                         if let Some(pos) = self.running_plugins.iter().position(|rp| rp.meta.path == path) {
                             self.stop_plugin(pos);
                         }
+                    }
+                    if self.plugin_search_opened_sidebar {
+                        self.state.show_left_sidebar = false;
+                        self.plugin_search_opened_sidebar = false;
                     }
                 }
                 SidebarAction::RefreshPlugins => self.refresh_plugins(),
@@ -2022,11 +2282,36 @@ impl eframe::App for ConchApp {
             })
             .unwrap_or_else(|| "Conch".into());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
-        ctx.request_repaint();
+        // Poll for async events (SSH, plugins, tunnels) at ~10 Hz when idle.
+        // Active terminal output triggers immediate repaints via Wakeup events,
+        // and cursor blink already requests repaint every 500ms.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
+        // Keep window state in memory each frame so on_exit can persist it.
+        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            self.state.persistent.layout.window_width = rect.width();
+            self.state.persistent.layout.window_height = rect.height();
+        }
+        self.state.persistent.layout.zoom_factor = ctx.zoom_factor();
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = config::save_persistent_state(&self.state.persistent);
     }
 }
 
 impl ConchApp {
+    /// Persist current window size and zoom factor to state.toml.
+    fn save_window_state(&mut self, ctx: &egui::Context) {
+        // Read the current inner rect from the viewport.
+        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            self.state.persistent.layout.window_width = rect.width();
+            self.state.persistent.layout.window_height = rect.height();
+        }
+        self.state.persistent.layout.zoom_factor = ctx.zoom_factor();
+        let _ = config::save_persistent_state(&self.state.persistent);
+    }
+
     #[cfg(target_os = "macos")]
     fn handle_macos_menu_action(
         &mut self,
@@ -2044,6 +2329,9 @@ impl ConchApp {
             }
             MenuAction::NewLocalTerminal => {
                 self.open_local_tab();
+            }
+            MenuAction::SftpTransfer => {
+                // SFTP is now handled automatically in the sidebar.
             }
             MenuAction::SshTunnels => {
                 self.tunnel_dialog = Some(TunnelManagerState::new());
@@ -2182,6 +2470,25 @@ fn is_dialog_command(cmd: &PluginCommand) -> bool {
     )
 }
 
+/// Build an `alacritty_terminal::term::Config` from the user's cursor settings.
+fn build_term_config(cfg: &config::CursorConfig) -> alacritty_terminal::term::Config {
+    use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
+
+    fn parse_style(s: &config::CursorStyleConfig) -> CursorStyle {
+        let shape = match s.shape.to_lowercase().as_str() {
+            "underline" => CursorShape::Underline,
+            "beam" | "ibeam" => CursorShape::Beam,
+            _ => CursorShape::Block,
+        };
+        CursorStyle { shape, blinking: s.blinking }
+    }
+
+    let mut tc = alacritty_terminal::term::Config::default();
+    tc.default_cursor_style = parse_style(&cfg.style);
+    tc.vi_mode_cursor_style = cfg.vi_mode_style.as_ref().map(parse_style);
+    tc
+}
+
 fn open_local_terminal(state: &mut AppState) -> Option<(Uuid, u32)> {
     let id = Uuid::new_v4();
 
@@ -2196,7 +2503,8 @@ fn open_local_terminal(state: &mut AppState) -> Option<(Uuid, u32)> {
         ))
     };
 
-    match LocalSession::new(DEFAULT_COLS, DEFAULT_ROWS, 8, 16, shell) {
+    let term_config = build_term_config(&state.user_config.terminal.cursor);
+    match LocalSession::new(DEFAULT_COLS, DEFAULT_ROWS, 8, 16, shell, &state.user_config.terminal.env, term_config) {
         Ok(mut local) => {
             let child_pid = local.child_pid();
             let event_rx = local.take_event_rx();
@@ -2300,4 +2608,107 @@ fn load_local_entries(path: &std::path::Path) -> Vec<FileListEntry> {
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     entries
+}
+
+/// Render the "Connecting to..." screen with a bouncing progress indicator.
+fn show_connecting_screen(ui: &mut egui::Ui, info: &PendingSshInfo) {
+    let rect = ui.available_rect_before_wrap();
+
+    // Light background fill.
+    let bg = if ui.visuals().dark_mode {
+        egui::Color32::from_gray(30)
+    } else {
+        egui::Color32::from_gray(241)
+    };
+    ui.painter().rect_filled(rect, 0.0, bg);
+
+    let center = rect.center();
+
+    // "Connecting to <label>..."
+    let heading = format!("Connecting to {}\u{2026}", info.label);
+    let heading_galley = ui.painter().layout_no_wrap(
+        heading,
+        egui::FontId::new(28.0, egui::FontFamily::Proportional),
+        if ui.visuals().dark_mode {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::BLACK
+        },
+    );
+    let heading_pos = egui::Pos2::new(
+        center.x - heading_galley.size().x / 2.0,
+        center.y - 40.0,
+    );
+    ui.painter().galley(heading_pos, heading_galley, egui::Color32::PLACEHOLDER);
+
+    // Detail line: "user@host:port"
+    let detail_galley = ui.painter().layout_no_wrap(
+        info.detail.clone(),
+        egui::FontId::new(16.0, egui::FontFamily::Proportional),
+        if ui.visuals().dark_mode {
+            egui::Color32::from_gray(200)
+        } else {
+            egui::Color32::from_gray(40)
+        },
+    );
+    let detail_pos = egui::Pos2::new(
+        center.x - detail_galley.size().x / 2.0,
+        center.y + 5.0,
+    );
+    ui.painter().galley(detail_pos, detail_galley, egui::Color32::PLACEHOLDER);
+
+    // Bouncing progress bar.
+    let bar_w = 400.0_f32.min(rect.width() * 0.6);
+    let bar_h = 6.0;
+    let bar_y = center.y + 50.0;
+    let bar_rect = egui::Rect::from_min_size(
+        egui::Pos2::new(center.x - bar_w / 2.0, bar_y),
+        egui::Vec2::new(bar_w, bar_h),
+    );
+
+    // Track background.
+    let track_color = if ui.visuals().dark_mode {
+        egui::Color32::from_gray(60)
+    } else {
+        egui::Color32::from_gray(210)
+    };
+    ui.painter().rect_filled(bar_rect, bar_h / 2.0, track_color);
+
+    // Bouncing indicator.
+    let elapsed = info.started.elapsed().as_secs_f32();
+    let cycle = 1.8; // seconds for a full bounce cycle
+    let t = (elapsed % cycle) / cycle; // 0..1
+    // Ping-pong: 0→1→0
+    let pos_t = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
+    // Ease in-out for smooth motion.
+    let eased = pos_t * pos_t * (3.0 - 2.0 * pos_t);
+    let indicator_w = bar_w * 0.15;
+    let indicator_x = bar_rect.min.x + eased * (bar_w - indicator_w);
+    let indicator_rect = egui::Rect::from_min_size(
+        egui::Pos2::new(indicator_x, bar_y),
+        egui::Vec2::new(indicator_w, bar_h),
+    );
+    let accent = egui::Color32::from_rgb(66, 133, 244); // Google blue
+    ui.painter().rect_filled(indicator_rect, bar_h / 2.0, accent);
+}
+
+/// Send a cancel/close response for a plugin dialog so the plugin coroutine doesn't hang.
+fn send_plugin_dialog_cancel(dialog: &ActivePluginDialog) {
+    match dialog {
+        ActivePluginDialog::Form { resp_tx, .. } => {
+            let _ = resp_tx.send(PluginResponse::FormResult(None));
+        }
+        ActivePluginDialog::Prompt { resp_tx, .. } => {
+            let _ = resp_tx.send(PluginResponse::Ok);
+        }
+        ActivePluginDialog::Confirm { resp_tx, .. } => {
+            let _ = resp_tx.send(PluginResponse::Bool(false));
+        }
+        ActivePluginDialog::Alert { resp_tx, .. }
+        | ActivePluginDialog::Error { resp_tx, .. }
+        | ActivePluginDialog::Text { resp_tx, .. }
+        | ActivePluginDialog::Table { resp_tx, .. } => {
+            let _ = resp_tx.send(PluginResponse::Ok);
+        }
+    }
 }

@@ -86,6 +86,87 @@ impl Default for WindowConfig {
 pub struct TerminalConfig {
     #[serde(default)]
     pub shell: TerminalShell,
+    /// Extra environment variables set in the terminal (Alacritty `[terminal.env]`).
+    /// `TERM` and `COLORTERM` are always set unless overridden here.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Cursor appearance (Alacritty `[terminal.cursor]`).
+    #[serde(default)]
+    pub cursor: CursorConfig,
+}
+
+/// Cursor configuration (Alacritty `[terminal.cursor]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorConfig {
+    #[serde(default)]
+    pub style: CursorStyleConfig,
+    /// Cursor style when Vi mode is active. If unset, uses `style`.
+    #[serde(default)]
+    pub vi_mode_style: Option<CursorStyleConfig>,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            style: CursorStyleConfig::default(),
+            vi_mode_style: None,
+        }
+    }
+}
+
+/// Cursor style (shape + blinking).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorStyleConfig {
+    /// Cursor shape: "Block", "Underline", or "Beam".
+    #[serde(default = "default_cursor_shape")]
+    pub shape: String,
+    /// Whether the cursor blinks.
+    /// Accepts boolean (`true`/`false`) or Alacritty strings
+    /// (`"Never"`, `"Off"`, `"On"`, `"Always"`).
+    #[serde(default = "default_true", deserialize_with = "deserialize_blinking")]
+    pub blinking: bool,
+}
+
+fn default_cursor_shape() -> String {
+    "Block".to_owned()
+}
+
+/// Accepts `true`, `false`, `"Never"`, `"Off"`, `"On"`, `"Always"`.
+fn deserialize_blinking<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    use serde::de;
+
+    struct BlinkingVisitor;
+
+    impl<'de> de::Visitor<'de> for BlinkingVisitor {
+        type Value = bool;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean or one of \"Never\", \"Off\", \"On\", \"Always\"")
+        }
+
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<bool, E> {
+            match v.to_lowercase().as_str() {
+                "always" | "on" => Ok(true),
+                "never" | "off" => Ok(false),
+                _ => Err(de::Error::unknown_variant(v, &["Never", "Off", "On", "Always"])),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(BlinkingVisitor)
+}
+
+impl Default for CursorStyleConfig {
+    fn default() -> Self {
+        Self {
+            shape: default_cursor_shape(),
+            blinking: true,
+        }
+    }
 }
 
 /// Shell program and arguments (Alacritty `[terminal.shell]`).
@@ -118,6 +199,8 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             shell: TerminalShell::default(),
+            env: std::collections::HashMap::new(),
+            cursor: CursorConfig::default(),
         }
     }
 }
@@ -151,6 +234,15 @@ pub struct UiConfig {
     pub font_family: String,
     #[serde(default = "default_ui_size")]
     pub font_size: f32,
+    /// Use the native macOS global menu bar instead of an in-window menu bar.
+    /// Only applies on macOS; ignored on other platforms. Defaults to false
+    /// (menu is rendered in a transparent title bar).
+    #[serde(default)]
+    pub native_menu_bar: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for UiConfig {
@@ -158,6 +250,7 @@ impl Default for UiConfig {
         Self {
             font_family: String::new(),
             font_size: default_ui_size(),
+            native_menu_bar: false,
         }
     }
 }
@@ -168,6 +261,25 @@ pub struct FontConfig {
     pub normal: FontFamily,
     #[serde(default = "default_font_size")]
     pub size: f32,
+    /// Extra spacing added to each character cell (Alacritty `[font.offset]`).
+    /// `x` adds horizontal pixels per cell, `y` adds vertical pixels.
+    #[serde(default)]
+    pub offset: FontOffset,
+}
+
+/// Extra pixel offset applied to each character cell.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FontOffset {
+    #[serde(default)]
+    pub x: f32,
+    #[serde(default)]
+    pub y: f32,
+}
+
+impl Default for FontOffset {
+    fn default() -> Self {
+        Self { x: 0.0, y: 0.0 }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +292,9 @@ pub struct FontFamily {
 pub struct ColorsConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// UI appearance mode: "dark", "light", or "system".
+    #[serde(default = "default_appearance_mode")]
+    pub appearance_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,9 +313,12 @@ pub struct KeyboardConfig {
     pub toggle_right_sidebar: String,
     #[serde(default = "default_focus_quick_connect")]
     pub focus_quick_connect: String,
+    #[serde(default = "default_focus_plugin_search")]
+    pub focus_plugin_search: String,
 }
 
 fn default_theme() -> String { "dracula".into() }
+fn default_appearance_mode() -> String { "dark".into() }
 fn default_font_size() -> f32 { 14.0 }
 fn default_font_name() -> String { "JetBrains Mono".into() }
 fn default_ui_size() -> f32 { 13.0 }
@@ -211,6 +329,7 @@ fn default_quit() -> String { "cmd+q".into() }
 fn default_toggle_left_sidebar() -> String { "cmd+shift+b".into() }
 fn default_toggle_right_sidebar() -> String { "cmd+shift+e".into() }
 fn default_focus_quick_connect() -> String { "cmd+/".into() }
+fn default_focus_plugin_search() -> String { "cmd+shift+p".into() }
 
 impl Default for FontFamily {
     fn default() -> Self { Self { family: default_font_name() } }
@@ -221,12 +340,18 @@ impl Default for FontConfig {
         Self {
             normal: FontFamily::default(),
             size: default_font_size(),
+            offset: FontOffset::default(),
         }
     }
 }
 
 impl Default for ColorsConfig {
-    fn default() -> Self { Self { theme: default_theme() } }
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            appearance_mode: default_appearance_mode(),
+        }
+    }
 }
 
 impl Default for KeyboardConfig {
@@ -239,6 +364,7 @@ impl Default for KeyboardConfig {
             toggle_left_sidebar: default_toggle_left_sidebar(),
             toggle_right_sidebar: default_toggle_right_sidebar(),
             focus_quick_connect: default_focus_quick_connect(),
+            focus_plugin_search: default_focus_plugin_search(),
         }
     }
 }
@@ -298,7 +424,18 @@ pub struct LayoutConfig {
     pub left_panel_collapsed: bool,
     #[serde(default)]
     pub right_panel_collapsed: bool,
+    /// Persisted window width in logical points (0 = use config default).
+    #[serde(default)]
+    pub window_width: f32,
+    /// Persisted window height in logical points (0 = use config default).
+    #[serde(default)]
+    pub window_height: f32,
+    /// Persisted UI zoom factor (0 or 1.0 = default).
+    #[serde(default = "default_zoom")]
+    pub zoom_factor: f32,
 }
+
+fn default_zoom() -> f32 { 1.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
@@ -314,6 +451,9 @@ impl Default for LayoutConfig {
             left_panel_width: default_panel_width(),
             left_panel_collapsed: false,
             right_panel_collapsed: false,
+            window_width: 0.0,
+            window_height: 0.0,
+            zoom_factor: 1.0,
         }
     }
 }

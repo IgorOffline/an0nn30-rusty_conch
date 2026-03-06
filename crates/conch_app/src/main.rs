@@ -54,7 +54,14 @@ fn main() -> eframe::Result<()> {
     // Load config early so we can size the window before creating the app.
     config::migrate_if_needed();
     let user_config = config::load_user_config().unwrap_or_default();
-    let window_size = window_size_from_config(&user_config.window.dimensions);
+    let persistent = config::load_persistent_state().unwrap_or_default();
+
+    // Use persisted window size if available, otherwise fall back to config-based sizing.
+    let window_size = if persistent.layout.window_width > 0.0 && persistent.layout.window_height > 0.0 {
+        [persistent.layout.window_width, persistent.layout.window_height]
+    } else {
+        window_size_from_config(&user_config.window.dimensions)
+    };
 
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -63,12 +70,26 @@ fn main() -> eframe::Result<()> {
             .expect("Failed to create tokio runtime"),
     );
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(window_size)
-            .with_title_shown(true)
+    let native_menu = cfg!(target_os = "macos") && user_config.conch.ui.native_menu_bar;
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(window_size)
+        .with_icon(Arc::new(load_app_icon()));
+
+    if cfg!(target_os = "macos") && !native_menu {
+        // Transparent title bar: content extends behind it, we draw our own menu.
+        viewport = viewport
+            .with_fullsize_content_view(true)
             .with_titlebar_shown(true)
-            .with_icon(Arc::new(load_app_icon())),
+            .with_title_shown(false);
+    } else {
+        viewport = viewport
+            .with_title_shown(true)
+            .with_titlebar_shown(true);
+    }
+
+    let options = eframe::NativeOptions {
+        viewport,
         ..Default::default()
     };
 

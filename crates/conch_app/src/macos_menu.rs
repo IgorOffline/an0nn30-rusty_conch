@@ -9,7 +9,7 @@ use std::sync::{LazyLock, Mutex};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem, NSWindow};
 use objc2_foundation::{MainThreadMarker, NSString};
 
 /// Actions that can be triggered from the native menu bar.
@@ -19,6 +19,7 @@ pub enum MenuAction {
     Quit,
     NewLocalTerminal,
     NewSshSession,
+    SftpTransfer,
     SshTunnels,
     ToggleLeftSidebar,
     ToggleRightSidebar,
@@ -66,6 +67,11 @@ define_class!(
         #[unsafe(method(newSshSession:))]
         fn new_ssh_session(&self, _sender: *mut AnyObject) {
             push_action(MenuAction::NewSshSession);
+        }
+
+        #[unsafe(method(sftpTransfer:))]
+        fn sftp_transfer(&self, _sender: *mut AnyObject) {
+            push_action(MenuAction::SftpTransfer);
         }
 
         #[unsafe(method(sshTunnels:))]
@@ -226,5 +232,17 @@ unsafe fn make_item_no_target(
             Some(action),
             &ns_key,
         )
+    }
+}
+
+/// Make the title bar transparent so app content shows through it.
+/// Call once after the window has been created.
+pub fn set_titlebar_transparent() {
+    let mtm = MainThreadMarker::new()
+        .expect("set_titlebar_transparent must be called from the main thread");
+    let app = unsafe { NSApplication::sharedApplication(mtm) };
+    let windows = unsafe { app.windows() };
+    for window in windows.iter() {
+        window.setTitlebarAppearsTransparent(true);
     }
 }

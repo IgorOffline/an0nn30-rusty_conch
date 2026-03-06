@@ -68,6 +68,17 @@ fn is_in_selection(col: usize, row: usize, start: (usize, usize), end: (usize, u
     true
 }
 
+/// Copied cell data for rendering after releasing the terminal lock.
+struct CellInfo {
+    c: char,
+    col: usize,
+    row: usize,
+    fg: [f32; 4],
+    bg: [f32; 4],
+    underline: bool,
+    strikeout: bool,
+}
+
 /// Paint the terminal grid into the given UI region.
 ///
 /// Returns the `Response` (for mouse interaction) and the computed `SizeInfo`.
@@ -90,84 +101,137 @@ pub fn show_terminal(
     // Fill the entire allocation with the terminal background.
     painter.rect_filled(rect, 0.0, rgba_to_color32(colors.background));
 
-    let term = term.lock();
-    let content = term.renderable_content();
-    let font_id = FontId::new(font_size, FontFamily::Monospace);
+    // ── Collect cell data under lock, then release ──────────────────────
+    // This minimises FairMutex hold time so the EventLoop can keep
+    // processing VTE data while we do the (expensive) font-layout paint.
+    let (cells, cursor_pos) = {
+        let term = term.lock();
+        let content = term.renderable_content();
 
-    for indexed in content.display_iter {
-        let cell = indexed.cell;
-        let point = indexed.point;
-        let flags = cell.flags;
+        let show_cursor = cursor_visible
+            && selection.is_none()
+            && content
+                .mode
+                .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
 
-        // Skip the trailing spacer cell of wide characters.
-        if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-            continue;
-        }
+        let cursor_pos = if show_cursor {
+            Some((content.cursor.point.column.0, content.cursor.point.line.0 as usize, content.cursor.shape))
+        } else {
+            None
+        };
 
-        let mut fg = convert_color(cell.fg, colors);
-        let mut bg = convert_color(cell.bg, colors);
+        let mut cells = Vec::with_capacity(size_info.columns() * size_info.rows());
+        for indexed in content.display_iter {
+            let cell = indexed.cell;
+            let point = indexed.point;
+            let flags = cell.flags;
 
-        if flags.contains(CellFlags::INVERSE) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
+            if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                continue;
+            }
 
-        let col = point.column.0;
-        let row = point.line.0 as usize;
+            let mut fg = convert_color(cell.fg, colors);
+            let mut bg = convert_color(cell.bg, colors);
 
-        // Selection highlighting.
-        if let Some((sel_start, sel_end)) = selection {
-            if is_in_selection(col, row, sel_start, sel_end) {
-                if let (Some(sel_bg), Some(sel_fg)) = (colors.selection_bg, colors.selection_text) {
-                    bg = sel_bg;
-                    fg = sel_fg;
-                } else {
-                    std::mem::swap(&mut fg, &mut bg);
+            if flags.contains(CellFlags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+
+            let col = point.column.0;
+            let row = point.line.0 as usize;
+
+            if let Some((sel_start, sel_end)) = selection {
+                if is_in_selection(col, row, sel_start, sel_end) {
+                    if let (Some(sel_bg), Some(sel_fg)) = (colors.selection_bg, colors.selection_text) {
+                        bg = sel_bg;
+                        fg = sel_fg;
+                    } else {
+                        std::mem::swap(&mut fg, &mut bg);
+                    }
                 }
             }
+
+            cells.push(CellInfo {
+                c: cell.c,
+                col,
+                row,
+                fg,
+                bg,
+                underline: flags.contains(CellFlags::UNDERLINE),
+                strikeout: flags.contains(CellFlags::STRIKEOUT),
+            });
         }
 
-        let (x, y) = size_info.cell_position(col, row);
-        let cell_rect = Rect::from_min_size(
-            Pos2::new(rect.min.x + x, rect.min.y + y),
-            Vec2::new(cell_width, cell_height),
-        );
+        (cells, cursor_pos)
+    }; // ── lock released here ──────────────────────────────────────────────
 
-        // Paint non-default cell backgrounds.
-        if bg != colors.background {
-            painter.rect_filled(cell_rect, 0.0, rgba_to_color32(bg));
+    // Paint cells (no lock held — EventLoop can process data concurrently).
+    let font_id = FontId::new(font_size, FontFamily::Monospace);
+
+    for ci in &cells {
+        let (x, y) = size_info.cell_position(ci.col, ci.row);
+
+        if ci.bg != colors.background {
+            let cell_rect = Rect::from_min_size(
+                Pos2::new(rect.min.x + x, rect.min.y + y),
+                Vec2::new(cell_width, cell_height),
+            );
+            painter.rect_filled(cell_rect, 0.0, rgba_to_color32(ci.bg));
         }
 
-        let c = cell.c;
-        if c != ' ' && c != '\0' {
+        if ci.c != ' ' && ci.c != '\0' {
             paint_char(
                 &painter,
-                c,
+                ci.c,
                 Pos2::new(rect.min.x + x, rect.min.y + y),
                 &font_id,
-                rgba_to_color32(fg),
-                flags.contains(CellFlags::UNDERLINE),
-                flags.contains(CellFlags::STRIKEOUT),
+                rgba_to_color32(ci.fg),
+                ci.underline,
+                ci.strikeout,
                 cell_width,
                 cell_height,
             );
         }
     }
 
-    // Draw the block cursor (hidden during active selection).
-    if cursor_visible
-        && selection.is_none()
-        && content
-            .mode
-            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR)
-    {
-        let cp = content.cursor.point;
-        let (cx, cy) = size_info.cell_position(cp.column.0, cp.line.0 as usize);
-        let cursor_rect = Rect::from_min_size(
-            Pos2::new(rect.min.x + cx, rect.min.y + cy),
-            Vec2::new(cell_width, cell_height),
-        );
+    // Draw cursor (Block, Underline, or Beam).
+    if let Some((col, row, shape)) = cursor_pos {
+        let (cx, cy) = size_info.cell_position(col, row);
         let cursor_c = colors.cursor_color.unwrap_or(colors.foreground);
-        painter.rect_filled(cursor_rect, 0.0, rgba_to_color32(cursor_c));
+        let color = rgba_to_color32(cursor_c);
+        match shape {
+            alacritty_terminal::vte::ansi::CursorShape::Block => {
+                let cursor_rect = Rect::from_min_size(
+                    Pos2::new(rect.min.x + cx, rect.min.y + cy),
+                    Vec2::new(cell_width, cell_height),
+                );
+                painter.rect_filled(cursor_rect, 0.0, color);
+            }
+            alacritty_terminal::vte::ansi::CursorShape::Underline => {
+                let thickness = (cell_height * 0.1).max(1.0);
+                let cursor_rect = Rect::from_min_size(
+                    Pos2::new(rect.min.x + cx, rect.min.y + cy + cell_height - thickness),
+                    Vec2::new(cell_width, thickness),
+                );
+                painter.rect_filled(cursor_rect, 0.0, color);
+            }
+            alacritty_terminal::vte::ansi::CursorShape::Beam => {
+                let thickness = (cell_width * 0.12).max(1.0);
+                let cursor_rect = Rect::from_min_size(
+                    Pos2::new(rect.min.x + cx, rect.min.y + cy),
+                    Vec2::new(thickness, cell_height),
+                );
+                painter.rect_filled(cursor_rect, 0.0, color);
+            }
+            alacritty_terminal::vte::ansi::CursorShape::HollowBlock => {
+                let cursor_rect = Rect::from_min_size(
+                    Pos2::new(rect.min.x + cx, rect.min.y + cy),
+                    Vec2::new(cell_width, cell_height),
+                );
+                painter.rect_stroke(cursor_rect, 0.0, egui::Stroke::new(1.0, color), egui::StrokeKind::Inside);
+            }
+            alacritty_terminal::vte::ansi::CursorShape::Hidden => {}
+        }
     }
 
     (response, size_info)

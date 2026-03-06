@@ -50,6 +50,8 @@ pub enum SessionPanelAction {
     /// Open the edit dialog for a server entry (stub — not yet wired).
     #[allow(dead_code)]
     EditServer { addr: ServerAddress },
+    /// Open the new connection dialog.
+    OpenNewConnectionDialog,
 }
 
 /// What kind of item a pending delete-confirmation targets.
@@ -160,7 +162,12 @@ pub fn show_session_panel(
         }
     }
 
+    // Reserve space at bottom for the "+ New Connection" button.
+    let button_height = 28.0;
+    let scroll_max = (ui.available_height() - button_height - 4.0).max(40.0);
+
     let scroll_resp = egui::ScrollArea::vertical()
+        .max_height(scroll_max)
         .show(ui, |ui| {
             if is_filtering {
                 // Filtered view: flat list of matching servers
@@ -294,6 +301,20 @@ pub fn show_session_panel(
                 folder_path: Vec::new(),
             };
             ui.close_menu();
+        }
+    });
+
+    // Pinned "+ New Connection" button at the bottom of the panel.
+    ui.separator();
+    ui.horizontal(|ui| {
+        if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::Computer, dark_mode)) {
+            ui.add(img);
+        }
+        if ui
+            .add(egui::Label::new("+ New Connection").sense(egui::Sense::click()))
+            .clicked()
+        {
+            action = SessionPanelAction::OpenNewConnectionDialog;
         }
     });
 
