@@ -699,10 +699,28 @@ impl eframe::App for ConchApp {
         // Collect copy/paste events before rendering panels.
         let mut copy_requested = false;
         let mut paste_text: Option<String> = None;
+        // On Linux/Windows, Ctrl is the "command" modifier in egui, so Ctrl+C
+        // becomes Event::Copy instead of Event::Key. For a terminal emulator
+        // we need Ctrl+C to send SIGINT (0x03) to the PTY. We track it here
+        // and send the control character later when forward_to_pty is known.
+        let mut ctrl_c_for_pty = false;
+        let mut ctrl_x_for_pty = false;
         ctx.input(|i| {
             for event in &i.events {
                 match event {
-                    egui::Event::Copy | egui::Event::Cut => copy_requested = true,
+                    egui::Event::Copy | egui::Event::Cut => {
+                        if cfg!(target_os = "macos") {
+                            // On macOS, Cmd+C/X is copy/cut (Ctrl+C goes via Event::Key)
+                            copy_requested = true;
+                        } else {
+                            // On Linux/Windows, this is really Ctrl+C/X — send to PTY
+                            match event {
+                                egui::Event::Copy => ctrl_c_for_pty = true,
+                                egui::Event::Cut => ctrl_x_for_pty = true,
+                                _ => {}
+                            }
+                        }
+                    }
                     egui::Event::Paste(text) => paste_text = Some(text.clone()),
                     _ => {}
                 }
@@ -1569,6 +1587,22 @@ impl eframe::App for ConchApp {
                     } else {
                         session.backend.write(text.as_bytes());
                     }
+                }
+            }
+        }
+
+        // On Linux/Windows, forward Ctrl+C (0x03) and Ctrl+X (0x18) to the PTY.
+        // These were captured as Event::Copy/Cut by egui since Ctrl is the
+        // "command" modifier on non-macOS platforms.
+        if forward_to_pty {
+            if ctrl_c_for_pty {
+                if let Some(session) = self.state.active_session() {
+                    session.backend.write(&[0x03]); // ETX — Ctrl+C
+                }
+            }
+            if ctrl_x_for_pty {
+                if let Some(session) = self.state.active_session() {
+                    session.backend.write(&[0x18]); // CAN — Ctrl+X
                 }
             }
         }

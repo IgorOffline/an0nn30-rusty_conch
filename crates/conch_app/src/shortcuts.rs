@@ -2,6 +2,8 @@
 
 use crate::app::ConchApp;
 use crate::input;
+#[cfg(not(target_os = "macos"))]
+use crate::terminal::widget::get_selected_text;
 use crate::ui::dialogs::new_connection::NewConnectionForm;
 use crate::ui::dialogs::tunnels::TunnelManagerState;
 use crate::ui::file_browser::FileBrowserPane;
@@ -165,6 +167,14 @@ impl ConchApp {
                             }
                         }
 
+                        // On Linux/Windows, Ctrl+Shift+C copies terminal selection
+                        // (since Ctrl+C is forwarded to the PTY as SIGINT).
+                        #[cfg(not(target_os = "macos"))]
+                        if forward_to_pty && modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
+                            self.copy_terminal_selection(ctx);
+                            return;
+                        }
+
                         // File browser keyboard navigation.
                         if self.state.file_browser.focused {
                             self.handle_file_browser_key(key, modifiers);
@@ -197,6 +207,19 @@ impl ConchApp {
                 }
             }
         });
+    }
+
+    /// Copy the current terminal text selection to the clipboard.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn copy_terminal_selection(&self, ctx: &egui::Context) {
+        if let Some((start, end)) = self.selection.normalized() {
+            if let Some(session) = self.state.active_session() {
+                let text = get_selected_text(session.backend.term(), start, end);
+                if !text.is_empty() {
+                    ctx.copy_text(text);
+                }
+            }
+        }
     }
 
     pub(crate) fn toggle_left_sidebar(&mut self) {

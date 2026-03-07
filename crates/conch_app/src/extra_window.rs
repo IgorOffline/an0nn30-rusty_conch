@@ -214,13 +214,25 @@ impl ExtraWindow {
             }
         }
 
-        // Collect paste events.
+        // Collect copy/paste events.
         let mut copy_requested = false;
         let mut paste_text: Option<String> = None;
+        let mut ctrl_c_for_pty = false;
+        let mut ctrl_x_for_pty = false;
         ctx.input(|i| {
             for event in &i.events {
                 match event {
-                    egui::Event::Copy | egui::Event::Cut => copy_requested = true,
+                    egui::Event::Copy | egui::Event::Cut => {
+                        if cfg!(target_os = "macos") {
+                            copy_requested = true;
+                        } else {
+                            match event {
+                                egui::Event::Copy => ctrl_c_for_pty = true,
+                                egui::Event::Cut => ctrl_x_for_pty = true,
+                                _ => {}
+                            }
+                        }
+                    }
                     egui::Event::Paste(text) => paste_text = Some(text.clone()),
                     _ => {}
                 }
@@ -315,6 +327,20 @@ impl ExtraWindow {
                     } else {
                         session.backend.write(text.as_bytes());
                     }
+                }
+            }
+        }
+
+        // On Linux/Windows, forward Ctrl+C/X to the PTY as control characters.
+        if forward_to_pty {
+            if ctrl_c_for_pty {
+                if let Some(session) = self.active_session() {
+                    session.backend.write(&[0x03]);
+                }
+            }
+            if ctrl_x_for_pty {
+                if let Some(session) = self.active_session() {
+                    session.backend.write(&[0x18]);
                 }
             }
         }
@@ -536,6 +562,20 @@ impl ExtraWindow {
                                 self.should_close = true;
                                 return;
                             }
+                        }
+
+                        // On Linux/Windows, Ctrl+Shift+C copies terminal selection.
+                        #[cfg(not(target_os = "macos"))]
+                        if forward_to_pty && modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
+                            if let Some((start, end)) = self.selection.normalized() {
+                                if let Some(session) = self.active_session() {
+                                    let text = get_selected_text(session.backend.term(), start, end);
+                                    if !text.is_empty() {
+                                        ctx.copy_text(text);
+                                    }
+                                }
+                            }
+                            return;
                         }
 
                         // Forward to PTY.
