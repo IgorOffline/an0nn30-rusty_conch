@@ -83,6 +83,8 @@ pub(crate) struct PendingSshInfo {
     pub(crate) detail: String,
     /// When the connection was initiated (for the bouncing progress bar).
     pub(crate) started: Instant,
+    /// If the connection failed, the error message to display.
+    pub(crate) error: Option<String>,
 }
 
 /// A plugin currently executing on a tokio task.
@@ -286,8 +288,11 @@ impl ConchApp {
             self.remove_session(id);
         }
 
-        // Quit when the last session exits (and no SSH connections are pending).
-        if self.state.sessions.is_empty() && self.pending_ssh_connections.is_empty() {
+        // Quit when the last session exits (and no SSH connections are pending or failed).
+        if self.state.sessions.is_empty()
+            && self.pending_ssh_connections.is_empty()
+            && self.pending_ssh_info.is_empty()
+        {
             self.quit_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -296,23 +301,23 @@ impl ConchApp {
         let mut completed = Vec::new();
         for (i, pending) in self.pending_ssh_connections.iter().enumerate() {
             match pending.rx.try_recv() {
-                Ok(Ok(ssh)) => completed.push((i, pending.id, Some(ssh))),
+                Ok(Ok(ssh)) => completed.push((i, pending.id, Ok(ssh))),
                 Ok(Err(err)) => {
                     log::error!("SSH connection failed: {err}");
-                    completed.push((i, pending.id, None));
+                    completed.push((i, pending.id, Err(err)));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     log::error!("SSH connection channel dropped");
-                    completed.push((i, pending.id, None));
+                    completed.push((i, pending.id, Err("Connection channel dropped".into())));
                 }
             }
         }
         // Remove in reverse order to keep indices valid.
-        for (i, id, ssh_opt) in completed.into_iter().rev() {
+        for (i, id, result) in completed.into_iter().rev() {
             self.pending_ssh_connections.remove(i);
-            self.pending_ssh_info.remove(&id);
-            if let Some(mut ssh_session) = ssh_opt {
+            if let Ok(mut ssh_session) = result {
+                self.pending_ssh_info.remove(&id);
                 let event_rx = ssh_session.take_event_rx();
 
                 // Spawn SFTP worker for the new SSH session.
@@ -342,11 +347,10 @@ impl ConchApp {
                 };
                 self.state.sessions.insert(id, session);
                 // Tab already exists in tab_order from start_ssh_connect.
-            } else {
-                // Connection failed — remove the tab.
-                self.state.tab_order.retain(|&tab_id| tab_id != id);
-                if self.state.active_tab == Some(id) {
-                    self.state.active_tab = self.state.tab_order.last().copied();
+            } else if let Err(err) = result {
+                // Connection failed — keep the tab but show the error.
+                if let Some(info) = self.pending_ssh_info.get_mut(&id) {
+                    info.error = Some(err);
                 }
             }
         }
@@ -1131,7 +1135,11 @@ impl eframe::App for ConchApp {
                     let tab_title_str: Option<String> = if let Some(session) = self.state.sessions.get(&id) {
                         Some(session.custom_title.as_deref().unwrap_or(&session.title).to_string())
                     } else if let Some(info) = self.pending_ssh_info.get(&id) {
-                        Some(format!("{}...", info.label))
+                        if info.error.is_some() {
+                            Some(format!("{} (failed)", info.label))
+                        } else {
+                            Some(format!("{}...", info.label))
+                        }
                     } else {
                         None
                     };
@@ -1378,9 +1386,19 @@ impl eframe::App for ConchApp {
                             size_info.rows() as u16,
                         );
                     } else if let Some(info) = self.pending_ssh_info.get(&id) {
-                        // Connecting screen.
-                        show_connecting_screen(ui, info);
-                        ctx.request_repaint();
+                        // Connecting or error screen.
+                        let is_connecting = info.error.is_none();
+                        if show_connecting_screen(ui, info) {
+                            // User clicked "Close Tab" on the error screen.
+                            self.pending_ssh_info.remove(&id);
+                            self.state.tab_order.retain(|&tab_id| tab_id != id);
+                            if self.state.active_tab == Some(id) {
+                                self.state.active_tab = self.state.tab_order.last().copied();
+                            }
+                        }
+                        if is_connecting {
+                            ctx.request_repaint();
+                        }
                     }
                 } else {
                     ui.centered_and_justified(|ui| {

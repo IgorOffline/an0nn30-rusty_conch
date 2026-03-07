@@ -19,10 +19,22 @@ pub async fn connect_via_proxy(
         .replace("%h", &params.host)
         .replace("%p", &params.port.to_string());
 
-    // Spawn the proxy command
-    #[cfg(not(windows))]
+    log::debug!("ProxyCommand: {:?}", expanded);
+
+    // Spawn the proxy command via the platform shell.
+    //
+    // On Unix we use `sh -lc` (login shell) so that PATH and other
+    // environment variables are properly initialised.  When the app is
+    // launched from a desktop environment (e.g. macOS Finder / Linux
+    // desktop entry) the inherited environment is minimal and may not
+    // include directories like /usr/bin, causing `ssh` and similar tools
+    // to be missing from PATH.
+    //
+    // On Windows `cmd /C` inherits the full system environment, so no
+    // special handling is needed.
+    #[cfg(unix)]
     let child = Command::new("sh")
-        .arg("-c")
+        .arg("-lc")
         .arg(&expanded)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

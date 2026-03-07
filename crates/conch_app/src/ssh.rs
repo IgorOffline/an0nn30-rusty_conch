@@ -30,6 +30,7 @@ impl ConchApp {
             label,
             detail,
             started: Instant::now(),
+            error: None,
         });
 
         self.state.tab_order.push(id);
@@ -49,7 +50,35 @@ impl ConchApp {
             };
             let result = SshSession::connect(&params, DEFAULT_COLS, DEFAULT_ROWS, term_config)
                 .await
-                .map_err(|e| format!("{host}: {e}"));
+                .map_err(|e| {
+                    // Collect environment diagnostics to help debug Finder-launched issues.
+                    let ssh_auth_sock = std::env::var("SSH_AUTH_SOCK")
+                        .unwrap_or_else(|_| "(not set)".into());
+                    let home = dirs::home_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(not set)".into());
+                    let key_status = [
+                        "id_ed25519", "id_ecdsa", "id_rsa",
+                    ]
+                    .iter()
+                    .map(|name| {
+                        let path = dirs::home_dir()
+                            .unwrap_or_default()
+                            .join(format!(".ssh/{name}"));
+                        let exists = if path.exists() { "found" } else { "missing" };
+                        format!("  ~/.ssh/{name}: {exists}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                    format!(
+                        "{host}: {e:#}\n\n\
+                         --- Diagnostics ---\n\
+                         SSH_AUTH_SOCK: {ssh_auth_sock}\n\
+                         HOME: {home}\n\
+                         Keys:\n{key_status}"
+                    )
+                });
             let _ = tx.send(result);
         });
 
@@ -137,8 +166,10 @@ impl ConchApp {
     }
 }
 
-/// Render the "Connecting to..." screen with a bouncing progress indicator.
-pub(crate) fn show_connecting_screen(ui: &mut egui::Ui, info: &PendingSshInfo) {
+/// Render the "Connecting to..." screen with a bouncing progress indicator,
+/// or the error screen if the connection failed.
+/// Returns `true` if the user clicked the "Close" button on a failed connection.
+pub(crate) fn show_connecting_screen(ui: &mut egui::Ui, info: &PendingSshInfo) -> bool {
     let rect = ui.available_rect_before_wrap();
 
     let bg = if ui.visuals().dark_mode {
@@ -149,6 +180,60 @@ pub(crate) fn show_connecting_screen(ui: &mut egui::Ui, info: &PendingSshInfo) {
     ui.painter().rect_filled(rect, 0.0, bg);
 
     let center = rect.center();
+
+    if let Some(error) = &info.error {
+        // Error screen — use a centered scrollable layout for the diagnostics.
+        let content_width = (rect.width() * 0.7).min(600.0);
+        let content_rect = egui::Rect::from_center_size(
+            center,
+            egui::Vec2::new(content_width, rect.height() * 0.8),
+        );
+        let mut close_clicked = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new(format!("Connection to {} failed", info.label))
+                            .size(24.0)
+                            .color(egui::Color32::from_rgb(220, 50, 50)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(&info.detail)
+                            .size(14.0)
+                            .color(if ui.visuals().dark_mode {
+                                egui::Color32::from_gray(160)
+                            } else {
+                                egui::Color32::from_gray(80)
+                            }),
+                    );
+                    ui.add_space(16.0);
+                });
+
+                let error_color = if ui.visuals().dark_mode {
+                    egui::Color32::from_gray(180)
+                } else {
+                    egui::Color32::from_gray(60)
+                };
+                ui.label(
+                    egui::RichText::new(error)
+                        .size(13.0)
+                        .family(egui::FontFamily::Monospace)
+                        .color(error_color),
+                );
+
+                ui.add_space(16.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button("Close Tab").clicked() {
+                        close_clicked = true;
+                    }
+                });
+                ui.add_space(12.0);
+            });
+        });
+        return close_clicked;
+    }
 
     let heading = format!("Connecting to {}\u{2026}", info.label);
     let heading_galley = ui.painter().layout_no_wrap(
@@ -202,4 +287,6 @@ pub(crate) fn show_connecting_screen(ui: &mut egui::Ui, info: &PendingSshInfo) {
     );
     let accent = egui::Color32::from_rgb(66, 133, 244);
     ui.painter().rect_filled(indicator_rect, bar_h / 2.0, accent);
+
+    false
 }

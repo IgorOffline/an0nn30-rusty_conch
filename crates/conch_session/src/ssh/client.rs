@@ -134,9 +134,14 @@ async fn authenticate(
     if let Some(path) = identity_file {
         let expanded = expand_tilde(path);
         if expanded.exists() {
+            log::debug!("Trying explicit key: {}", expanded.display());
             if try_key_auth(handle, user, &expanded).await? {
+                log::debug!("Authenticated with explicit key: {}", expanded.display());
                 return Ok(());
             }
+            log::debug!("Explicit key auth failed: {}", expanded.display());
+        } else {
+            log::debug!("Explicit key not found: {}", expanded.display());
         }
     }
 
@@ -150,16 +155,22 @@ async fn authenticate(
 
     for key_path in &default_keys {
         if key_path.exists() {
+            log::debug!("Trying default key: {}", key_path.display());
             if try_key_auth(handle, user, key_path).await? {
+                log::debug!("Authenticated with key: {}", key_path.display());
                 return Ok(());
             }
+            log::debug!("Key auth failed: {}", key_path.display());
         }
     }
 
     // 3. Try SSH agent
+    log::debug!("Trying SSH agent auth (SSH_AUTH_SOCK={:?})", std::env::var("SSH_AUTH_SOCK").ok());
     if try_agent_auth(handle, user).await? {
+        log::debug!("Authenticated via SSH agent");
         return Ok(());
     }
+    log::debug!("SSH agent auth failed or unavailable");
 
     // 4. Try password
     if let Some(pass) = password {
