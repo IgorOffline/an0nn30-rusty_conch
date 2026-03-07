@@ -121,8 +121,8 @@ endif
 	sed -i '' 's|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>$(V)</string>|g' packaging/macos/Info.plist
 	cargo check --workspace
 	git add Cargo.toml packaging/macos/Info.plist Cargo.lock
-	git commit -m "release: v$(V)"
-	git tag -a "v$(V)" -m "v$(V)"
+	git diff --cached --quiet || git commit -m "release: v$(V)"
+	git tag -a "v$(V)" -m "v$(V)" -f
 	git push origin main
 	git push origin "v$(V)"
 	@echo "Released v$(V)"
