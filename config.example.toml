@@ -124,6 +124,7 @@ focus_quick_connect = "cmd+/"
 focus_plugin_search = "cmd+shift+p"
 focus_files = "cmd+shift+f"
 zen_mode = "cmd+shift+z"
+ssh_tunnels = "cmd+shift+t"
 
 # ---------------------------------------------------------------------------
 # Conch — UI Settings

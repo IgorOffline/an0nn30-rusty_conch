@@ -357,6 +357,8 @@ pub struct KeyboardConfig {
     pub focus_files: String,
     #[serde(default = "default_zen_mode")]
     pub zen_mode: String,
+    #[serde(default = "default_ssh_tunnels")]
+    pub ssh_tunnels: String,
 }
 
 fn default_theme() -> String { "dracula".into() }
@@ -375,6 +377,7 @@ fn default_focus_plugin_search() -> String { "cmd+shift+p".into() }
 fn default_new_window() -> String { "cmd+shift+n".into() }
 fn default_focus_files() -> String { "cmd+shift+f".into() }
 fn default_zen_mode() -> String { "cmd+shift+z".into() }
+fn default_ssh_tunnels() -> String { "cmd+shift+t".into() }
 
 impl Default for FontFamily {
     fn default() -> Self { Self { family: default_font_name() } }
@@ -413,6 +416,7 @@ impl Default for KeyboardConfig {
             new_window: default_new_window(),
             focus_files: default_focus_files(),
             zen_mode: default_zen_mode(),
+            ssh_tunnels: default_ssh_tunnels(),
         }
     }
 }

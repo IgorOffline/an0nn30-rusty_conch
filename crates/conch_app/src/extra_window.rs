@@ -17,7 +17,8 @@ use crate::state::Session;
 use crate::terminal::widget::{get_selected_text, measure_cell_size, show_terminal};
 use crate::ui::sidebar;
 
-use crate::app::{create_local_session, CURSOR_BLINK_MS, DEFAULT_COLS, DEFAULT_ROWS};
+use crate::app::{CURSOR_BLINK_MS, DEFAULT_COLS, DEFAULT_ROWS};
+use crate::sessions::create_local_session;
 
 pub struct ExtraWindow {
     pub viewport_id: egui::ViewportId,

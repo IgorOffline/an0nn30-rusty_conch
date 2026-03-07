@@ -1,10 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod dialogs;
 mod extra_window;
 mod icons;
 mod input;
 mod ipc;
+mod plugins;
+mod sessions;
+mod shortcuts;
+mod sidebar_handler;
+mod ssh;
 #[cfg(target_os = "macos")]
 mod macos_locale;
 #[cfg(target_os = "macos")]

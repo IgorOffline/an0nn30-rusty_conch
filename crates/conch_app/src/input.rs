@@ -72,6 +72,7 @@ pub struct ResolvedShortcuts {
     pub new_window: Option<KeyBinding>,
     pub focus_files: Option<KeyBinding>,
     pub zen_mode: Option<KeyBinding>,
+    pub ssh_tunnels: Option<KeyBinding>,
 }
 
 impl ResolvedShortcuts {
@@ -89,6 +90,7 @@ impl ResolvedShortcuts {
             new_window: KeyBinding::parse(&config.new_window),
             focus_files: KeyBinding::parse(&config.focus_files),
             zen_mode: KeyBinding::parse(&config.zen_mode),
+            ssh_tunnels: KeyBinding::parse(&config.ssh_tunnels),
         }
     }
 
@@ -106,6 +108,7 @@ impl ResolvedShortcuts {
             &self.new_window,
             &self.focus_files,
             &self.zen_mode,
+            &self.ssh_tunnels,
         ];
         if bindings.iter().any(|b| b.as_ref().is_some_and(|kb| kb.matches(key, modifiers))) {
             return true;

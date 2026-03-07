@@ -6,32 +6,30 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use alacritty_terminal::event::Event as TermEvent;
 use conch_core::{config, ssh_config};
-use conch_core::models::SavedTunnel;
-use conch_session::{LocalSession, SftpCmd, SftpEvent, SshSession, TunnelManager, run_sftp_worker};
+use conch_session::{SftpCmd, SftpEvent, SshSession, TunnelManager, run_sftp_worker};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use crate::extra_window::ExtraWindow;
 use crate::icons::{Icon, IconCache};
-use crate::input::{self, ResolvedShortcuts};
+use crate::input::ResolvedShortcuts;
 use crate::mouse::{Selection, handle_terminal_mouse};
+use crate::plugins::scan_plugin_dirs;
+use crate::sessions::{create_local_session, load_local_entries, open_local_terminal};
+use crate::ssh::show_connecting_screen;
 use crate::state::{AppState, Session, SessionBackend};
 use crate::terminal::widget::{get_selected_text, measure_cell_size, show_terminal};
-use conch_plugin::{
-    PluginCommand, PluginContext, PluginMeta, PluginResponse, SessionInfoData,
-    SessionTarget, discover_plugins, run_plugin,
-};
+use conch_plugin::{PluginCommand, PluginMeta, PluginResponse};
 use crate::ui::dialogs::new_connection::{self, DialogAction, NewConnectionForm};
-use crate::ui::dialogs::plugin_dialog::{self, ActivePluginDialog, FormFieldState};
+use crate::ui::dialogs::plugin_dialog::{self, ActivePluginDialog};
 use crate::ui::dialogs::preferences::{self, PreferencesAction, PreferencesForm};
 use crate::ui::dialogs::tunnels::{self, TunnelManagerAction, TunnelManagerState};
-use crate::ui::file_browser::FileListEntry;
-use crate::ui::session_panel::{self, ServerAddress, SessionPanelAction, SessionPanelState};
+use crate::ui::session_panel::{self, SessionPanelAction, SessionPanelState};
 use crate::ui::sidebar::{self, SidebarAction};
 
 /// Initial PTY dimensions before the first font-based resize.
@@ -72,116 +70,116 @@ fn cmd_shortcut(key: &str) -> egui::WidgetText {
 pub(crate) const CURSOR_BLINK_MS: u128 = 500;
 
 /// Receives the result of an async SSH connection attempt.
-struct PendingSsh {
-    id: Uuid,
-    rx: std::sync::mpsc::Receiver<Result<SshSession, String>>,
+pub(crate) struct PendingSsh {
+    pub(crate) id: Uuid,
+    pub(crate) rx: std::sync::mpsc::Receiver<Result<SshSession, String>>,
 }
 
 /// Display info for a pending SSH connection (shown in the connecting tab).
-struct PendingSshInfo {
+pub(crate) struct PendingSshInfo {
     /// Short name for the tab title and heading, e.g. "dustin-vm"
-    label: String,
+    pub(crate) label: String,
     /// Detail line, e.g. "dustin@lab.nexxuscraft.com:22"
-    detail: String,
+    pub(crate) detail: String,
     /// When the connection was initiated (for the bouncing progress bar).
-    started: Instant,
+    pub(crate) started: Instant,
 }
 
 /// A plugin currently executing on a tokio task.
-struct RunningPlugin {
-    meta: PluginMeta,
-    commands_rx: tokio::sync::mpsc::UnboundedReceiver<(PluginCommand, tokio::sync::mpsc::UnboundedSender<PluginResponse>)>,
+pub(crate) struct RunningPlugin {
+    pub(crate) meta: PluginMeta,
+    pub(crate) commands_rx: tokio::sync::mpsc::UnboundedReceiver<(PluginCommand, tokio::sync::mpsc::UnboundedSender<PluginResponse>)>,
     /// Queued dialog requests waiting to be shown (FIFO).
-    pending_dialogs: Vec<(PluginCommand, tokio::sync::mpsc::UnboundedSender<PluginResponse>)>,
+    pub(crate) pending_dialogs: Vec<(PluginCommand, tokio::sync::mpsc::UnboundedSender<PluginResponse>)>,
 }
 
 /// The top-level eframe application.
 pub struct ConchApp {
-    state: AppState,
-    rt: Arc<Runtime>,
-    shortcuts: ResolvedShortcuts,
+    pub(crate) state: AppState,
+    pub(crate) rt: Arc<Runtime>,
+    pub(crate) shortcuts: ResolvedShortcuts,
 
     // Terminal rendering
-    cell_width: f32,
-    cell_height: f32,
-    cell_size_measured: bool,
-    last_pixels_per_point: f32,
+    pub(crate) cell_width: f32,
+    pub(crate) cell_height: f32,
+    pub(crate) cell_size_measured: bool,
+    pub(crate) last_pixels_per_point: f32,
 
     // Cursor blink
-    cursor_visible: bool,
-    last_blink: Instant,
+    pub(crate) cursor_visible: bool,
+    pub(crate) last_blink: Instant,
 
     // Resize tracking (only send resize when dimensions actually change)
-    last_cols: u16,
-    last_rows: u16,
+    pub(crate) last_cols: u16,
+    pub(crate) last_rows: u16,
 
     // Mouse selection
-    selection: Selection,
+    pub(crate) selection: Selection,
 
     // Async SSH connection results
-    pending_ssh_connections: Vec<PendingSsh>,
-    pending_ssh_info: HashMap<Uuid, PendingSshInfo>,
+    pub(crate) pending_ssh_connections: Vec<PendingSsh>,
+    pub(crate) pending_ssh_info: HashMap<Uuid, PendingSshInfo>,
 
     // SFTP worker state (auto-spawned on SSH connect, drives sidebar remote pane)
-    sftp_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<SftpCmd>>,
-    sftp_result_rx: Option<std::sync::mpsc::Receiver<SftpEvent>>,
-    sftp_session_id: Option<Uuid>,
-    remote_home: Option<PathBuf>,
-    last_active_tab: Option<Uuid>,
-    transfers: Vec<sidebar::TransferStatus>,
+    pub(crate) sftp_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<SftpCmd>>,
+    pub(crate) sftp_result_rx: Option<std::sync::mpsc::Receiver<SftpEvent>>,
+    pub(crate) sftp_session_id: Option<Uuid>,
+    pub(crate) remote_home: Option<PathBuf>,
+    pub(crate) last_active_tab: Option<Uuid>,
+    pub(crate) transfers: Vec<sidebar::TransferStatus>,
 
     // Icons
-    icon_cache: Option<IconCache>,
+    pub(crate) icon_cache: Option<IconCache>,
 
     // Session panel UI state (inline rename, new-folder input)
-    session_panel_state: SessionPanelState,
+    pub(crate) session_panel_state: SessionPanelState,
 
     // Transient UI state
-    use_native_menu: bool,
+    pub(crate) use_native_menu: bool,
     /// The right sidebar was opened temporarily for quick connect (Cmd+/).
-    quick_connect_opened_sidebar: bool,
+    pub(crate) quick_connect_opened_sidebar: bool,
     /// The left sidebar was opened temporarily for plugin search (Cmd+Shift+P).
-    plugin_search_opened_sidebar: bool,
-    plugin_search_query: String,
-    plugin_search_focus: bool,
-    show_about: bool,
-    quit_requested: bool,
-    style_applied: bool,
-    preferences_form: Option<PreferencesForm>,
+    pub(crate) plugin_search_opened_sidebar: bool,
+    pub(crate) plugin_search_query: String,
+    pub(crate) plugin_search_focus: bool,
+    pub(crate) show_about: bool,
+    pub(crate) quit_requested: bool,
+    pub(crate) style_applied: bool,
+    pub(crate) preferences_form: Option<PreferencesForm>,
 
     // Tunnel management
-    tunnel_manager: TunnelManager,
-    tunnel_dialog: Option<TunnelManagerState>,
+    pub(crate) tunnel_manager: TunnelManager,
+    pub(crate) tunnel_dialog: Option<TunnelManagerState>,
     /// IDs of currently active tunnels (refreshed each frame from TunnelManager).
-    tunnel_active_ids: Vec<Uuid>,
+    pub(crate) tunnel_active_ids: Vec<Uuid>,
     /// Receives results from async tunnel activation attempts.
-    pending_tunnel_results: Vec<(Uuid, std::sync::mpsc::Receiver<Result<(), String>>)>,
+    pub(crate) pending_tunnel_results: Vec<(Uuid, std::sync::mpsc::Receiver<Result<(), String>>)>,
 
     // Tab rename dialog
-    rename_tab_id: Option<Uuid>,
-    rename_tab_buf: String,
-    rename_tab_focus: bool,
+    pub(crate) rename_tab_id: Option<Uuid>,
+    pub(crate) rename_tab_buf: String,
+    pub(crate) rename_tab_focus: bool,
 
     // Window focus tracking (for FOCUS_IN_OUT terminal mode)
-    window_focused: bool,
+    pub(crate) window_focused: bool,
 
     // Extra windows (multi-window via egui viewports)
-    extra_windows: Vec<ExtraWindow>,
-    next_viewport_num: u32,
+    pub(crate) extra_windows: Vec<ExtraWindow>,
+    pub(crate) next_viewport_num: u32,
     /// Index of the focused extra window, or `None` if the main window is focused.
-    focused_extra_window: Option<usize>,
+    pub(crate) focused_extra_window: Option<usize>,
 
     // Plugin engine
-    discovered_plugins: Vec<PluginMeta>,
-    running_plugins: Vec<RunningPlugin>,
-    plugin_output_lines: Vec<String>,
-    active_plugin_dialog: Option<ActivePluginDialog>,
-    plugin_progress: Option<String>,
-    pending_clipboard: Option<String>,
-    selected_plugin: Option<usize>,
+    pub(crate) discovered_plugins: Vec<PluginMeta>,
+    pub(crate) running_plugins: Vec<RunningPlugin>,
+    pub(crate) plugin_output_lines: Vec<String>,
+    pub(crate) active_plugin_dialog: Option<ActivePluginDialog>,
+    pub(crate) plugin_progress: Option<String>,
+    pub(crate) pending_clipboard: Option<String>,
+    pub(crate) selected_plugin: Option<usize>,
 
     // IPC socket listener
-    ipc_listener: Option<crate::ipc::IpcListener>,
+    pub(crate) ipc_listener: Option<crate::ipc::IpcListener>,
 }
 
 impl ConchApp {
@@ -467,715 +465,6 @@ impl ConchApp {
 
         // Poll running plugins.
         self.poll_plugin_events(ctx);
-    }
-
-    /// Drain commands from all running plugins and handle them.
-    fn poll_plugin_events(&mut self, ctx: &egui::Context) {
-        // Collect commands from running plugins into a separate vec to avoid
-        // borrowing self.running_plugins while calling self.handle_plugin_command.
-        let mut immediate_cmds = Vec::new();
-        self.running_plugins.retain_mut(|rp| {
-            loop {
-                match rp.commands_rx.try_recv() {
-                    Ok((cmd, resp_tx)) => {
-                        if is_dialog_command(&cmd) {
-                            rp.pending_dialogs.push((cmd, resp_tx));
-                        } else {
-                            immediate_cmds.push((cmd, resp_tx));
-                        }
-                        ctx.request_repaint();
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return true,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return false,
-                }
-            }
-        });
-
-        // Process non-dialog commands.
-        for (cmd, resp_tx) in immediate_cmds {
-            self.handle_plugin_command(cmd, resp_tx);
-        }
-
-        // If no dialog is currently active, promote the next pending one.
-        if self.active_plugin_dialog.is_none() {
-            for rp in &mut self.running_plugins {
-                if !rp.pending_dialogs.is_empty() {
-                    let (cmd, resp_tx) = rp.pending_dialogs.remove(0);
-                    self.promote_dialog_command(cmd, resp_tx);
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Handle a non-dialog plugin command immediately.
-    fn handle_plugin_command(
-        &mut self,
-        cmd: PluginCommand,
-        resp_tx: tokio::sync::mpsc::UnboundedSender<PluginResponse>,
-    ) {
-        match cmd {
-            PluginCommand::Send { target, text } => {
-                if let Some(session) = self.resolve_session(&target) {
-                    session.backend.write(text.as_bytes());
-                }
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::Exec { target, command } => {
-                // For now, exec on local sessions runs via /bin/sh -c.
-                // SSH exec would need a one-shot channel on the ssh_handle.
-                // Simplified: send command + newline and return empty output.
-                if let Some(session) = self.resolve_session(&target) {
-                    session.backend.write(format!("{}\n", command).as_bytes());
-                }
-                let _ = resp_tx.send(PluginResponse::Output(String::new()));
-            }
-            PluginCommand::OpenSession { name } => {
-                // Try to find a matching server and connect.
-                let servers = self.collect_all_servers();
-                if let Some(server) = servers.iter().find(|s| s.name == name || s.host == name) {
-                    self.start_ssh_connect(
-                        server.host.clone(),
-                        server.port,
-                        server.user.clone(),
-                        server.identity_file.clone(),
-                        server.proxy_command.clone(),
-                        server.proxy_jump.clone(),
-                        None,
-                    );
-                }
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::Clipboard(text) => {
-                self.pending_clipboard = Some(text);
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::Notify(msg) => {
-                log::info!("[plugin] {msg}");
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::Log(msg) => {
-                log::info!("[plugin] {msg}");
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::UiAppend(text) => {
-                self.plugin_output_lines.push(text);
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::UiClear => {
-                self.plugin_output_lines.clear();
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::GetCurrentSession => {
-                let info = self.state.active_tab.and_then(|id| {
-                    self.state.sessions.get(&id).map(|s| SessionInfoData {
-                        id: id.to_string(),
-                        title: s.custom_title.as_ref().unwrap_or(&s.title).clone(),
-                        session_type: match &s.backend {
-                            SessionBackend::Local(_) => "local".into(),
-                            SessionBackend::Ssh(_) => "ssh".into(),
-                        },
-                    })
-                });
-                let _ = resp_tx.send(PluginResponse::SessionInfo(info));
-            }
-            PluginCommand::GetAllSessions => {
-                let list: Vec<SessionInfoData> = self
-                    .state
-                    .sessions
-                    .iter()
-                    .map(|(id, s)| SessionInfoData {
-                        id: id.to_string(),
-                        title: s.custom_title.as_ref().unwrap_or(&s.title).clone(),
-                        session_type: match &s.backend {
-                            SessionBackend::Local(_) => "local".into(),
-                            SessionBackend::Ssh(_) => "ssh".into(),
-                        },
-                    })
-                    .collect();
-                let _ = resp_tx.send(PluginResponse::SessionList(list));
-            }
-            PluginCommand::GetNamedSession { name } => {
-                let info = self.state.sessions.iter().find_map(|(id, s)| {
-                    let title = s.custom_title.as_ref().unwrap_or(&s.title);
-                    if title == &name {
-                        Some(SessionInfoData {
-                            id: id.to_string(),
-                            title: title.clone(),
-                            session_type: match &s.backend {
-                                SessionBackend::Local(_) => "local".into(),
-                                SessionBackend::Ssh(_) => "ssh".into(),
-                            },
-                        })
-                    } else {
-                        None
-                    }
-                });
-                let _ = resp_tx.send(PluginResponse::SessionInfo(info));
-            }
-            PluginCommand::GetServers => {
-                let names: Vec<String> = self
-                    .collect_all_servers()
-                    .iter()
-                    .map(|s| s.name.clone())
-                    .collect();
-                let _ = resp_tx.send(PluginResponse::ServerList(names));
-            }
-            PluginCommand::ShowProgress { message } => {
-                self.plugin_progress = Some(message);
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            PluginCommand::HideProgress => {
-                self.plugin_progress = None;
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-            // Dialog commands shouldn't arrive here, but handle gracefully.
-            _ => {
-                let _ = resp_tx.send(PluginResponse::Ok);
-            }
-        }
-    }
-
-    /// Promote a dialog command into the active dialog slot.
-    fn promote_dialog_command(
-        &mut self,
-        cmd: PluginCommand,
-        resp_tx: tokio::sync::mpsc::UnboundedSender<PluginResponse>,
-    ) {
-        let dialog = match cmd {
-            PluginCommand::ShowForm { title, fields } => {
-                let field_states: Vec<FormFieldState> =
-                    fields.iter().map(FormFieldState::from_field).collect();
-                ActivePluginDialog::Form {
-                    title,
-                    fields: field_states,
-                    resp_tx,
-                    focus_first: true,
-                }
-            }
-            PluginCommand::ShowPrompt { message } => ActivePluginDialog::Prompt {
-                message,
-                input: String::new(),
-                resp_tx,
-                focus_first: true,
-            },
-            PluginCommand::ShowConfirm { message } => ActivePluginDialog::Confirm {
-                message,
-                resp_tx,
-            },
-            PluginCommand::ShowAlert { title, message } => ActivePluginDialog::Alert {
-                title,
-                message,
-                resp_tx,
-            },
-            PluginCommand::ShowError { title, message } => ActivePluginDialog::Error {
-                title,
-                message,
-                resp_tx,
-            },
-            PluginCommand::ShowText { title, text } => ActivePluginDialog::Text {
-                title,
-                text,
-                copied_at: None,
-                resp_tx,
-            },
-            PluginCommand::ShowTable {
-                title,
-                columns,
-                rows,
-            } => ActivePluginDialog::Table {
-                title,
-                columns,
-                rows,
-                resp_tx,
-            },
-            _ => return,
-        };
-        self.active_plugin_dialog = Some(dialog);
-    }
-
-    /// Resolve a session target to a `&Session`.
-    fn resolve_session(&self, target: &SessionTarget) -> Option<&Session> {
-        match target {
-            SessionTarget::Current => {
-                self.state.active_tab.and_then(|id| self.state.sessions.get(&id))
-            }
-            SessionTarget::Named(name) => {
-                self.state.sessions.values().find(|s| {
-                    let title = s.custom_title.as_ref().unwrap_or(&s.title);
-                    title == name
-                })
-            }
-        }
-    }
-
-    /// Launch a discovered plugin by its index in `discovered_plugins`.
-    fn run_plugin_by_index(&mut self, idx: usize) {
-        let Some(meta) = self.discovered_plugins.get(idx).cloned() else {
-            return;
-        };
-        let (ctx, commands_rx) = PluginContext::new();
-        let path = meta.path.clone();
-        self.rt.spawn(async move {
-            if let Err(e) = run_plugin(&path, ctx).await {
-                log::error!("Plugin '{}' failed: {e}", path.display());
-            }
-        });
-        self.running_plugins.push(RunningPlugin {
-            meta,
-            commands_rx,
-            pending_dialogs: Vec::new(),
-        });
-    }
-
-    /// Stop a running plugin by index (drops channel, causing the Lua task to error out).
-    fn stop_plugin(&mut self, idx: usize) {
-        if idx < self.running_plugins.len() {
-            self.running_plugins.remove(idx);
-        }
-    }
-
-    /// Re-scan the plugins directory.
-    fn refresh_plugins(&mut self) {
-        self.discovered_plugins = scan_plugin_dirs();
-    }
-
-    /// Returns true when any modal dialog is open and should steal focus from the terminal.
-    fn any_dialog_open(&self) -> bool {
-        self.state.new_connection_form.is_some()
-            || self.show_about
-            || self.rename_tab_id.is_some()
-            || self.preferences_form.is_some()
-            || self.tunnel_dialog.is_some()
-            || self.active_plugin_dialog.is_some()
-            || self.plugin_progress.is_some()
-    }
-
-    /// Close the topmost dialog. Returns true if a dialog was closed.
-    fn close_topmost_dialog(&mut self) -> bool {
-        // Close in reverse visual stacking order (plugin dialogs on top, then others).
-        if let Some(dialog) = self.active_plugin_dialog.take() {
-            // Send a cancel/close response so the plugin coroutine doesn't hang.
-            send_plugin_dialog_cancel(&dialog);
-            return true;
-        }
-        if self.plugin_progress.is_some() {
-            self.plugin_progress = None;
-            return true;
-        }
-        if self.show_about {
-            self.show_about = false;
-            return true;
-        }
-        if self.rename_tab_id.is_some() {
-            self.rename_tab_id = None;
-            self.rename_tab_buf.clear();
-            return true;
-        }
-        if self.preferences_form.is_some() {
-            self.preferences_form = None;
-            return true;
-        }
-        if self.tunnel_dialog.is_some() {
-            self.tunnel_dialog = None;
-            return true;
-        }
-        if self.state.new_connection_form.is_some() {
-            self.state.new_connection_form = None;
-            return true;
-        }
-        false
-    }
-
-    /// Process keyboard events: app shortcuts always run, PTY forwarding
-    /// only when `forward_to_pty` is true (i.e. no text widget has focus).
-    fn handle_keyboard(&mut self, ctx: &egui::Context, forward_to_pty: bool) {
-        use alacritty_terminal::term::TermMode;
-
-        // Read terminal mode before entering the input closure so we know
-        // whether the shell has enabled application cursor mode (DECCKM).
-        // Use try_lock to avoid blocking the main thread on FairMutex contention.
-        let app_cursor = forward_to_pty
-            && self.state.active_session().map_or(false, |s| {
-                s.backend
-                    .term()
-                    .try_lock_unfair()
-                    .map_or(false, |term| term.mode().contains(TermMode::APP_CURSOR))
-            });
-
-        ctx.input(|input| {
-            for event in &input.events {
-                match event {
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => {
-                        // ESC closes the topmost dialog (when no text field has focus).
-                        if *key == egui::Key::Escape && !modifiers.command && !modifiers.alt && !modifiers.shift {
-                            if self.close_topmost_dialog() {
-                                return;
-                            }
-                        }
-
-                        // Command+number → switch to tab N (checked first).
-                        // Cmd on macOS, Ctrl on Linux/Windows.
-                        if modifiers.command && !modifiers.alt && !modifiers.shift {
-                            let tab_num = match key {
-                                egui::Key::Num1 => Some(0usize),
-                                egui::Key::Num2 => Some(1),
-                                egui::Key::Num3 => Some(2),
-                                egui::Key::Num4 => Some(3),
-                                egui::Key::Num5 => Some(4),
-                                egui::Key::Num6 => Some(5),
-                                egui::Key::Num7 => Some(6),
-                                egui::Key::Num8 => Some(7),
-                                egui::Key::Num9 => Some(8),
-                                _ => None,
-                            };
-                            if let Some(idx) = tab_num {
-                                if let Some(&id) = self.state.tab_order.get(idx) {
-                                    self.state.active_tab = Some(id);
-                                    return;
-                                }
-                            }
-                        }
-
-                        // App-level configurable shortcuts.
-                        if let Some(ref kb) = self.shortcuts.new_window {
-                            if kb.matches(key, modifiers) {
-                                self.spawn_extra_window();
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.new_tab {
-                            if kb.matches(key, modifiers) { self.open_local_tab(); return; }
-                        }
-                        if let Some(ref kb) = self.shortcuts.close_tab {
-                            if kb.matches(key, modifiers) {
-                                if let Some(id) = self.state.active_tab {
-                                    log::debug!("close_tab: removing session {id}");
-                                    self.remove_session(id);
-                                    log::debug!("close_tab: session removed, {} remaining", self.state.sessions.len());
-                                    if self.state.sessions.is_empty() {
-                                        log::debug!("close_tab: opening new local tab");
-                                        self.open_local_tab();
-                                        log::debug!("close_tab: new tab opened");
-                                    }
-                                }
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.toggle_left_sidebar {
-                            if kb.matches(key, modifiers) { self.toggle_left_sidebar(); return; }
-                        }
-                        if let Some(ref kb) = self.shortcuts.toggle_right_sidebar {
-                            if kb.matches(key, modifiers) { self.toggle_right_sidebar(); return; }
-                        }
-                        if let Some(ref kb) = self.shortcuts.new_connection {
-                            if kb.matches(key, modifiers) {
-                                self.state.new_connection_form =
-                                    Some(NewConnectionForm::with_defaults());
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.focus_quick_connect {
-                            if kb.matches(key, modifiers) {
-                                if self.quick_connect_opened_sidebar && self.state.show_right_sidebar {
-                                    // Toggle off: sidebar was opened by this shortcut, close it.
-                                    self.state.show_right_sidebar = false;
-                                    self.quick_connect_opened_sidebar = false;
-                                    self.session_panel_state.quick_connect_query.clear();
-                                } else if !self.state.show_right_sidebar {
-                                    // Sidebar is closed — open it temporarily.
-                                    self.quick_connect_opened_sidebar = true;
-                                    self.state.show_right_sidebar = true;
-                                    self.session_panel_state.quick_connect_focus = true;
-                                } else {
-                                    // Sidebar already open (by user) — just focus the search bar.
-                                    self.session_panel_state.quick_connect_focus = true;
-                                }
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.focus_plugin_search {
-                            if kb.matches(key, modifiers) {
-                                if !self.state.show_left_sidebar {
-                                    self.plugin_search_opened_sidebar = true;
-                                }
-                                self.state.show_left_sidebar = true;
-                                self.state.sidebar_tab = sidebar::SidebarTab::Plugins;
-                                self.plugin_search_focus = true;
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.focus_files {
-                            if kb.matches(key, modifiers) {
-                                self.focus_file_browser();
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.zen_mode {
-                            if kb.matches(key, modifiers) {
-                                self.toggle_zen_mode();
-                                return;
-                            }
-                        }
-                        if let Some(ref kb) = self.shortcuts.quit {
-                            if kb.matches(key, modifiers) {
-                                self.quit_requested = true;
-                                return;
-                            }
-                        }
-
-                        // File browser keyboard navigation.
-                        if self.state.file_browser.focused {
-                            self.handle_file_browser_key(key, modifiers);
-                            return;
-                        }
-
-                        // Forward to active terminal only when no text widget has focus.
-                        if forward_to_pty {
-                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &self.shortcuts, app_cursor) {
-                                if let Some(session) = self.state.active_session() {
-                                    // Scroll to bottom on user input (non-blocking).
-                                    if let Some(mut term) = session.backend.term().try_lock_unfair() {
-                                        term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-                                    }
-                                    session.backend.write(&bytes);
-                                }
-                            }
-                        }
-                    }
-                    egui::Event::Text(text) => {
-                        if forward_to_pty && !self.state.file_browser.focused {
-                            if let Some(session) = self.state.active_session() {
-                                if let Some(mut term) = session.backend.term().try_lock_unfair() {
-                                    term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-                                }
-                                session.backend.write(text.as_bytes());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        });
-    }
-
-    /// Spawn an async SSH connection attempt on the tokio runtime.
-    fn start_ssh_connect(
-        &mut self,
-        host: String,
-        port: u16,
-        user: String,
-        identity_file: Option<String>,
-        proxy_command: Option<String>,
-        proxy_jump: Option<String>,
-        password: Option<String>,
-    ) {
-        let id = Uuid::new_v4();
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // Build display info for the connecting tab.
-        let label = host.clone();
-        let detail = format!("{user}@{host}:{port}");
-        self.pending_ssh_info.insert(id, PendingSshInfo {
-            label,
-            detail,
-            started: Instant::now(),
-        });
-
-        // Create a tab immediately so the user sees the connecting screen.
-        self.state.tab_order.push(id);
-        self.state.active_tab = Some(id);
-
-        let host_clone = host.clone();
-        let term_config = build_term_config(&self.state.user_config.terminal.cursor);
-        self.rt.spawn(async move {
-            let params = conch_session::ConnectParams {
-                host: host_clone,
-                port,
-                user,
-                identity_file: identity_file.map(std::path::PathBuf::from),
-                password,
-                proxy_command,
-                proxy_jump,
-            };
-            let result = SshSession::connect(&params, DEFAULT_COLS, DEFAULT_ROWS, term_config)
-                .await
-                .map_err(|e| format!("{host}: {e}"));
-            let _ = tx.send(result);
-        });
-
-        self.pending_ssh_connections.push(PendingSsh { id, rx });
-    }
-
-    /// Save a server entry into the given folder (by top-level index).
-    fn save_server_entry(
-        &mut self,
-        entry: conch_core::models::ServerEntry,
-        folder_index: usize,
-    ) {
-        // Ensure at least one folder exists.
-        if self.state.sessions_config.folders.is_empty() {
-            self.state
-                .sessions_config
-                .folders
-                .push(conch_core::models::ServerFolder::new("Servers"));
-        }
-        let idx = folder_index.min(self.state.sessions_config.folders.len() - 1);
-        self.state.sessions_config.folders[idx].servers.push(entry);
-        let _ = config::save_sessions(&self.state.sessions_config);
-    }
-
-    /// Close a session and activate the previous tab.
-    fn remove_session(&mut self, id: Uuid) {
-        if let Some(session) = self.state.sessions.remove(&id) {
-            session.backend.shutdown();
-        }
-        self.state.tab_order.retain(|&tab_id| tab_id != id);
-        if self.state.active_tab == Some(id) {
-            self.state.active_tab = self.state.tab_order.last().copied();
-        }
-
-        // Shut down SFTP worker if it belonged to this session.
-        if self.sftp_session_id == Some(id) {
-            if let Some(tx) = self.sftp_cmd_tx.take() {
-                let _ = tx.send(SftpCmd::Shutdown);
-            }
-            self.sftp_result_rx = None;
-            self.sftp_session_id = None;
-            self.remote_home = None;
-            self.state.file_browser.remote_path = None;
-            self.state.file_browser.remote_entries.clear();
-            self.transfers.clear();
-        }
-
-        // Clean up pending connection info if closing a connecting tab.
-        self.pending_ssh_info.remove(&id);
-    }
-
-    /// Open a new local terminal tab.
-    fn open_local_tab(&mut self) {
-        let _ = open_local_terminal(
-            &mut self.state,
-            self.last_cols,
-            self.last_rows,
-            self.cell_width,
-            self.cell_height,
-        );
-    }
-
-    /// Open a new OS window with a fresh local terminal tab.
-    fn spawn_extra_window(&mut self) {
-        let cwd = self.state
-            .active_session()
-            .and_then(|s| s.backend.child_pid())
-            .and_then(conch_session::get_cwd_of_pid);
-        let Some((_, session)) = create_local_session(&self.state.user_config, cwd) else {
-            return;
-        };
-        let num = self.next_viewport_num;
-        self.next_viewport_num += 1;
-        let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
-        self.extra_windows.push(ExtraWindow::new(viewport_id, session));
-    }
-
-    /// Collect all SSH server entries from sidebar folders + ssh_config hosts.
-    fn collect_all_servers(&self) -> Vec<conch_core::models::ServerEntry> {
-        let mut servers = Vec::new();
-        fn collect_from_folders(
-            folders: &[conch_core::models::ServerFolder],
-            out: &mut Vec<conch_core::models::ServerEntry>,
-        ) {
-            for folder in folders {
-                out.extend(folder.servers.iter().cloned());
-                collect_from_folders(&folder.subfolders, out);
-            }
-        }
-        collect_from_folders(&self.state.sessions_config.folders, &mut servers);
-        for host in &self.state.ssh_config_hosts {
-            // Avoid duplicates by session_key.
-            if !servers.iter().any(|s| s.session_key() == host.session_key()) {
-                servers.push(host.clone());
-            }
-        }
-        servers
-    }
-
-    /// Kick off async tunnel activation (SSH connect + port forward).
-    fn activate_tunnel(&mut self, tunnel: &SavedTunnel) {
-        let tunnel = tunnel.clone();
-        let servers = self.collect_all_servers();
-        log::info!(
-            "activate_tunnel: looking for session_key='{}' among {} servers",
-            tunnel.session_key,
-            servers.len(),
-        );
-        for s in &servers {
-            log::debug!("  available server: '{}' key='{}'", s.name, s.session_key());
-        }
-        let server = servers.into_iter().find(|s| s.session_key() == tunnel.session_key);
-        let Some(server) = server else {
-            log::error!(
-                "No matching server for tunnel session_key '{}'. \
-                 Check that the server is configured in the sidebar or ssh_config.",
-                tunnel.session_key,
-            );
-            return;
-        };
-        log::info!(
-            "activate_tunnel: matched server '{}' ({}@{}:{}), connecting for tunnel {} (:{} -> {}:{})",
-            server.name, server.user, server.host, server.port,
-            tunnel.id, tunnel.local_port, tunnel.remote_host, tunnel.remote_port,
-        );
-        let tm = self.tunnel_manager.clone_inner();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.pending_tunnel_results.push((tunnel.id, rx));
-
-        self.rt.spawn(async move {
-            let params = conch_session::ConnectParams::from(&server);
-            log::info!(
-                "activate_tunnel[{}]: SSH connecting to {}@{}:{} ...",
-                tunnel.id, params.user, params.host, params.port,
-            );
-            let result = async {
-                let handle = conch_session::connect_tunnel(&params).await
-                    .map_err(|e| format!("SSH connect failed for {}@{}:{}: {e}", params.user, params.host, params.port))?;
-                log::info!(
-                    "activate_tunnel[{}]: SSH connected, starting local forward 127.0.0.1:{} -> {}:{} ...",
-                    tunnel.id, tunnel.local_port, tunnel.remote_host, tunnel.remote_port,
-                );
-                tm.start_local_forward(
-                    tunnel.id,
-                    handle,
-                    tunnel.local_port,
-                    tunnel.remote_host.clone(),
-                    tunnel.remote_port,
-                ).await.map_err(|e| format!("Port forward failed: {e}"))
-            }.await;
-            match &result {
-                Ok(()) => log::info!("activate_tunnel[{}]: tunnel active and listening", tunnel.id),
-                Err(e) => log::error!("activate_tunnel[{}]: failed: {e}", tunnel.id),
-            }
-            let _ = tx.send(result);
-        });
-    }
-
-    /// Resize all sessions if the computed grid dimensions changed.
-    fn resize_sessions(&mut self, cols: u16, rows: u16) {
-        if cols == 0 || rows == 0 || (cols == self.last_cols && rows == self.last_rows) {
-            return;
-        }
-        self.last_cols = cols;
-        self.last_rows = rows;
-        let cw = self.cell_width as u16;
-        let ch = self.cell_height as u16;
-        for session in self.state.sessions.values() {
-            session.backend.resize(cols, rows, cw, ch);
-        }
     }
 }
 
@@ -2277,433 +1566,6 @@ impl ConchApp {
         }
     }
 
-    fn toggle_left_sidebar(&mut self) {
-        self.state.show_left_sidebar = !self.state.show_left_sidebar;
-        self.state.persistent.layout.left_panel_collapsed = !self.state.show_left_sidebar;
-        if !self.state.show_left_sidebar {
-            self.state.file_browser.focused = false;
-        }
-        let _ = config::save_persistent_state(&self.state.persistent);
-    }
-
-    fn toggle_right_sidebar(&mut self) {
-        self.state.show_right_sidebar = !self.state.show_right_sidebar;
-        self.state.persistent.layout.right_panel_collapsed = !self.state.show_right_sidebar;
-        let _ = config::save_persistent_state(&self.state.persistent);
-    }
-
-    fn toggle_zen_mode(&mut self) {
-        // If any sidebar is open, close all. Otherwise open all.
-        if self.state.show_left_sidebar || self.state.show_right_sidebar {
-            self.state.show_left_sidebar = false;
-            self.state.show_right_sidebar = false;
-            self.state.file_browser.focused = false;
-        } else {
-            self.state.show_left_sidebar = true;
-            self.state.show_right_sidebar = true;
-        }
-        self.state.persistent.layout.left_panel_collapsed = !self.state.show_left_sidebar;
-        self.state.persistent.layout.right_panel_collapsed = !self.state.show_right_sidebar;
-        let _ = config::save_persistent_state(&self.state.persistent);
-    }
-
-    fn focus_file_browser(&mut self) {
-        use crate::ui::file_browser::FileBrowserPane;
-        if self.state.file_browser.focused {
-            // Toggle off if already focused.
-            self.state.file_browser.focused = false;
-            return;
-        }
-        if !self.state.show_left_sidebar {
-            self.state.show_left_sidebar = true;
-            self.state.persistent.layout.left_panel_collapsed = false;
-            let _ = config::save_persistent_state(&self.state.persistent);
-        }
-        self.state.sidebar_tab = sidebar::SidebarTab::Files;
-        self.state.file_browser.focused = true;
-        // Default to local pane; switch to remote if connected and nothing selected locally.
-        if self.state.file_browser.remote_path.is_some() && self.state.file_browser.local_selected.is_none() {
-            self.state.file_browser.active_pane = FileBrowserPane::Remote;
-        } else {
-            self.state.file_browser.active_pane = FileBrowserPane::Local;
-        }
-        // Select the first entry if nothing is selected in the active pane.
-        match self.state.file_browser.active_pane {
-            FileBrowserPane::Local => {
-                if self.state.file_browser.local_selected.is_none() && !self.state.file_browser.local_entries.is_empty() {
-                    self.state.file_browser.local_selected = Some(0);
-                }
-            }
-            FileBrowserPane::Remote => {
-                if self.state.file_browser.remote_selected.is_none() && !self.state.file_browser.remote_entries.is_empty() {
-                    self.state.file_browser.remote_selected = Some(0);
-                }
-            }
-        }
-    }
-
-    fn handle_file_browser_key(&mut self, key: &egui::Key, _modifiers: &egui::Modifiers) {
-        use crate::ui::file_browser::FileBrowserPane;
-        use crate::ui::sidebar::SidebarAction;
-
-        let fb = &mut self.state.file_browser;
-        let pane = fb.active_pane;
-
-        // Arrow keys and simple state changes — handle directly and return.
-        match key {
-            egui::Key::Escape => { fb.focused = false; return; }
-            egui::Key::ArrowUp | egui::Key::ArrowDown => {
-                let (entries_len, selected) = match pane {
-                    FileBrowserPane::Local => (fb.local_entries.len(), &mut fb.local_selected),
-                    FileBrowserPane::Remote => (fb.remote_entries.len(), &mut fb.remote_selected),
-                };
-                if *key == egui::Key::ArrowUp {
-                    if let Some(sel) = *selected {
-                        if sel > 0 { *selected = Some(sel - 1); }
-                    } else if entries_len > 0 {
-                        *selected = Some(0);
-                    }
-                } else if let Some(sel) = *selected {
-                    if sel + 1 < entries_len { *selected = Some(sel + 1); }
-                } else if entries_len > 0 {
-                    *selected = Some(0);
-                }
-                return;
-            }
-            egui::Key::Tab => {
-                if fb.remote_path.is_some() {
-                    fb.active_pane = match pane {
-                        FileBrowserPane::Local => FileBrowserPane::Remote,
-                        FileBrowserPane::Remote => FileBrowserPane::Local,
-                    };
-                    let (len, sel) = match fb.active_pane {
-                        FileBrowserPane::Local => (fb.local_entries.len(), &mut fb.local_selected),
-                        FileBrowserPane::Remote => (fb.remote_entries.len(), &mut fb.remote_selected),
-                    };
-                    if sel.is_none() && len > 0 { *sel = Some(0); }
-                }
-                return;
-            }
-            _ => {}
-        }
-
-        // Actions that produce a SidebarAction — read state immutably.
-        let fb = &self.state.file_browser;
-        let action = match key {
-            egui::Key::Enter => {
-                let entry = match pane {
-                    FileBrowserPane::Local => fb.local_selected.and_then(|i| fb.local_entries.get(i)),
-                    FileBrowserPane::Remote => fb.remote_selected.and_then(|i| fb.remote_entries.get(i)),
-                };
-                if let Some(entry) = entry.filter(|e| e.is_dir) {
-                    let path = entry.path.clone();
-                    match pane {
-                        FileBrowserPane::Local => SidebarAction::NavigateLocal(path),
-                        FileBrowserPane::Remote => SidebarAction::NavigateRemote(path),
-                    }
-                } else {
-                    return;
-                }
-            }
-            egui::Key::Backspace => {
-                let parent = match pane {
-                    FileBrowserPane::Local => fb.local_path.parent().map(|p| p.to_path_buf()),
-                    FileBrowserPane::Remote => fb.remote_path.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf())),
-                };
-                if let Some(parent) = parent {
-                    match pane {
-                        FileBrowserPane::Local => SidebarAction::NavigateLocal(parent),
-                        FileBrowserPane::Remote => SidebarAction::NavigateRemote(parent),
-                    }
-                } else {
-                    return;
-                }
-            }
-            egui::Key::U => {
-                if let (Some(idx), Some(remote_dir)) = (fb.local_selected, fb.remote_path.clone()) {
-                    if let Some(entry) = fb.local_entries.get(idx) {
-                        SidebarAction::Upload { local_path: entry.path.clone(), remote_dir }
-                    } else { return; }
-                } else { return; }
-            }
-            egui::Key::D => {
-                if let Some(idx) = fb.remote_selected {
-                    if let Some(entry) = fb.remote_entries.get(idx) {
-                        SidebarAction::Download { remote_path: entry.path.clone(), local_dir: fb.local_path.clone() }
-                    } else { return; }
-                } else { return; }
-            }
-            egui::Key::R => match pane {
-                FileBrowserPane::Local => SidebarAction::RefreshLocal,
-                FileBrowserPane::Remote => SidebarAction::RefreshRemote,
-            },
-            egui::Key::H => match pane {
-                FileBrowserPane::Local => SidebarAction::GoHomeLocal,
-                FileBrowserPane::Remote => SidebarAction::GoHomeRemote,
-            },
-            _ => return,
-        };
-
-        // Clear selection on navigation.
-        if matches!(action, SidebarAction::NavigateLocal(_) | SidebarAction::NavigateRemote(_)) {
-            match pane {
-                FileBrowserPane::Local => self.state.file_browser.local_selected = None,
-                FileBrowserPane::Remote => self.state.file_browser.remote_selected = None,
-            }
-        }
-
-        self.handle_sidebar_action(action);
-    }
-
-    /// Show the About Conch dialog.
-    fn show_about_dialog(&mut self, ctx: &egui::Context) {
-        egui::Window::new("About Conch")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("Conch");
-                    ui.label("Version 0.2");
-                    ui.add_space(4.0);
-                    ui.label("A cross-platform SSH terminal emulator.");
-                    ui.add_space(8.0);
-                    if crate::ui::widgets::dialog_button(ui, "OK").clicked() {
-                        self.show_about = false;
-                    }
-                });
-            });
-    }
-
-    fn handle_sidebar_action(&mut self, action: SidebarAction) {
-        match action {
-            SidebarAction::NavigateLocal(path) => {
-                let old = self.state.file_browser.local_path.clone();
-                self.state.file_browser.local_back_stack.push(old);
-                self.state.file_browser.local_forward_stack.clear();
-                self.state.file_browser.local_entries = load_local_entries(&path);
-                self.state.file_browser.local_path_edit = path.to_string_lossy().into_owned();
-                self.state.file_browser.local_path = path;
-                self.state.file_browser.local_selected = None;
-            }
-            SidebarAction::GoBackLocal => {
-                if let Some(prev) = self.state.file_browser.local_back_stack.pop() {
-                    let current = self.state.file_browser.local_path.clone();
-                    self.state.file_browser.local_forward_stack.push(current);
-                    self.state.file_browser.local_entries = load_local_entries(&prev);
-                    self.state.file_browser.local_path_edit = prev.to_string_lossy().into_owned();
-                    self.state.file_browser.local_path = prev;
-                    self.state.file_browser.local_selected = None;
-                }
-            }
-            SidebarAction::GoForwardLocal => {
-                if let Some(next) = self.state.file_browser.local_forward_stack.pop() {
-                    let current = self.state.file_browser.local_path.clone();
-                    self.state.file_browser.local_back_stack.push(current);
-                    self.state.file_browser.local_entries = load_local_entries(&next);
-                    self.state.file_browser.local_path_edit = next.to_string_lossy().into_owned();
-                    self.state.file_browser.local_path = next;
-                    self.state.file_browser.local_selected = None;
-                }
-            }
-            SidebarAction::RefreshLocal => {
-                let path = self.state.file_browser.local_path.clone();
-                self.state.file_browser.local_entries = load_local_entries(&path);
-                self.state.file_browser.local_selected = None;
-            }
-            SidebarAction::GoHomeLocal => {
-                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-                let old = self.state.file_browser.local_path.clone();
-                self.state.file_browser.local_back_stack.push(old);
-                self.state.file_browser.local_forward_stack.clear();
-                self.state.file_browser.local_entries = load_local_entries(&home);
-                self.state.file_browser.local_path_edit = home.to_string_lossy().into_owned();
-                self.state.file_browser.local_path = home;
-                self.state.file_browser.local_selected = None;
-            }
-            SidebarAction::SelectFile(path) => {
-                log::info!("File selected: {}", path.display());
-            }
-            SidebarAction::NavigateRemote(path) => {
-                if let Some(old) = self.state.file_browser.remote_path.clone() {
-                    self.state.file_browser.remote_back_stack.push(old);
-                    self.state.file_browser.remote_forward_stack.clear();
-                }
-                if let Some(tx) = &self.sftp_cmd_tx {
-                    let _ = tx.send(SftpCmd::List(path));
-                }
-            }
-            SidebarAction::GoBackRemote => {
-                if let Some(prev) = self.state.file_browser.remote_back_stack.pop() {
-                    if let Some(current) = self.state.file_browser.remote_path.clone() {
-                        self.state.file_browser.remote_forward_stack.push(current);
-                    }
-                    if let Some(tx) = &self.sftp_cmd_tx {
-                        let _ = tx.send(SftpCmd::List(prev));
-                    }
-                }
-            }
-            SidebarAction::GoForwardRemote => {
-                if let Some(next) = self.state.file_browser.remote_forward_stack.pop() {
-                    if let Some(current) = self.state.file_browser.remote_path.clone() {
-                        self.state.file_browser.remote_back_stack.push(current);
-                    }
-                    if let Some(tx) = &self.sftp_cmd_tx {
-                        let _ = tx.send(SftpCmd::List(next));
-                    }
-                }
-            }
-            SidebarAction::RefreshRemote => {
-                if let Some(tx) = &self.sftp_cmd_tx {
-                    if let Some(rp) = &self.state.file_browser.remote_path {
-                        let _ = tx.send(SftpCmd::List(rp.clone()));
-                    }
-                }
-            }
-            SidebarAction::GoHomeRemote => {
-                if let Some(home) = self.remote_home.clone() {
-                    if let Some(old) = self.state.file_browser.remote_path.clone() {
-                        self.state.file_browser.remote_back_stack.push(old);
-                        self.state.file_browser.remote_forward_stack.clear();
-                    }
-                    if let Some(tx) = &self.sftp_cmd_tx {
-                        let _ = tx.send(SftpCmd::List(home));
-                    }
-                }
-            }
-            SidebarAction::Upload { local_path, remote_dir } => {
-                let filename = local_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let cancel = Arc::new(AtomicBool::new(false));
-                self.transfers.push(sidebar::TransferStatus {
-                    filename,
-                    upload: true,
-                    done: false,
-                    error: None,
-                    bytes_transferred: 0,
-                    total_bytes: 0,
-                    cancel: cancel.clone(),
-                });
-                if let Some(tx) = &self.sftp_cmd_tx {
-                    let _ = tx.send(SftpCmd::Upload { local_path, remote_dir, cancel });
-                }
-            }
-            SidebarAction::Download { remote_path, local_dir } => {
-                let filename = remote_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let cancel = Arc::new(AtomicBool::new(false));
-                self.transfers.push(sidebar::TransferStatus {
-                    filename,
-                    upload: false,
-                    done: false,
-                    error: None,
-                    bytes_transferred: 0,
-                    total_bytes: 0,
-                    cancel: cancel.clone(),
-                });
-                if let Some(tx) = &self.sftp_cmd_tx {
-                    let _ = tx.send(SftpCmd::Download { remote_path, local_dir, cancel });
-                }
-            }
-            SidebarAction::CancelTransfer(filename) => {
-                if let Some(ts) = self
-                    .transfers
-                    .iter_mut()
-                    .find(|t| t.filename == filename && !t.done)
-                {
-                    ts.cancel.store(true, Ordering::Relaxed);
-                }
-            }
-            SidebarAction::RunPlugin(_)
-            | SidebarAction::StopPlugin(_)
-            | SidebarAction::RefreshPlugins
-            | SidebarAction::None => {}
-        }
-    }
-
-    fn handle_session_panel_action(&mut self, action: SessionPanelAction) {
-        match action {
-            SessionPanelAction::Connect(req) => {
-                self.start_ssh_connect(
-                    req.host,
-                    req.port,
-                    req.user,
-                    req.identity_file,
-                    req.proxy_command,
-                    req.proxy_jump,
-                    req.password,
-                );
-                if self.quick_connect_opened_sidebar {
-                    self.state.show_right_sidebar = false;
-                    self.quick_connect_opened_sidebar = false;
-                }
-            }
-            SessionPanelAction::CreateFolder { parent_path, name } => {
-                let folder = conch_core::models::ServerFolder::new(name);
-                if parent_path.is_empty() {
-                    self.state.sessions_config.folders.push(folder);
-                } else if let Some(parent) = find_folder_mut(&mut self.state.sessions_config.folders, &parent_path) {
-                    parent.subfolders.push(folder);
-                }
-                let _ = config::save_sessions(&self.state.sessions_config);
-            }
-            SessionPanelAction::RenameFolder { path, new_name } => {
-                if let Some(f) = find_folder_mut(&mut self.state.sessions_config.folders, &path) {
-                    f.name = new_name;
-                }
-                let _ = config::save_sessions(&self.state.sessions_config);
-            }
-            SessionPanelAction::DeleteFolder { path } => {
-                delete_folder(&mut self.state.sessions_config.folders, &path);
-                let _ = config::save_sessions(&self.state.sessions_config);
-            }
-            SessionPanelAction::CreateServer { folder_path } => {
-                let entry = conch_core::models::ServerEntry {
-                    name: "New Server".into(),
-                    host: String::new(),
-                    port: 22,
-                    user: String::new(),
-                    identity_file: None,
-                    proxy_command: None,
-                    proxy_jump: None,
-                    startup_command: None,
-                    session_key: None,
-                    from_ssh_config: false,
-                };
-                if folder_path.is_empty() {
-                    if self.state.sessions_config.folders.is_empty() {
-                        self.state.sessions_config.folders.push(
-                            conch_core::models::ServerFolder::new("Servers"),
-                        );
-                    }
-                    self.state.sessions_config.folders[0].servers.push(entry);
-                } else if let Some(f) = find_folder_mut(&mut self.state.sessions_config.folders, &folder_path) {
-                    f.servers.push(entry);
-                }
-                let _ = config::save_sessions(&self.state.sessions_config);
-            }
-            SessionPanelAction::RenameServer { addr, new_name } => {
-                if let Some(server) = find_server_mut(&mut self.state.sessions_config.folders, &addr) {
-                    server.name = new_name;
-                }
-                let _ = config::save_sessions(&self.state.sessions_config);
-            }
-            SessionPanelAction::DeleteServer { addr } => {
-                delete_server(&mut self.state.sessions_config.folders, &addr);
-                let _ = config::save_sessions(&self.state.sessions_config);
-            }
-            SessionPanelAction::EditServer { .. } => {}
-            SessionPanelAction::OpenNewConnectionDialog => {
-                self.state.new_connection_form =
-                    Some(NewConnectionForm::with_defaults());
-            }
-            SessionPanelAction::None => {}
-        }
-    }
 
     /// Apply the initial visual style, load icons, and set up platform-specific
     /// window decorations. Called once on the first frame.
@@ -2776,6 +1638,28 @@ impl ConchApp {
         }
 
         ctx.set_style(style);
+
+        // Register the user's configured terminal font with egui's Monospace family.
+        let font_family_name = &self.state.user_config.font.normal.family;
+        if !font_family_name.is_empty() {
+            if let Some(font_data) = load_system_font(font_family_name) {
+                let mut fonts = egui::FontDefinitions::default();
+                let key = font_family_name.clone();
+                fonts
+                    .font_data
+                    .insert(key.clone(), egui::FontData::from_owned(font_data).into());
+                // Put the user font first so it takes priority for Monospace glyphs.
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .insert(0, key);
+                ctx.set_fonts(fonts);
+            } else {
+                log::warn!("Could not find font '{}' on this system", font_family_name);
+            }
+        }
+
         self.icon_cache = Some(IconCache::load(ctx));
 
         let zoom = self.state.persistent.layout.zoom_factor;
@@ -2795,329 +1679,23 @@ impl ConchApp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
+/// Try to load a font by family name from the system using font-kit.
+/// Returns the raw font file bytes on success.
+fn load_system_font(family: &str) -> Option<Vec<u8>> {
+    use font_kit::family_name::FamilyName;
+    use font_kit::properties::Properties;
+    use font_kit::source::SystemSource;
 
-/// Scan for plugins in the native config dir and the legacy `~/.config/conch/` dir.
-/// Deduplicates by filename so a plugin present in both locations is only listed once.
-fn scan_plugin_dirs() -> Vec<PluginMeta> {
-    let mut plugins = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
-
-    // Primary: native config dir (~/Library/Application Support/conch/ on macOS)
-    let native_dir = config::config_dir().join("plugins");
-    if let Ok(found) = discover_plugins(&native_dir) {
-        for p in found {
-            let key = p.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            seen_names.insert(key);
-            plugins.push(p);
-        }
-    }
-
-    // Legacy: ~/.config/conch/plugins/ (shared with Java version)
-    if let Some(home) = std::env::var_os("HOME") {
-        let legacy_dir = PathBuf::from(home).join(".config/conch/plugins");
-        if legacy_dir != native_dir {
-            if let Ok(found) = discover_plugins(&legacy_dir) {
-                for p in found {
-                    let key = p.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    if !seen_names.contains(&key) {
-                        seen_names.insert(key);
-                        plugins.push(p);
-                    }
-                }
-            }
-        }
-    }
-
-    plugins
-}
-
-fn is_dialog_command(cmd: &PluginCommand) -> bool {
-    matches!(
-        cmd,
-        PluginCommand::ShowForm { .. }
-            | PluginCommand::ShowPrompt { .. }
-            | PluginCommand::ShowConfirm { .. }
-            | PluginCommand::ShowAlert { .. }
-            | PluginCommand::ShowError { .. }
-            | PluginCommand::ShowText { .. }
-            | PluginCommand::ShowTable { .. }
-    )
-}
-
-/// Build an `alacritty_terminal::term::Config` from the user's cursor settings.
-fn build_term_config(cfg: &config::CursorConfig) -> alacritty_terminal::term::Config {
-    use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
-
-    fn parse_style(s: &config::CursorStyleConfig) -> CursorStyle {
-        let shape = match s.shape.to_lowercase().as_str() {
-            "underline" => CursorShape::Underline,
-            "beam" | "ibeam" => CursorShape::Beam,
-            _ => CursorShape::Block,
-        };
-        CursorStyle { shape, blinking: s.blinking }
-    }
-
-    let mut tc = alacritty_terminal::term::Config::default();
-    tc.default_cursor_style = parse_style(&cfg.style);
-    tc.vi_mode_cursor_style = cfg.vi_mode_style.as_ref().map(parse_style);
-    tc
-}
-
-/// Create a local terminal session without inserting it into any state.
-///
-/// If `working_directory` is `Some`, the new shell starts in that directory.
-/// Otherwise it falls back to the user's home directory.
-pub(crate) fn create_local_session(
-    user_config: &config::UserConfig,
-    working_directory: Option<std::path::PathBuf>,
-) -> Option<(Uuid, Session)> {
-    let id = Uuid::new_v4();
-    let shell_cfg = &user_config.terminal.shell;
-    let shell = if shell_cfg.program.is_empty() {
-        None
-    } else {
-        Some(alacritty_terminal::tty::Shell::new(
-            shell_cfg.program.clone(),
-            shell_cfg.args.clone(),
-        ))
-    };
-    let term_config = build_term_config(&user_config.terminal.cursor);
-    match LocalSession::new(
-        DEFAULT_COLS, DEFAULT_ROWS, 8, 16,
-        shell, &user_config.terminal.env, term_config,
-        working_directory,
-    ) {
-        Ok(mut local) => {
-            let event_rx = local.take_event_rx();
-            let session = Session {
-                id,
-                title: "Local".into(),
-                custom_title: None,
-                backend: SessionBackend::Local(local),
-                event_rx,
-            };
-            Some((id, session))
-        }
-        Err(e) => {
-            log::error!("Failed to open local terminal: {e}");
-            None
-        }
+    let source = SystemSource::new();
+    let handle = source
+        .select_best_match(
+            &[FamilyName::Title(family.to_string())],
+            &Properties::new(),
+        )
+        .ok()?;
+    match handle {
+        font_kit::handle::Handle::Path { path, .. } => std::fs::read(path).ok(),
+        font_kit::handle::Handle::Memory { bytes, .. } => Some((*bytes).clone()),
     }
 }
 
-fn open_local_terminal(
-    state: &mut AppState,
-    last_cols: u16,
-    last_rows: u16,
-    cell_width: f32,
-    cell_height: f32,
-) -> Option<(Uuid, u32)> {
-    // Inherit CWD from the active session's child process.
-    let cwd = state
-        .active_session()
-        .and_then(|s| s.backend.child_pid())
-        .and_then(conch_session::get_cwd_of_pid);
-    let (id, session) = create_local_session(&state.user_config, cwd)?;
-    let child_pid = match &session.backend {
-        SessionBackend::Local(local) => local.child_pid(),
-        _ => 0,
-    };
-    // Resize the new session to match the current window dimensions
-    // so it doesn't start at the default size.
-    if last_cols > 0 && last_rows > 0 {
-        session.backend.resize(last_cols, last_rows, cell_width as u16, cell_height as u16);
-    }
-    state.sessions.insert(id, session);
-    state.tab_order.push(id);
-    state.active_tab = Some(id);
-    Some((id, child_pid))
-}
-
-/// Read directory entries for the file browser sidebar.
-/// Walk a path of folder names and return a mutable reference to the target folder.
-fn find_folder_mut<'a>(
-    folders: &'a mut Vec<conch_core::models::ServerFolder>,
-    path: &[String],
-) -> Option<&'a mut conch_core::models::ServerFolder> {
-    if path.is_empty() {
-        return None;
-    }
-    let first = &path[0];
-    let rest = &path[1..];
-    let folder = folders.iter_mut().find(|f| &f.name == first)?;
-    if rest.is_empty() {
-        Some(folder)
-    } else {
-        find_folder_mut(&mut folder.subfolders, rest)
-    }
-}
-
-/// Remove a folder identified by its name path from the tree.
-fn delete_folder(folders: &mut Vec<conch_core::models::ServerFolder>, path: &[String]) {
-    if path.is_empty() {
-        return;
-    }
-    if path.len() == 1 {
-        folders.retain(|f| f.name != path[0]);
-    } else if let Some(parent) = find_folder_mut(folders, &path[..path.len() - 1]) {
-        let target = &path[path.len() - 1];
-        parent.subfolders.retain(|f| &f.name != target);
-    }
-}
-
-/// Find a mutable reference to a server entry by its address.
-fn find_server_mut<'a>(
-    folders: &'a mut Vec<conch_core::models::ServerFolder>,
-    addr: &ServerAddress,
-) -> Option<&'a mut conch_core::models::ServerEntry> {
-    let folder = find_folder_mut(folders, &addr.folder_path)?;
-    folder.servers.get_mut(addr.index)
-}
-
-/// Remove a server entry by its address.
-fn delete_server(
-    folders: &mut Vec<conch_core::models::ServerFolder>,
-    addr: &ServerAddress,
-) {
-    if let Some(folder) = find_folder_mut(folders, &addr.folder_path) {
-        if addr.index < folder.servers.len() {
-            folder.servers.remove(addr.index);
-        }
-    }
-}
-
-fn load_local_entries(path: &std::path::Path) -> Vec<FileListEntry> {
-    let Ok(read_dir) = std::fs::read_dir(path) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<FileListEntry> = read_dir
-        .flatten()
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            Some(FileListEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path: entry.path(),
-                is_dir: metadata.is_dir(),
-                size: metadata.len(),
-                modified,
-            })
-        })
-        .collect();
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    entries
-}
-
-/// Render the "Connecting to..." screen with a bouncing progress indicator.
-fn show_connecting_screen(ui: &mut egui::Ui, info: &PendingSshInfo) {
-    let rect = ui.available_rect_before_wrap();
-
-    // Light background fill.
-    let bg = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(30)
-    } else {
-        egui::Color32::from_gray(241)
-    };
-    ui.painter().rect_filled(rect, 0.0, bg);
-
-    let center = rect.center();
-
-    // "Connecting to <label>..."
-    let heading = format!("Connecting to {}\u{2026}", info.label);
-    let heading_galley = ui.painter().layout_no_wrap(
-        heading,
-        egui::FontId::new(28.0, egui::FontFamily::Proportional),
-        if ui.visuals().dark_mode {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::BLACK
-        },
-    );
-    let heading_pos = egui::Pos2::new(
-        center.x - heading_galley.size().x / 2.0,
-        center.y - 40.0,
-    );
-    ui.painter().galley(heading_pos, heading_galley, egui::Color32::PLACEHOLDER);
-
-    // Detail line: "user@host:port"
-    let detail_galley = ui.painter().layout_no_wrap(
-        info.detail.clone(),
-        egui::FontId::new(16.0, egui::FontFamily::Proportional),
-        if ui.visuals().dark_mode {
-            egui::Color32::from_gray(200)
-        } else {
-            egui::Color32::from_gray(40)
-        },
-    );
-    let detail_pos = egui::Pos2::new(
-        center.x - detail_galley.size().x / 2.0,
-        center.y + 5.0,
-    );
-    ui.painter().galley(detail_pos, detail_galley, egui::Color32::PLACEHOLDER);
-
-    // Bouncing progress bar.
-    let bar_w = 400.0_f32.min(rect.width() * 0.6);
-    let bar_h = 6.0;
-    let bar_y = center.y + 50.0;
-    let bar_rect = egui::Rect::from_min_size(
-        egui::Pos2::new(center.x - bar_w / 2.0, bar_y),
-        egui::Vec2::new(bar_w, bar_h),
-    );
-
-    // Track background.
-    let track_color = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(60)
-    } else {
-        egui::Color32::from_gray(210)
-    };
-    ui.painter().rect_filled(bar_rect, bar_h / 2.0, track_color);
-
-    // Bouncing indicator.
-    let elapsed = info.started.elapsed().as_secs_f32();
-    let cycle = 1.8; // seconds for a full bounce cycle
-    let t = (elapsed % cycle) / cycle; // 0..1
-    // Ping-pong: 0→1→0
-    let pos_t = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
-    // Ease in-out for smooth motion.
-    let eased = pos_t * pos_t * (3.0 - 2.0 * pos_t);
-    let indicator_w = bar_w * 0.15;
-    let indicator_x = bar_rect.min.x + eased * (bar_w - indicator_w);
-    let indicator_rect = egui::Rect::from_min_size(
-        egui::Pos2::new(indicator_x, bar_y),
-        egui::Vec2::new(indicator_w, bar_h),
-    );
-    let accent = egui::Color32::from_rgb(66, 133, 244); // Google blue
-    ui.painter().rect_filled(indicator_rect, bar_h / 2.0, accent);
-}
-
-/// Send a cancel/close response for a plugin dialog so the plugin coroutine doesn't hang.
-fn send_plugin_dialog_cancel(dialog: &ActivePluginDialog) {
-    match dialog {
-        ActivePluginDialog::Form { resp_tx, .. } => {
-            let _ = resp_tx.send(PluginResponse::FormResult(None));
-        }
-        ActivePluginDialog::Prompt { resp_tx, .. } => {
-            let _ = resp_tx.send(PluginResponse::Ok);
-        }
-        ActivePluginDialog::Confirm { resp_tx, .. } => {
-            let _ = resp_tx.send(PluginResponse::Bool(false));
-        }
-        ActivePluginDialog::Alert { resp_tx, .. }
-        | ActivePluginDialog::Error { resp_tx, .. }
-        | ActivePluginDialog::Text { resp_tx, .. }
-        | ActivePluginDialog::Table { resp_tx, .. } => {
-            let _ = resp_tx.send(PluginResponse::Ok);
-        }
-    }
-}
