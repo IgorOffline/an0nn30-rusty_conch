@@ -52,6 +52,14 @@ impl SessionBackend {
             Self::Ssh(s) => &s.term,
         }
     }
+
+    /// Get the child process PID (only meaningful for local sessions).
+    pub fn child_pid(&self) -> Option<u32> {
+        match self {
+            Self::Local(s) => Some(s.child_pid()),
+            Self::Ssh(_) => None,
+        }
+    }
 }
 
 /// A single terminal session (local or SSH).

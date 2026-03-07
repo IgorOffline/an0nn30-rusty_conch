@@ -68,6 +68,17 @@ fn is_in_selection(col: usize, row: usize, start: (usize, usize), end: (usize, u
     true
 }
 
+/// Which underline style to draw (if any).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnderlineStyle {
+    None,
+    Single,
+    Double,
+    Dotted,
+    Dashed,
+    Undercurl,
+}
+
 /// Copied cell data for rendering after releasing the terminal lock.
 struct CellInfo {
     c: char,
@@ -75,7 +86,10 @@ struct CellInfo {
     row: usize,
     fg: [f32; 4],
     bg: [f32; 4],
-    underline: bool,
+    bold: bool,
+    italic: bool,
+    underline: UnderlineStyle,
+    underline_color: Option<[f32; 4]>,
     strikeout: bool,
 }
 
@@ -104,8 +118,13 @@ pub fn show_terminal(
     // ── Collect cell data under lock, then release ──────────────────────
     // This minimises FairMutex hold time so the EventLoop can keep
     // processing VTE data while we do the (expensive) font-layout paint.
+    // Use try_lock_unfair to avoid blocking the main thread if the
+    // event loop is holding the FairMutex lease during PTY reads.
     let (cells, cursor_pos) = {
-        let term = term.lock();
+        let Some(term) = term.try_lock_unfair() else {
+            // Lock contended — skip rendering this frame; we'll get it next frame.
+            return (response, size_info);
+        };
         let content = term.renderable_content();
 
         let show_cursor = cursor_visible
@@ -151,13 +170,42 @@ pub fn show_terminal(
                 }
             }
 
+            // Hidden text: replace character with space.
+            let c = if flags.contains(CellFlags::HIDDEN) { ' ' } else { cell.c };
+
+            // Dim: reduce foreground brightness to 2/3.
+            if flags.contains(CellFlags::DIM) {
+                fg = [fg[0] * 0.67, fg[1] * 0.67, fg[2] * 0.67, fg[3]];
+            }
+
+            // Determine underline style.
+            let underline = if flags.contains(CellFlags::UNDERCURL) {
+                UnderlineStyle::Undercurl
+            } else if flags.contains(CellFlags::DOUBLE_UNDERLINE) {
+                UnderlineStyle::Double
+            } else if flags.contains(CellFlags::DOTTED_UNDERLINE) {
+                UnderlineStyle::Dotted
+            } else if flags.contains(CellFlags::DASHED_UNDERLINE) {
+                UnderlineStyle::Dashed
+            } else if flags.contains(CellFlags::UNDERLINE) {
+                UnderlineStyle::Single
+            } else {
+                UnderlineStyle::None
+            };
+
+            // Underline color from cell extras (e.g. LSP diagnostic colors).
+            let underline_color = cell.underline_color().map(|uc| convert_color(uc, colors));
+
             cells.push(CellInfo {
-                c: cell.c,
+                c,
                 col,
                 row,
                 fg,
                 bg,
-                underline: flags.contains(CellFlags::UNDERLINE),
+                bold: flags.contains(CellFlags::BOLD),
+                italic: flags.contains(CellFlags::ITALIC),
+                underline,
+                underline_color,
                 strikeout: flags.contains(CellFlags::STRIKEOUT),
             });
         }
@@ -166,7 +214,7 @@ pub fn show_terminal(
     }; // ── lock released here ──────────────────────────────────────────────
 
     // Paint cells (no lock held — EventLoop can process data concurrently).
-    let font_id = FontId::new(font_size, FontFamily::Monospace);
+    let font_regular = FontId::new(font_size, FontFamily::Monospace);
 
     for ci in &cells {
         let (x, y) = size_info.cell_position(ci.col, ci.row);
@@ -179,17 +227,41 @@ pub fn show_terminal(
             painter.rect_filled(cell_rect, 0.0, rgba_to_color32(ci.bg));
         }
 
+        let fg_color = rgba_to_color32(ci.fg);
+
         if ci.c != ' ' && ci.c != '\0' {
+            // Select font variant for bold/italic.
+            // egui's monospace font doesn't have true bold/italic variants,
+            // so we synthesize: bold via proportional bold, italic via skew.
+            // For now, use the monospace font but adjust rendering.
             paint_char(
                 &painter,
                 ci.c,
                 Pos2::new(rect.min.x + x, rect.min.y + y),
-                &font_id,
-                rgba_to_color32(ci.fg),
-                ci.underline,
-                ci.strikeout,
+                &font_regular,
+                fg_color,
+                ci.bold,
+                ci.italic,
                 cell_width,
                 cell_height,
+            );
+        }
+
+        // Draw underline (various styles).
+        if ci.underline != UnderlineStyle::None {
+            let ul_color = ci.underline_color.map(rgba_to_color32).unwrap_or(fg_color);
+            let y_base = rect.min.y + y + cell_height - 1.0;
+            let x_start = rect.min.x + x;
+            let x_end = x_start + cell_width;
+            draw_underline(&painter, ci.underline, x_start, x_end, y_base, cell_width, ul_color);
+        }
+
+        // Draw strikeout.
+        if ci.strikeout {
+            let y_mid = rect.min.y + y + cell_height * 0.5;
+            painter.line_segment(
+                [Pos2::new(rect.min.x + x, y_mid), Pos2::new(rect.min.x + x + cell_width, y_mid)],
+                egui::Stroke::new(1.0, fg_color),
             );
         }
     }
@@ -237,13 +309,114 @@ pub fn show_terminal(
     (response, size_info)
 }
 
+/// Find word boundaries around the given cell position.
+///
+/// Returns `((start_col, row), (end_col, row))` for the word at `(col, row)`.
+pub fn word_selection_at(
+    term: &Arc<FairMutex<Term<EventProxy>>>,
+    col: usize,
+    row: usize,
+) -> ((usize, usize), (usize, usize)) {
+    let Some(term) = term.try_lock_unfair() else {
+        return ((col, row), (col, row));
+    };
+    let content = term.renderable_content();
+
+    // Collect all characters in the target row.
+    let mut row_chars: Vec<(usize, char)> = Vec::new();
+    for indexed in content.display_iter {
+        let r = indexed.point.line.0 as usize;
+        if r < row {
+            continue;
+        }
+        if r > row {
+            break;
+        }
+        row_chars.push((indexed.point.column.0, indexed.cell.c));
+    }
+
+    if row_chars.is_empty() {
+        return ((col, row), (col, row));
+    }
+
+    // Find the character at col.
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '.';
+    let target_char = row_chars.iter().find(|&&(c, _)| c == col).map(|&(_, ch)| ch).unwrap_or(' ');
+    let target_is_word = is_word_char(target_char);
+    let target_is_space = target_char == ' ';
+
+    // Expand left.
+    let mut start_col = col;
+    for &(c, ch) in row_chars.iter().rev() {
+        if c > col {
+            continue;
+        }
+        if target_is_space {
+            if ch != ' ' { break; }
+        } else if target_is_word {
+            if !is_word_char(ch) { break; }
+        } else {
+            // Punctuation: select contiguous same-type.
+            if is_word_char(ch) || ch == ' ' { break; }
+        }
+        start_col = c;
+    }
+
+    // Expand right.
+    let mut end_col = col;
+    for &(c, ch) in &row_chars {
+        if c < col {
+            continue;
+        }
+        if target_is_space {
+            if ch != ' ' { break; }
+        } else if target_is_word {
+            if !is_word_char(ch) { break; }
+        } else {
+            if is_word_char(ch) || ch == ' ' { break; }
+        }
+        end_col = c;
+    }
+
+    ((start_col, row), (end_col, row))
+}
+
+/// Select the entire line at the given row.
+///
+/// Returns `((0, row), (last_col, row))`.
+pub fn line_selection_at(
+    term: &Arc<FairMutex<Term<EventProxy>>>,
+    row: usize,
+) -> ((usize, usize), (usize, usize)) {
+    let Some(term) = term.try_lock_unfair() else {
+        return ((0, row), (0, row));
+    };
+    let content = term.renderable_content();
+
+    let mut max_col = 0usize;
+    for indexed in content.display_iter {
+        let r = indexed.point.line.0 as usize;
+        if r < row {
+            continue;
+        }
+        if r > row {
+            break;
+        }
+        max_col = indexed.point.column.0;
+    }
+
+    ((0, row), (max_col, row))
+}
+
 /// Extract the text within a normalized selection range from the terminal buffer.
 pub fn get_selected_text(
     term: &Arc<FairMutex<Term<EventProxy>>>,
     sel_start: (usize, usize),
     sel_end: (usize, usize),
 ) -> String {
-    let term = term.lock();
+    let Some(term) = term.try_lock_unfair() else {
+        return String::new();
+    };
     let content = term.renderable_content();
 
     let mut lines: Vec<String> = Vec::new();
@@ -279,36 +452,98 @@ pub fn get_selected_text(
     lines.join("\n")
 }
 
-/// Render a single character centered in its cell, with optional underline/strikeout.
+/// Render a single character centered in its cell, with synthetic bold/italic.
 fn paint_char(
     painter: &Painter,
     c: char,
     pos: Pos2,
     font_id: &FontId,
     color: Color32,
-    underline: bool,
-    strikeout: bool,
+    bold: bool,
+    italic: bool,
     cell_width: f32,
     cell_height: f32,
 ) {
     let galley = painter.layout_no_wrap(c.to_string(), font_id.clone(), color);
     let text_width = galley.size().x;
-    let offset_x = (cell_width - text_width) / 2.0;
-    painter.galley(Pos2::new(pos.x + offset_x, pos.y), galley, color);
+    let mut offset_x = (cell_width - text_width) / 2.0;
 
-    if underline {
-        let y = pos.y + cell_height - 1.0;
-        painter.line_segment(
-            [Pos2::new(pos.x, y), Pos2::new(pos.x + cell_width, y)],
-            egui::Stroke::new(1.0, color),
-        );
+    // Synthetic italic: shift top of glyph right by ~12% of cell height.
+    // We approximate by shifting the entire glyph right by half the skew.
+    if italic {
+        offset_x += cell_height * 0.06;
     }
 
-    if strikeout {
-        let y = pos.y + cell_height * 0.5;
-        painter.line_segment(
-            [Pos2::new(pos.x, y), Pos2::new(pos.x + cell_width, y)],
-            egui::Stroke::new(1.0, color),
-        );
+    let text_pos = Pos2::new(pos.x + offset_x, pos.y);
+    painter.galley(text_pos, galley, color);
+
+    // Synthetic bold: draw the glyph a second time offset by 1px.
+    if bold {
+        let galley2 = painter.layout_no_wrap(c.to_string(), font_id.clone(), color);
+        painter.galley(Pos2::new(text_pos.x + 1.0, text_pos.y), galley2, color);
+    }
+}
+
+/// Draw an underline with the given style.
+fn draw_underline(
+    painter: &Painter,
+    style: UnderlineStyle,
+    x_start: f32,
+    x_end: f32,
+    y: f32,
+    cell_width: f32,
+    color: Color32,
+) {
+    let stroke = egui::Stroke::new(1.0, color);
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => {
+            painter.line_segment([Pos2::new(x_start, y), Pos2::new(x_end, y)], stroke);
+        }
+        UnderlineStyle::Double => {
+            painter.line_segment([Pos2::new(x_start, y), Pos2::new(x_end, y)], stroke);
+            painter.line_segment([Pos2::new(x_start, y - 2.0), Pos2::new(x_end, y - 2.0)], stroke);
+        }
+        UnderlineStyle::Dotted => {
+            let mut x = x_start;
+            while x < x_end {
+                let end = (x + 1.0).min(x_end);
+                painter.line_segment([Pos2::new(x, y), Pos2::new(end, y)], stroke);
+                x += 3.0;
+            }
+        }
+        UnderlineStyle::Dashed => {
+            let dash = cell_width * 0.4;
+            let gap = cell_width * 0.2;
+            let mut x = x_start;
+            while x < x_end {
+                let end = (x + dash).min(x_end);
+                painter.line_segment([Pos2::new(x, y), Pos2::new(end, y)], stroke);
+                x += dash + gap;
+            }
+        }
+        UnderlineStyle::Undercurl => {
+            // Wavy underline: approximate with short line segments.
+            let amplitude = 1.5;
+            let wavelength = cell_width;
+            let steps = 8;
+            let step_w = wavelength / steps as f32;
+            let mut x = x_start;
+            while x < x_end {
+                for i in 0..steps {
+                    let x0 = x + i as f32 * step_w;
+                    let x1 = (x0 + step_w).min(x_end);
+                    if x0 >= x_end {
+                        break;
+                    }
+                    let t0 = i as f32 / steps as f32;
+                    let t1 = (i + 1) as f32 / steps as f32;
+                    let y0 = y + (t0 * std::f32::consts::TAU).sin() * amplitude;
+                    let y1 = y + (t1 * std::f32::consts::TAU).sin() * amplitude;
+                    painter.line_segment([Pos2::new(x0, y0), Pos2::new(x1, y1)], stroke);
+                }
+                x += wavelength;
+            }
+        }
     }
 }

@@ -9,17 +9,16 @@ use std::sync::{LazyLock, Mutex};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem, NSWindow};
+use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 
 /// Actions that can be triggered from the native menu bar.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuAction {
     NewConnection,
-    Quit,
+    NewWindow,
     NewLocalTerminal,
     NewSshSession,
-    SftpTransfer,
     SshTunnels,
     ToggleLeftSidebar,
     ToggleRightSidebar,
@@ -59,6 +58,11 @@ define_class!(
             push_action(MenuAction::NewConnection);
         }
 
+        #[unsafe(method(newWindow:))]
+        fn new_window(&self, _sender: *mut AnyObject) {
+            push_action(MenuAction::NewWindow);
+        }
+
         #[unsafe(method(newLocalTerminal:))]
         fn new_local_terminal(&self, _sender: *mut AnyObject) {
             push_action(MenuAction::NewLocalTerminal);
@@ -67,11 +71,6 @@ define_class!(
         #[unsafe(method(newSshSession:))]
         fn new_ssh_session(&self, _sender: *mut AnyObject) {
             push_action(MenuAction::NewSshSession);
-        }
-
-        #[unsafe(method(sftpTransfer:))]
-        fn sftp_transfer(&self, _sender: *mut AnyObject) {
-            push_action(MenuAction::SftpTransfer);
         }
 
         #[unsafe(method(sshTunnels:))]
@@ -140,6 +139,7 @@ pub fn setup_menu_bar(plugin_names: &[String]) {
 
         // ── File ──
         let file_menu = make_menu(mtm, "File");
+        file_menu.addItem(&make_item(mtm, "New Window", sel!(newWindow:), "N", &responder));
         file_menu.addItem(&make_item(mtm, "New Connection...", sel!(newConnection:), "n", &responder));
         let file_item = NSMenuItem::new(mtm);
         file_item.setSubmenu(Some(&file_menu));
@@ -148,7 +148,7 @@ pub fn setup_menu_bar(plugin_names: &[String]) {
         // ── Sessions ──
         let sessions_menu = make_menu(mtm, "Sessions");
         sessions_menu.addItem(&make_item(mtm, "New Local Terminal", sel!(newLocalTerminal:), "t", &responder));
-        sessions_menu.addItem(&make_item(mtm, "New SSH Session...", sel!(newSshSession:), "N", &responder));
+        sessions_menu.addItem(&make_item(mtm, "New SSH Session...", sel!(newSshSession:), "n", &responder));
         let sessions_item = NSMenuItem::new(mtm);
         sessions_item.setSubmenu(Some(&sessions_menu));
         main_menu.addItem(&sessions_item);
@@ -240,9 +240,22 @@ unsafe fn make_item_no_target(
 pub fn set_titlebar_transparent() {
     let mtm = MainThreadMarker::new()
         .expect("set_titlebar_transparent must be called from the main thread");
-    let app = unsafe { NSApplication::sharedApplication(mtm) };
-    let windows = unsafe { app.windows() };
+    let app = NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
     for window in windows.iter() {
         window.setTitlebarAppearsTransparent(true);
+    }
+}
+
+/// Set the tabbing identifier on all windows so macOS groups them together
+/// in the native tab bar (Window > Merge All Windows).
+pub fn set_tabbing_identifier(identifier: &str) {
+    let mtm = MainThreadMarker::new()
+        .expect("set_tabbing_identifier must be called from the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
+    let ns_id = NSString::from_str(identifier);
+    for window in windows.iter() {
+        window.setTabbingIdentifier(&ns_id);
     }
 }

@@ -87,6 +87,8 @@ pub struct SessionPanelState {
     // -- quick connect search --
     pub quick_connect_query: String,
     pub quick_connect_focus: bool,
+    /// Set when Escape is pressed in the search bar, so the app can close the sidebar.
+    pub dismissed: bool,
 }
 
 /// Render the right sidebar showing server folders and SSH config entries.
@@ -127,7 +129,8 @@ pub fn show_session_panel(
     let search_resp = ui.add(
         crate::ui::widgets::text_edit(&mut panel_state.quick_connect_query)
             .hint_text("Quick connect\u{2026}")
-            .desired_width(ui.available_width() - 8.0),
+            .desired_width(ui.available_width() - 8.0)
+            .clip_text(true),
     );
     if panel_state.quick_connect_focus {
         search_resp.request_focus();
@@ -136,6 +139,14 @@ pub fn show_session_panel(
 
     let query = panel_state.quick_connect_query.trim().to_lowercase();
     let is_filtering = !query.is_empty();
+
+    // Escape on search bar → clear query and signal dismiss.
+    if search_resp.lost_focus()
+        && ui.input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        panel_state.quick_connect_query.clear();
+        panel_state.dismissed = true;
+    }
 
     // Enter on search bar → connect to top match
     if search_resp.lost_focus()
@@ -410,7 +421,8 @@ fn show_folder(
                 }
                 let te = ui.add(
                     crate::ui::widgets::text_edit(&mut panel_state.rename_buf)
-                        .desired_width(ui.available_width() - 4.0),
+                        .desired_width(ui.available_width() - 4.0)
+                        .clip_text(true),
                 );
                 if panel_state.rename_focus {
                     te.request_focus();
@@ -548,7 +560,8 @@ fn show_server_entry_editable(
                 }
                 let te = ui.add(
                     crate::ui::widgets::text_edit(&mut panel_state.rename_buf)
-                        .desired_width(ui.available_width() - 4.0),
+                        .desired_width(ui.available_width() - 4.0)
+                        .clip_text(true),
                 );
                 if panel_state.rename_focus {
                     te.request_focus();
@@ -687,7 +700,8 @@ fn show_new_folder_input(
             let te = ui.add(
                 crate::ui::widgets::text_edit(&mut panel_state.new_folder_name)
                     .hint_text("Folder name\u{2026}")
-                    .desired_width(ui.available_width() - 4.0),
+                    .desired_width(ui.available_width() - 4.0)
+                    .clip_text(true),
             );
             if panel_state.new_folder_focus {
                 te.request_focus();

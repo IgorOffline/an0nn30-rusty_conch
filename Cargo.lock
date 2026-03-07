@@ -947,6 +947,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap"
+version = "4.5.60"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2797f34da339ce31042b27d23607e051786132987f595b02ba4f6a6dffb7030a"
+dependencies = [
+ "clap_builder",
+ "clap_derive",
+]
+
+[[package]]
+name = "clap_builder"
+version = "4.5.60"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24a241312cea5059b13574bb9b3861cabf758b879c15190b37b6d6fd63ab6876"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "clap_lex",
+ "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.5.55"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "clap_lex"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -998,11 +1038,12 @@ dependencies = [
 
 [[package]]
 name = "conch_app"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "chrono",
+ "clap",
  "conch_core",
  "conch_plugin",
  "conch_session",
@@ -1013,12 +1054,15 @@ dependencies = [
  "env_logger",
  "font-kit",
  "image",
+ "libc",
  "log",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "parking_lot",
  "rfd",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
@@ -1027,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "conch_core"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1040,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1061,12 +1105,13 @@ dependencies = [
 
 [[package]]
 name = "conch_session"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "conch_core",
  "dirs",
+ "libc",
  "log",
  "os_pipe",
  "parking_lot",
@@ -5009,6 +5054,12 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+
+[[package]]
+name = "strsim"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"

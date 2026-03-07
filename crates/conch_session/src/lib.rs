@@ -4,7 +4,7 @@ pub mod sftp;
 pub mod ssh;
 
 pub use connector::EventProxy;
-pub use pty::LocalSession;
+pub use pty::{LocalSession, get_cwd_of_pid};
 pub use sftp::{FileEntry, SftpCmd, SftpEvent, SftpListing, run_sftp_worker};
 pub use ssh::client::{ConnectParams, connect_tunnel};
 pub use ssh::session::SshSession;

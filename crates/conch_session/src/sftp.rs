@@ -506,6 +506,7 @@ pub async fn run_sftp_worker(
                         });
                     }
                 }
+                let _ = prog_handle.await;
             }
             SftpCmd::Shutdown => break,
         }

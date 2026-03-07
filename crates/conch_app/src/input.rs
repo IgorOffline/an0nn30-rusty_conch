@@ -69,6 +69,7 @@ pub struct ResolvedShortcuts {
     pub toggle_right_sidebar: Option<KeyBinding>,
     pub focus_quick_connect: Option<KeyBinding>,
     pub focus_plugin_search: Option<KeyBinding>,
+    pub new_window: Option<KeyBinding>,
 }
 
 impl ResolvedShortcuts {
@@ -83,6 +84,7 @@ impl ResolvedShortcuts {
             toggle_right_sidebar: KeyBinding::parse(&config.toggle_right_sidebar),
             focus_quick_connect: KeyBinding::parse(&config.focus_quick_connect),
             focus_plugin_search: KeyBinding::parse(&config.focus_plugin_search),
+            new_window: KeyBinding::parse(&config.new_window),
         }
     }
 
@@ -97,6 +99,7 @@ impl ResolvedShortcuts {
             &self.toggle_right_sidebar,
             &self.focus_quick_connect,
             &self.focus_plugin_search,
+            &self.new_window,
         ];
         if bindings.iter().any(|b| b.as_ref().is_some_and(|kb| kb.matches(key, modifiers))) {
             return true;

@@ -6,7 +6,6 @@ use conch_core::color_scheme::ColorScheme;
 
 /// Pre-resolved RGBA colors for terminal rendering.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ResolvedColors {
     pub background: [f32; 4],
     pub foreground: [f32; 4],
@@ -16,7 +15,6 @@ pub struct ResolvedColors {
     pub bright: [[f32; 4]; 8],
     /// Dim variants (auto-computed as 2/3 brightness if absent).
     pub dim: [[f32; 4]; 8],
-    pub cursor_text: Option<[f32; 4]>,
     pub cursor_color: Option<[f32; 4]>,
     pub selection_text: Option<[f32; 4]>,
     pub selection_bg: Option<[f32; 4]>,
@@ -44,7 +42,6 @@ impl ResolvedColors {
             d
         };
 
-        let cursor_text = scheme.cursor.as_ref().map(|c| hex_to_rgba(&c.text));
         let cursor_color = scheme.cursor.as_ref().map(|c| hex_to_rgba(&c.cursor));
         let selection_text = scheme.selection.as_ref().map(|s| hex_to_rgba(&s.text));
         let selection_bg = scheme.selection.as_ref().map(|s| hex_to_rgba(&s.background));
@@ -57,7 +54,6 @@ impl ResolvedColors {
             normal,
             bright,
             dim,
-            cursor_text,
             cursor_color,
             selection_text,
             selection_bg,

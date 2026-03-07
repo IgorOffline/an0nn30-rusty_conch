@@ -14,14 +14,15 @@ A cross-platform terminal emulator with SSH session management, built in Rust wi
 
 ## Features
 
-- **Terminal emulation** — Full terminal via [alacritty_terminal](https://github.com/alacritty/alacritty), supporting 256-color, truecolor, mouse reporting, and application cursor mode
+- **Terminal emulation** — Full terminal via [alacritty_terminal](https://github.com/alacritty/alacritty), supporting 256-color, truecolor, mouse reporting, bracketed paste, and application cursor mode
 - **SSH session management** — Saved connections with proxy jump/command support, organized in folders
-- **Tabbed interface** — Multiple local and SSH sessions with Cmd+number switching
-- **File browser** — Dual-pane local/remote browser with SFTP upload and download
+- **Multi-window & tabs** — Multiple local and SSH sessions with Cmd+number switching, open extra windows with Cmd+Shift+N
+- **File browser** — Dual-pane local/remote browser with SFTP upload/download and progress tracking
 - **SSH tunnels** — Persistent local port forwarding with activate/deactivate
 - **Lua plugin system** — Extend Conch with scripts that have full access to sessions, UI dialogs, crypto, and more ([Plugin docs](docs/plugins.md))
 - **Configurable** — Alacritty-compatible config format with Conch-specific extensions for keyboard shortcuts, cursor style, font, colors, and environment variables
-- **Native feel** — Optional macOS native menu bar or transparent in-window title bar menu
+- **Native feel** — Optional macOS native menu bar or transparent in-window title bar menu; window decorations configurable (full, transparent, buttonless, none)
+- **IPC** — Control running instances via `conch msg new-window` / `conch msg new-tab` CLI commands
 - **Cross-platform** — macOS (ARM64 + Intel), Windows, Linux (AMD64 + ARM64)
 
 ## Installation
@@ -68,16 +69,20 @@ See the [Alacritty config docs](https://alacritty.org/config-alacritty.html) for
 [conch.keyboard]
 new_tab = "cmd+t"
 close_tab = "cmd+w"
+new_window = "cmd+shift+n"
 new_connection = "cmd+n"
 quit = "cmd+q"
 toggle_left_sidebar = "cmd+shift+b"
 toggle_right_sidebar = "cmd+shift+e"
-focus_quick_connect = "cmd+/"
+focus_quick_connect = "cmd+/"          # toggle: opens/closes right sidebar
 focus_plugin_search = "cmd+shift+p"
 
 [conch.ui]
 native_menu_bar = false    # true = macOS global menu, false = in-window menu
 font_size = 13.0
+
+[window]
+decorations = "Full"       # Full, Transparent, Buttonless, or None
 ```
 
 ## Plugins
@@ -93,9 +98,20 @@ See the full **[Plugin System Documentation](docs/plugins.md)** for the complete
 ```
 crates/
   conch_core/      # Data models, config, color schemes (no framework deps)
-  conch_session/   # SSH/local session management, PTY, SFTP, VTE
+  conch_session/   # SSH/local session management, PTY, SFTP, tunnels
   conch_plugin/    # Lua plugin runtime and API bindings
   conch_app/       # eframe/egui application, UI, terminal renderer
+    src/
+      app.rs           # Main application loop, dialogs, menus
+      extra_window.rs  # Secondary window rendering & tab management
+      mouse.rs         # Terminal mouse handling (selection + forwarding)
+      input.rs         # Keyboard input → escape sequence translation
+      state.rs         # Session, AppState, SessionBackend types
+      terminal/        # Terminal widget, color conversion, size info
+      ui/              # Sidebar, session panel, file browser, dialogs
+      icons.rs         # Icon loading and texture cache
+      ipc.rs           # Unix socket IPC listener
+      macos_menu.rs    # Native macOS menu bar via objc2
 packaging/
   macos/           # Info.plist for .app bundle
   linux/           # .desktop file

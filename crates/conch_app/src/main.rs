@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod fonts;
+mod extra_window;
 mod icons;
 mod input;
+mod ipc;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod mouse;
 mod state;
 mod terminal;
 mod ui;
@@ -13,7 +15,40 @@ mod ui;
 use std::sync::Arc;
 
 use app::ConchApp;
+use clap::{Parser, Subcommand};
 use conch_core::config;
+
+#[derive(Parser)]
+#[command(name = "conch", about = "Conch terminal emulator")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Send a message to a running Conch instance via IPC.
+    Msg {
+        #[command(subcommand)]
+        action: MsgAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MsgAction {
+    /// Create a new window.
+    NewWindow {
+        /// Working directory for the new window.
+        #[arg(long, short = 'd')]
+        working_directory: Option<String>,
+    },
+    /// Create a new tab in the focused window.
+    NewTab {
+        /// Working directory for the new tab.
+        #[arg(long, short = 'd')]
+        working_directory: Option<String>,
+    },
+}
 
 fn load_app_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../icons/app-icon.png"))
@@ -48,7 +83,54 @@ fn window_size_from_config(cfg: &config::WindowDimensions) -> [f32; 2] {
     ]
 }
 
+/// Send an IPC message to a running Conch instance.
+#[cfg(unix)]
+fn send_ipc_message(msg: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = ipc::ipc_socket_path();
+    let mut stream = UnixStream::connect(&socket_path)
+        .map_err(|e| format!("Failed to connect to Conch at {}: {e}", socket_path.display()))?;
+    stream
+        .write_all(msg.as_bytes())
+        .map_err(|e| format!("Failed to send message: {e}"))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|e| format!("Failed to send newline: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_ipc_message(_msg: &str) -> Result<(), String> {
+    Err("IPC is not supported on this platform".into())
+}
+
 fn main() -> eframe::Result<()> {
+    let cli = Cli::parse();
+
+    // Handle `conch msg ...` subcommands — these don't launch the GUI.
+    if let Some(Command::Msg { action }) = cli.command {
+        let json = match action {
+            MsgAction::NewWindow { working_directory } => {
+                serde_json::json!({"type": "create_window", "working_directory": working_directory})
+            }
+            MsgAction::NewTab { working_directory } => {
+                serde_json::json!({"type": "create_tab", "working_directory": working_directory})
+            }
+        };
+        match send_ipc_message(&json.to_string()) {
+            Ok(()) => {
+                println!("Message sent.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     env_logger::init();
 
     // Load config early so we can size the window before creating the app.
@@ -76,16 +158,44 @@ fn main() -> eframe::Result<()> {
         .with_inner_size(window_size)
         .with_icon(Arc::new(load_app_icon()));
 
-    if cfg!(target_os = "macos") && !native_menu {
-        // Transparent title bar: content extends behind it, we draw our own menu.
-        viewport = viewport
-            .with_fullsize_content_view(true)
-            .with_titlebar_shown(true)
-            .with_title_shown(false);
-    } else {
-        viewport = viewport
-            .with_title_shown(true)
-            .with_titlebar_shown(true);
+    // Apply window decoration style from config.
+    use config::WindowDecorations;
+    match user_config.window.decorations {
+        WindowDecorations::Full => {
+            if cfg!(target_os = "macos") && !native_menu {
+                // Transparent title bar: content extends behind it, we draw our own menu.
+                viewport = viewport
+                    .with_fullsize_content_view(true)
+                    .with_titlebar_shown(true)
+                    .with_title_shown(false);
+            } else {
+                viewport = viewport
+                    .with_title_shown(true)
+                    .with_titlebar_shown(true);
+            }
+        }
+        WindowDecorations::Transparent => {
+            viewport = viewport
+                .with_fullsize_content_view(true)
+                .with_titlebar_shown(true)
+                .with_title_shown(false)
+                .with_transparent(true);
+        }
+        WindowDecorations::Buttonless => {
+            viewport = viewport
+                .with_fullsize_content_view(true)
+                .with_titlebar_shown(true)
+                .with_title_shown(false)
+                .with_transparent(true);
+            // On macOS, buttonless hides the traffic light buttons.
+            #[cfg(target_os = "macos")]
+            {
+                viewport = viewport.with_titlebar_buttons_shown(false);
+            }
+        }
+        WindowDecorations::None => {
+            viewport = viewport.with_decorations(false);
+        }
     }
 
     let options = eframe::NativeOptions {

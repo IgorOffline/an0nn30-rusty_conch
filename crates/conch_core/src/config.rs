@@ -39,11 +39,29 @@ pub struct UserConfig {
 // Window config — [window] / [window.dimensions]
 // ---------------------------------------------------------------------------
 
+/// Window decoration style (mirrors Alacritty `window.decorations`).
+///
+/// - `Full` — normal title bar and borders (default)
+/// - `Transparent` — transparent title bar, content extends behind it (macOS only)
+/// - `Buttonless` — transparent title bar with no window buttons (macOS only)
+/// - `None` — no title bar or borders
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowDecorations {
+    #[default]
+    Full,
+    Transparent,
+    Buttonless,
+    None,
+}
+
 /// Window configuration (mirrors Alacritty `[window]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowConfig {
     #[serde(default)]
     pub dimensions: WindowDimensions,
+    #[serde(default)]
+    pub decorations: WindowDecorations,
 }
 
 /// Startup window dimensions in character cells (Alacritty `[window.dimensions]`).
@@ -73,6 +91,7 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             dimensions: WindowDimensions::default(),
+            decorations: WindowDecorations::default(),
         }
     }
 }
@@ -315,6 +334,8 @@ pub struct KeyboardConfig {
     pub focus_quick_connect: String,
     #[serde(default = "default_focus_plugin_search")]
     pub focus_plugin_search: String,
+    #[serde(default = "default_new_window")]
+    pub new_window: String,
 }
 
 fn default_theme() -> String { "dracula".into() }
@@ -330,6 +351,7 @@ fn default_toggle_left_sidebar() -> String { "cmd+shift+b".into() }
 fn default_toggle_right_sidebar() -> String { "cmd+shift+e".into() }
 fn default_focus_quick_connect() -> String { "cmd+/".into() }
 fn default_focus_plugin_search() -> String { "cmd+shift+p".into() }
+fn default_new_window() -> String { "cmd+shift+n".into() }
 
 impl Default for FontFamily {
     fn default() -> Self { Self { family: default_font_name() } }
@@ -365,6 +387,7 @@ impl Default for KeyboardConfig {
             toggle_right_sidebar: default_toggle_right_sidebar(),
             focus_quick_connect: default_focus_quick_connect(),
             focus_plugin_search: default_focus_plugin_search(),
+            new_window: default_new_window(),
         }
     }
 }

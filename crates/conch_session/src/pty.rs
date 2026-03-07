@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -13,6 +14,64 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use crate::connector::EventProxy;
+
+/// Get the current working directory of a process by PID.
+///
+/// On macOS, uses `proc_pidinfo` with `PROC_PIDVNODEPATHINFO`.
+/// On Linux, reads `/proc/{pid}/cwd` symlink.
+/// Returns `None` on failure or unsupported platforms.
+#[cfg(target_os = "macos")]
+pub fn get_cwd_of_pid(pid: u32) -> Option<PathBuf> {
+    use std::mem::MaybeUninit;
+
+    // PROC_PIDVNODEPATHINFO = 9
+    const PROC_PIDVNODEPATHINFO: i32 = 9;
+
+    #[repr(C)]
+    struct VnodeInfoPath {
+        _vip_vi: [u8; 152], // vnode_info (we don't need its fields)
+        vip_path: [u8; 1024], // MAXPATHLEN
+    }
+
+    #[repr(C)]
+    struct ProcVnodePathInfo {
+        pvi_cdir: VnodeInfoPath,
+        pvi_rdir: VnodeInfoPath,
+    }
+
+    unsafe {
+        let mut info = MaybeUninit::<ProcVnodePathInfo>::uninit();
+        let size = std::mem::size_of::<ProcVnodePathInfo>() as i32;
+        let ret = libc::proc_pidinfo(
+            pid as i32,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        );
+        if ret <= 0 {
+            return None;
+        }
+        let info = info.assume_init();
+        let path_bytes = &info.pvi_cdir.vip_path;
+        let nul_pos = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+        let path_str = std::str::from_utf8(&path_bytes[..nul_pos]).ok()?;
+        if path_str.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(path_str))
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn get_cwd_of_pid(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn get_cwd_of_pid(_pid: u32) -> Option<PathBuf> {
+    None
+}
 
 /// Simple Dimensions impl for creating a Term.
 struct TermSize {
@@ -40,8 +99,8 @@ pub struct LocalSession {
     loop_tx: EventLoopSender,
     /// Async receiver for terminal events (Wakeup, Title, Exit, etc.).
     event_rx: Option<mpsc::UnboundedReceiver<alacritty_terminal::event::Event>>,
-    /// Join handle for the event loop thread.
-    _join_handle: JoinHandle<(EventLoop<tty::Pty, EventProxy>, alacritty_terminal::event_loop::State)>,
+    /// Join handle for the event loop thread (Option so Drop can take it).
+    join_handle: Option<JoinHandle<(EventLoop<tty::Pty, EventProxy>, alacritty_terminal::event_loop::State)>>,
     /// Child process PID (for CWD polling via macOS proc_pidinfo).
     child_pid: u32,
 }
@@ -61,6 +120,7 @@ impl LocalSession {
         shell: Option<tty::Shell>,
         extra_env: &HashMap<String, String>,
         term_config: term::Config,
+        working_directory: Option<PathBuf>,
     ) -> Result<Self> {
         let window_size = WindowSize {
             num_lines: rows,
@@ -86,9 +146,11 @@ impl LocalSession {
         for (k, v) in extra_env {
             env.insert(k.clone(), v.clone());
         }
+        let cwd = working_directory
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")));
         let options = tty::Options {
             shell,
-            working_directory: Some(dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))),
+            working_directory: Some(cwd),
             drain_on_exit: true,
             env,
             #[cfg(target_os = "windows")]
@@ -123,7 +185,7 @@ impl LocalSession {
             term,
             loop_tx,
             event_rx: Some(event_rx),
-            _join_handle: join_handle,
+            join_handle: Some(join_handle),
             child_pid,
         })
     }
@@ -147,12 +209,14 @@ impl LocalSession {
     pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
         // Resize the Term grid directly — Msg::Resize only resizes the PTY,
         // not the terminal grid. Without this, display_iter stays at the old size.
-        let mut term = self.term.lock();
-        term.resize(TermSize {
-            columns: cols as usize,
-            lines: rows as usize,
-        });
-        drop(term);
+        // Use try_lock_unfair to avoid blocking the main thread if the event loop
+        // is holding the FairMutex lease during PTY reads.
+        if let Some(mut term) = self.term.try_lock_unfair() {
+            term.resize(TermSize {
+                columns: cols as usize,
+                lines: rows as usize,
+            });
+        }
 
         // Resize the PTY (sends TIOCSWINSZ → SIGWINCH to the shell).
         let size = WindowSize {
@@ -173,5 +237,23 @@ impl LocalSession {
 impl Drop for LocalSession {
     fn drop(&mut self) {
         self.shutdown();
+
+        // Move the join handle to a background thread so that the blocking
+        // Pty::drop → Child::wait() call doesn't freeze the main thread.
+        // We SIGKILL the child first (SIGHUP can be trapped by shells) to
+        // ensure Child::wait() returns promptly on the background thread.
+        let child_pid = self.child_pid;
+        if let Some(join_handle) = self.join_handle.take() {
+            std::thread::Builder::new()
+                .name("pty-cleanup".into())
+                .spawn(move || {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(child_pid as i32, libc::SIGKILL);
+                    }
+                    drop(join_handle);
+                })
+                .ok();
+        }
     }
 }
