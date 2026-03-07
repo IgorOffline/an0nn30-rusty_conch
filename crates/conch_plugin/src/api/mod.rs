@@ -1,5 +1,6 @@
 pub mod app;
 pub mod crypto;
+pub mod net;
 pub mod session;
 pub mod ui;
 
@@ -23,6 +24,19 @@ pub enum FormField {
     CheckBox { name: String, label: String, default: bool },
     Separator,
     Label    { text: String },
+}
+
+/// A declarative widget for panel plugins.
+#[derive(Debug, Clone)]
+pub enum PanelWidget {
+    Heading(String),
+    Text(String),
+    Label(String),
+    Separator,
+    Table { columns: Vec<String>, rows: Vec<Vec<String>> },
+    Progress { label: String, fraction: f32, text: String },
+    Button { id: String, label: String },
+    KeyValue { key: String, value: String },
 }
 
 /// Metadata about a session, returned to plugins.
@@ -54,6 +68,8 @@ pub enum PluginCommand {
     UiClear,
 
     // Session queries
+    /// Get the platform/OS of the current session (e.g. "macos", "linux").
+    GetPlatform { target: SessionTarget },
     /// Get info about the current (active) session.
     GetCurrentSession,
     /// Get info about all sessions.
@@ -62,6 +78,8 @@ pub enum PluginCommand {
     GetNamedSession { name: String },
     /// Get all configured server names.
     GetServers,
+    /// Get all configured servers with name and host.
+    GetServerDetails,
 
     // UI dialogs (blocking — plugin awaits response)
     /// Show a form dialog with multiple fields.
@@ -82,6 +100,28 @@ pub enum PluginCommand {
     ShowProgress { message: String },
     /// Hide the progress spinner.
     HideProgress,
+
+    // Plugin metadata commands
+    /// Set the plugin's icon from a file path. The path is validated.
+    SetIcon { path: String },
+
+    // Keybinding commands
+    /// Register a keybinding at runtime.
+    RegisterKeybind {
+        action: String,
+        binding: String,
+        description: String,
+    },
+
+    // Panel plugin commands
+    /// Replace the panel's widget list.
+    PanelSetWidgets(Vec<PanelWidget>),
+    /// Set the panel refresh interval in seconds (0 = manual only).
+    PanelSetRefresh(f64),
+    /// Wait for a button click event from the panel. Returns the button id.
+    PanelWaitEvent,
+    /// Non-blocking poll for a panel event. Returns PanelEvent or Ok (no event).
+    PanelPollEvent,
 }
 
 /// Response from the host application to a plugin command.
@@ -103,6 +143,12 @@ pub enum PluginResponse {
     SessionList(Vec<SessionInfoData>),
     /// List of server names.
     ServerList(Vec<String>),
+    /// List of server name+host pairs.
+    ServerDetailList(Vec<(String, String)>),
+    /// A panel button was clicked (carries the button id).
+    PanelEvent(String),
+    /// A keybinding was triggered (carries the action name).
+    KeybindTriggered(String),
 }
 
 /// Context passed to plugin execution — provides a channel to communicate with the app.

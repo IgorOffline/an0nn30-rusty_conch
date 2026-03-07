@@ -87,9 +87,21 @@ pub(crate) struct PendingSshInfo {
     pub(crate) error: Option<String>,
 }
 
+/// A resolved plugin keybinding ready for matching.
+pub(crate) struct ResolvedPluginKeybind {
+    /// The parsed key binding.
+    pub(crate) binding: crate::input::KeyBinding,
+    /// Index into `discovered_plugins`.
+    pub(crate) plugin_idx: usize,
+    /// Action name (e.g. "open_panel", "run", or a custom name).
+    pub(crate) action: String,
+}
+
 /// A plugin currently executing on a tokio task.
 pub(crate) struct RunningPlugin {
     pub(crate) meta: PluginMeta,
+    /// For panel plugins, the index into `discovered_plugins`.
+    pub(crate) discovered_idx: Option<usize>,
     pub(crate) commands_rx: tokio::sync::mpsc::UnboundedReceiver<(PluginCommand, tokio::sync::mpsc::UnboundedSender<PluginResponse>)>,
     /// Queued dialog requests waiting to be shown (FIFO).
     pub(crate) pending_dialogs: Vec<(PluginCommand, tokio::sync::mpsc::UnboundedSender<PluginResponse>)>,
@@ -180,6 +192,26 @@ pub struct ConchApp {
     pub(crate) pending_clipboard: Option<String>,
     pub(crate) selected_plugin: Option<usize>,
 
+    // Panel plugins
+    /// Widget lists for active panel plugins, keyed by discovered_plugins index.
+    pub(crate) panel_widgets: std::collections::HashMap<usize, Vec<conch_plugin::PanelWidget>>,
+    /// Panel plugin names, keyed by discovered_plugins index.
+    pub(crate) panel_names: std::collections::HashMap<usize, String>,
+    /// Pending button click events for panel plugins, keyed by plugin index.
+    pub(crate) panel_button_events: std::collections::HashMap<usize, Vec<String>>,
+    /// Response senders waiting for panel events, keyed by plugin index.
+    pub(crate) panel_event_waiters: std::collections::HashMap<usize, tokio::sync::mpsc::UnboundedSender<conch_plugin::PluginResponse>>,
+    /// Checkbox states in the plugin list (mirrors loaded state, user toggles before applying).
+    pub(crate) pending_plugin_loads: Vec<bool>,
+    /// Whether a restart prompt is pending for plugin changes.
+    pub(crate) plugin_restart_pending: bool,
+    /// Resolved plugin keybindings (checked after app shortcuts).
+    pub(crate) plugin_keybinds: Vec<ResolvedPluginKeybind>,
+    /// Loaded plugin icon textures, keyed by discovered_plugins index.
+    pub(crate) plugin_icons: HashMap<usize, egui::TextureHandle>,
+    /// Pending icon loads from plugins (path validated but texture not yet created — needs egui Context).
+    pub(crate) pending_plugin_icons: Vec<(usize, Vec<u8>)>,
+
     // IPC socket listener
     pub(crate) ipc_listener: Option<crate::ipc::IpcListener>,
 }
@@ -212,11 +244,24 @@ impl ConchApp {
             && state.user_config.conch.ui.native_menu_bar;
         #[cfg(target_os = "macos")]
         if use_native_menu {
-            let names: Vec<String> = discovered_plugins.iter().map(|p| p.name.clone()).collect();
+            let loaded = &state.persistent.loaded_plugins;
+            let names: Vec<String> = discovered_plugins
+                .iter()
+                .filter(|p| {
+                    p.plugin_type == conch_plugin::PluginType::Action && {
+                        let filename = p.path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        loaded.contains(&filename)
+                    }
+                })
+                .map(|p| p.name.clone())
+                .collect();
             crate::macos_menu::setup_menu_bar(&names);
         }
 
-        Self {
+        let mut app = Self {
             state,
             rt,
             shortcuts,
@@ -266,8 +311,25 @@ impl ConchApp {
             plugin_progress: None,
             pending_clipboard: None,
             selected_plugin: None,
+            panel_widgets: std::collections::HashMap::new(),
+            panel_names: std::collections::HashMap::new(),
+            panel_button_events: std::collections::HashMap::new(),
+            panel_event_waiters: std::collections::HashMap::new(),
+            pending_plugin_loads: Vec::new(),
+            plugin_restart_pending: false,
+            plugin_keybinds: Vec::new(),
+            plugin_icons: HashMap::new(),
+            pending_plugin_icons: Vec::new(),
             ipc_listener: crate::ipc::IpcListener::start(),
-        }
+        };
+
+        // Activate panel plugins that were loaded in the previous session.
+        app.activate_loaded_panel_plugins();
+
+        // Resolve plugin keybindings.
+        app.resolve_plugin_keybinds();
+
+        app
     }
 
     /// Drain async event channels for all sessions and pending SSH connections.
@@ -469,6 +531,11 @@ impl ConchApp {
 
         // Poll running plugins.
         self.poll_plugin_events(ctx);
+
+        // Flush any pending plugin icon textures.
+        if !self.pending_plugin_icons.is_empty() {
+            self.flush_pending_icons(ctx);
+        }
     }
 }
 
@@ -700,6 +767,38 @@ impl eframe::App for ConchApp {
 
         if self.show_about {
             self.show_about_dialog(ctx);
+        }
+
+        // Plugin restart prompt.
+        if self.plugin_restart_pending {
+            let mut dismiss = false;
+            egui::Window::new("Plugin Changes Applied")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Panel plugin changes have been applied.");
+                    ui.label("A restart is recommended for a clean state.");
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::ui::widgets::dialog_button(ui, "Restart Now").clicked() {
+                                // Save state and request restart
+                                let _ = config::save_persistent_state(&self.state.persistent);
+                                self.quit_requested = true;
+                                dismiss = true;
+                            }
+                            if crate::ui::widgets::dialog_button(ui, "Restart Later").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+                });
+            if dismiss {
+                self.plugin_restart_pending = false;
+            }
         }
 
         // Rename tab dialog.
@@ -976,12 +1075,28 @@ impl eframe::App for ConchApp {
                                 self.tunnel_dialog = Some(TunnelManagerState::new());
                                 ui.close_menu();
                             }
-                            if !self.discovered_plugins.is_empty() {
+                            // Show loaded action (non-panel) plugins
+                            let loaded_actions: Vec<(usize, String)> = self
+                                .discovered_plugins
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, meta)| {
+                                    meta.plugin_type == conch_plugin::PluginType::Action && {
+                                        let filename = meta.path.file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .into_owned();
+                                        self.state.persistent.loaded_plugins.contains(&filename)
+                                    }
+                                })
+                                .map(|(i, meta)| (i, meta.name.clone()))
+                                .collect();
+                            if !loaded_actions.is_empty() {
                                 ui.separator();
                                 let mut run_idx = None;
-                                for (i, meta) in self.discovered_plugins.iter().enumerate() {
-                                    if ui.button(&meta.name).clicked() {
-                                        run_idx = Some(i);
+                                for (i, name) in &loaded_actions {
+                                    if ui.button(name).clicked() {
+                                        run_idx = Some(*i);
                                         ui.close_menu();
                                     }
                                 }
@@ -1023,23 +1138,31 @@ impl eframe::App for ConchApp {
         // Left sidebar: narrow tab strip + resizable content panel.
         let (sidebar_action, deferred_plugin_action) = {
             let icons = self.icon_cache.as_ref();
+            let loaded_plugins = &self.state.persistent.loaded_plugins;
             let plugin_display: Vec<sidebar::PluginDisplayInfo> = self
                 .discovered_plugins
                 .iter()
                 .map(|meta| {
-                    let is_running = self
-                        .running_plugins
-                        .iter()
-                        .any(|rp| rp.meta.path == meta.path);
+                    let filename = meta.path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    let is_loaded = loaded_plugins.contains(&filename);
                     sidebar::PluginDisplayInfo {
                         name: meta.name.clone(),
                         description: meta.description.clone(),
-                        is_running,
+                        is_panel: meta.plugin_type == conch_plugin::PluginType::Panel,
+                        is_loaded,
                     }
                 })
                 .collect();
+            let panel_tabs: Vec<(usize, String)> = self
+                .panel_names
+                .iter()
+                .map(|(idx, name)| (*idx, name.clone()))
+                .collect();
             let action = if self.state.show_left_sidebar {
-                sidebar::show_tab_strip(ctx, &mut self.state.sidebar_tab, icons);
+                sidebar::show_tab_strip(ctx, &mut self.state.sidebar_tab, icons, &panel_tabs, &self.plugin_icons);
                 sidebar::show_sidebar_content(
                     ctx,
                     &self.state.sidebar_tab,
@@ -1051,14 +1174,23 @@ impl eframe::App for ConchApp {
                     &self.transfers,
                     &mut self.plugin_search_query,
                     &mut self.plugin_search_focus,
+                    &self.panel_widgets,
+                    &self.panel_names,
+                    &mut self.pending_plugin_loads,
                 )
             } else {
                 SidebarAction::None
             };
             let deferred = match &action {
                 SidebarAction::RunPlugin(i) => Some(SidebarAction::RunPlugin(*i)),
-                SidebarAction::StopPlugin(i) => Some(SidebarAction::StopPlugin(*i)),
                 SidebarAction::RefreshPlugins => Some(SidebarAction::RefreshPlugins),
+                SidebarAction::ApplyPluginChanges(indices) => {
+                    Some(SidebarAction::ApplyPluginChanges(indices.clone()))
+                }
+                SidebarAction::PanelButtonClick { plugin_idx, button_id } => {
+                    Some(SidebarAction::PanelButtonClick { plugin_idx: *plugin_idx, button_id: button_id.clone() })
+                }
+                SidebarAction::DeactivatePanel(i) => Some(SidebarAction::DeactivatePanel(*i)),
                 _ => None,
             };
             (action, deferred)
@@ -1453,19 +1585,16 @@ impl eframe::App for ConchApp {
                         self.plugin_search_opened_sidebar = false;
                     }
                 }
-                SidebarAction::StopPlugin(idx) => {
-                    if let Some(meta) = self.discovered_plugins.get(idx) {
-                        let path = meta.path.clone();
-                        if let Some(pos) = self.running_plugins.iter().position(|rp| rp.meta.path == path) {
-                            self.stop_plugin(pos);
-                        }
-                    }
-                    if self.plugin_search_opened_sidebar {
-                        self.state.show_left_sidebar = false;
-                        self.plugin_search_opened_sidebar = false;
-                    }
-                }
                 SidebarAction::RefreshPlugins => self.refresh_plugins(),
+                SidebarAction::ApplyPluginChanges(loaded_indices) => {
+                    self.apply_plugin_changes(loaded_indices);
+                }
+                SidebarAction::PanelButtonClick { plugin_idx, button_id } => {
+                    self.send_panel_button_event(plugin_idx, button_id);
+                }
+                SidebarAction::DeactivatePanel(idx) => {
+                    self.deactivate_panel_plugin(idx);
+                }
                 _ => {}
             }
         }

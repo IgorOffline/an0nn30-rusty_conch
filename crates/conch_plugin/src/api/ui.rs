@@ -1,6 +1,6 @@
 use mlua::{Lua, Result as LuaResult, Value};
 
-use super::{FormField, PluginCommand, PluginContext, PluginResponse};
+use super::{FormField, PanelWidget, PluginCommand, PluginContext, PluginResponse};
 
 /// Register the `ui` table into the Lua state.
 pub fn register(lua: &Lua, ctx: PluginContext) -> LuaResult<()> {
@@ -196,8 +196,206 @@ pub fn register(lua: &Lua, ctx: PluginContext) -> LuaResult<()> {
         })?,
     )?;
 
+    // -- Panel plugin API --
+    // These accumulate widgets into a thread-local list, then flush on render cycle.
+
+    // Store panel widgets in Lua registry as a table
+    let panel_widgets: mlua::Table = lua.create_table()?;
+    lua.set_named_registry_value("__panel_widgets", panel_widgets)?;
+
+    // ui.panel_clear() — clear accumulated panel widgets
+    let lua_ref = lua as *const Lua;
+    ui.set(
+        "panel_clear",
+        lua.create_function(move |lua, ()| {
+            let _ = lua_ref; // ensure we use the right lua
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            widgets.clear()?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_heading(text)
+    ui.set(
+        "panel_heading",
+        lua.create_function(|lua, text: String| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "heading")?;
+            w.set("text", text)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_text(text)
+    ui.set(
+        "panel_text",
+        lua.create_function(|lua, text: String| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "text")?;
+            w.set("text", text)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_label(text)
+    ui.set(
+        "panel_label",
+        lua.create_function(|lua, text: String| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "label")?;
+            w.set("text", text)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_separator()
+    ui.set(
+        "panel_separator",
+        lua.create_function(|lua, ()| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "separator")?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_table(columns, rows)
+    ui.set(
+        "panel_table",
+        lua.create_function(|lua, (cols, rows): (mlua::Table, mlua::Table)| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "table")?;
+            w.set("columns", cols)?;
+            w.set("rows", rows)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_progress(label, fraction, text)
+    ui.set(
+        "panel_progress",
+        lua.create_function(|lua, (label, fraction, text): (String, f32, String)| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "progress")?;
+            w.set("label", label)?;
+            w.set("fraction", fraction)?;
+            w.set("text", text)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_button(id, label)
+    ui.set(
+        "panel_button",
+        lua.create_function(|lua, (id, label): (String, String)| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "button")?;
+            w.set("id", id)?;
+            w.set("label", label)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.panel_kv(key, value)
+    ui.set(
+        "panel_kv",
+        lua.create_function(|lua, (key, value): (String, String)| {
+            let widgets: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+            let len = widgets.len()? + 1;
+            let w = lua.create_table()?;
+            w.set("type", "kv")?;
+            w.set("key", key)?;
+            w.set("value", value)?;
+            widgets.set(len, w)?;
+            Ok(())
+        })?,
+    )?;
+
+    // ui.set_refresh(seconds) — set panel refresh interval
+    let ctx_refresh = ctx.clone();
+    ui.set(
+        "set_refresh",
+        lua.create_async_function(move |_lua, seconds: f64| {
+            let ctx = ctx_refresh.clone();
+            async move {
+                let _ = ctx.send_command(PluginCommand::PanelSetRefresh(seconds)).await;
+                Ok(())
+            }
+        })?,
+    )?;
+
     lua.globals().set("ui", ui)?;
     Ok(())
+}
+
+/// Collect panel widgets from the Lua registry into `Vec<PanelWidget>`.
+pub fn collect_panel_widgets(lua: &Lua) -> LuaResult<Vec<PanelWidget>> {
+    let widgets_table: mlua::Table = lua.named_registry_value("__panel_widgets")?;
+    let mut widgets = Vec::new();
+
+    for entry in widgets_table.sequence_values::<mlua::Table>() {
+        let entry = entry?;
+        let wtype: String = entry.get("type")?;
+        let widget = match wtype.as_str() {
+            "heading" => PanelWidget::Heading(entry.get("text")?),
+            "text" => PanelWidget::Text(entry.get("text")?),
+            "label" => PanelWidget::Label(entry.get("text")?),
+            "separator" => PanelWidget::Separator,
+            "table" => {
+                let cols_table: mlua::Table = entry.get("columns")?;
+                let rows_table: mlua::Table = entry.get("rows")?;
+                let columns: Vec<String> = cols_table
+                    .sequence_values::<String>()
+                    .collect::<Result<_, _>>()?;
+                let mut rows = Vec::new();
+                for row_val in rows_table.sequence_values::<mlua::Table>() {
+                    let row_table = row_val?;
+                    let row: Vec<String> = row_table
+                        .sequence_values::<String>()
+                        .collect::<Result<_, _>>()?;
+                    rows.push(row);
+                }
+                PanelWidget::Table { columns, rows }
+            }
+            "progress" => PanelWidget::Progress {
+                label: entry.get("label")?,
+                fraction: entry.get("fraction")?,
+                text: entry.get("text")?,
+            },
+            "button" => PanelWidget::Button {
+                id: entry.get("id")?,
+                label: entry.get("label")?,
+            },
+            "kv" => PanelWidget::KeyValue {
+                key: entry.get("key")?,
+                value: entry.get("value")?,
+            },
+            _ => continue,
+        };
+        widgets.push(widget);
+    }
+
+    Ok(widgets)
 }
 
 /// Parse a Lua table of field descriptors into `Vec<FormField>`.

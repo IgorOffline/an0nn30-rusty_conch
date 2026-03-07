@@ -135,6 +135,33 @@ impl SshSession {
     }
 }
 
+/// Execute a command on a separate SSH channel (does not touch the terminal PTY).
+/// Returns the combined stdout output. Takes a cloned handle so it can run independently.
+pub async fn ssh_exec_command(handle: Arc<Handle<ClientHandler>>, command: String) -> anyhow::Result<String> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .context("Failed to open exec channel")?;
+    channel
+        .exec(true, command.as_bytes().to_vec())
+        .await
+        .context("Failed to exec command")?;
+
+    let mut output = Vec::new();
+    let mut stream = channel.into_stream();
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => output.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
 impl Drop for SshSession {
     fn drop(&mut self) {
         self.shutdown();

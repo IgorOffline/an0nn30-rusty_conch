@@ -60,6 +60,7 @@ impl SessionBackend {
             Self::Ssh(_) => None,
         }
     }
+
 }
 
 /// A single terminal session (local or SSH).

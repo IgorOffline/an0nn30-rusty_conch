@@ -174,8 +174,10 @@ impl ConchApp {
                 }
             }
             SidebarAction::RunPlugin(_)
-            | SidebarAction::StopPlugin(_)
             | SidebarAction::RefreshPlugins
+            | SidebarAction::ApplyPluginChanges(_)
+            | SidebarAction::PanelButtonClick { .. }
+            | SidebarAction::DeactivatePanel(_)
             | SidebarAction::None => {}
         }
     }

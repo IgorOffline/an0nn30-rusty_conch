@@ -12,9 +12,43 @@ Place `.lua` files in the plugins directory:
 ~/.config/conch/plugins/
 ```
 
-Conch scans this directory on startup and when you click Refresh in the Plugins panel.
+Conch scans this directory on startup and when you click Refresh in the Plugins panel. Symlinks are supported, so you can keep plugins in a git repo and link them here.
 
-### Plugin Header
+### Example Plugins
+
+Conch ships with example plugins in `examples/plugins/`:
+
+| Plugin | Type | Shortcut | Description |
+|--------|------|----------|-------------|
+| **System Info** (`system-info.lua`) | Panel | Cmd+Shift+I | Live system information — hostname, memory, disk, load average, top processes. Platform-aware (macOS/Linux). |
+| **Port Scanner** (`port-scanner.lua`) | Panel | Cmd+Shift+O | TCP port scanner with common port detection, range scanning, and service identification. |
+| **Encrypt / Decrypt** (`encrypt-decrypt.lua`) | Action | Cmd+Shift+Y | AES encryption/decryption (CBC, GCM, ECB) with PBKDF2 key derivation. |
+
+To use them, symlink into your plugins directory:
+
+```bash
+ln -s /path/to/rusty_conch/examples/plugins/*.lua ~/.config/conch/plugins/
+```
+
+## Plugin Types
+
+### Action Plugins (default)
+
+Action plugins run once when triggered and then exit. They appear in the **Tools** menu and can be launched from the Plugins sidebar tab or via keyboard shortcut.
+
+Use action plugins for one-shot tasks: encryption, deployment scripts, server management, etc.
+
+### Panel Plugins
+
+Panel plugins create persistent sidebar tabs with live-updating content. They stay running and periodically refresh their display. Declare a panel plugin with:
+
+```lua
+-- plugin-type: panel
+```
+
+Panel plugins appear as additional tabs in the left sidebar alongside Files and Plugins. They are activated when loaded and run continuously until unloaded.
+
+## Plugin Header
 
 Every plugin should start with metadata comments:
 
@@ -22,50 +56,228 @@ Every plugin should start with metadata comments:
 -- plugin-name: My Plugin
 -- plugin-description: A short description of what it does
 -- plugin-version: 1.0.0
+-- plugin-type: panel
+-- plugin-icon: my-icon.png
+-- plugin-keybind: open_panel = cmd+shift+i | Toggle my panel
 ```
 
-These comments must be at the top of the file (before any code). The `plugin-name` and `plugin-description` appear in the sidebar's Plugins panel.
+These comments must be at the top of the file (before any code).
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `plugin-name` | No | Display name (defaults to filename) |
+| `plugin-description` | No | Short description shown in the sidebar |
+| `plugin-version` | No | Semver version string |
+| `plugin-type` | No | `panel` for panel plugins (default: action) |
+| `plugin-icon` | No | Path to a 16x16 icon (PNG, JPEG, GIF, BMP, WebP, ICO) |
+| `plugin-keybind` | No | Keyboard shortcut declaration (repeatable) |
+
+## Plugin Icons
+
+Plugins can provide a custom icon that appears on their sidebar tab and in the plugin list.
+
+### Declaring an Icon
+
+Add a `-- plugin-icon:` comment to the plugin header:
+
+```lua
+-- plugin-icon: my-icon.png
+```
+
+Paths are relative to the plugin file's directory, or absolute. The icon should be a 16x16 image in one of: PNG, JPEG, GIF, BMP, WebP, or ICO format.
+
+### Validation
+
+Icons are validated before loading:
+- File must exist and have an allowed image extension
+- File size must be between 16 bytes and 2 MB
+- File header bytes must match a known image format (magic number check)
+- The image must decode successfully
+
+This prevents path traversal, non-image files, and injection attempts from being loaded.
+
+### Runtime Icon Setting
+
+Plugins can also set their icon at runtime:
+
+```lua
+app.set_icon("/path/to/icon.png")  -- returns true on success, false on failure
+```
+
+The same validation rules apply. The path must point to a real image file.
+
+## Plugin Keybindings
+
+Plugins can declare default keyboard shortcuts that work globally in the app.
+
+### Declaring Keybindings
+
+Add `-- plugin-keybind:` comments to the plugin header:
+
+```lua
+-- plugin-keybind: action = binding | description
+```
+
+- **`action`** — what happens when the shortcut is pressed:
+  - `open_panel` — switch to this plugin's panel tab (panel plugins only)
+  - `run` — execute the plugin (action plugins only)
+  - Any other name — sent as a custom event to the running plugin
+- **`binding`** — key combo string, e.g. `cmd+shift+i`, `ctrl+alt+s`
+- **`description`** — optional human-readable label (after `|`)
+
+Multiple keybindings can be declared:
+
+```lua
+-- plugin-keybind: open_panel = cmd+shift+i | Show panel
+-- plugin-keybind: refresh = cmd+shift+r | Force refresh
+```
+
+### Priority
+
+Plugin keybindings are **lower priority** than app-level shortcuts. The evaluation order is:
+
+1. App-level shortcuts (new tab, close tab, toggle sidebar, etc.)
+2. Plugin keybindings
+3. File browser keyboard navigation
+4. Terminal PTY forwarding
+
+If a plugin binding conflicts with an app shortcut, it is silently skipped with a log warning.
+
+### User Overrides
+
+Users can override plugin keybindings in `config.toml`:
+
+```toml
+[conch.keyboard.plugins]
+"system-info.open_panel" = "cmd+shift+i"
+"encrypt-decrypt.run" = "cmd+shift+y"
+```
+
+The key format is `"plugin-filename-stem.action_name"`. Config values take precedence over the plugin's default binding.
+
+### Runtime Registration
+
+Plugins can also register keybindings dynamically at runtime:
+
+```lua
+app.register_keybind("my_action", "cmd+alt+k", "Do something cool")
+```
+
+Returns `true` on success, `false` if the binding conflicts with an app shortcut.
+
+## Loading and Unloading Plugins
+
+Plugins must be explicitly **loaded** before they are active. The Plugins sidebar tab shows all discovered plugins with:
+
+- Checkboxes to toggle load state
+- Green **Loaded** / gray **Not loaded** status indicators
+- A **panel** badge for panel-type plugins
+- An **Apply** button that appears when changes are pending
+
+Load state is persisted across sessions in `state.toml`. When panel plugin load state changes, a restart prompt is shown.
 
 ### Running Plugins
 
-- Open the left sidebar and switch to the **Plugins** tab
-- Select a plugin and click **Run**, or double-click it
-- Use **Cmd+Shift+P** (configurable) to search and run plugins by name without leaving the keyboard
+- **Action plugins**: Open the Plugins tab and click Run, or use the Tools menu, or press the plugin's keyboard shortcut.
+- **Panel plugins**: Once loaded, they appear as sidebar tabs. Use `open_panel` keybinding or click the tab.
+- **Cmd+Shift+P** (configurable) opens a plugin search for quick access.
 
-### LuaRocks Modules
+## Panel Plugin Lifecycle
 
-Plugins can `require()` LuaRocks modules installed to:
+Panel plugins define up to four functions:
 
+```lua
+function setup()
+    -- Called once when the panel is first activated.
+    -- Use for one-time initialization.
+end
+
+function render()
+    -- Called on each refresh cycle to build the panel UI.
+    -- Use ui.panel_* functions to describe widgets.
+    ui.panel_clear()
+    ui.panel_heading("Hello")
+    ui.panel_label("World")
+end
+
+function on_click(button_id)
+    -- Called when a panel button is clicked.
+    if button_id == "refresh" then
+        ui.panel_clear()
+        ui.panel_label("Refreshing...")
+    end
+end
+
+function on_keybind(action)
+    -- Called when a custom keybinding is triggered.
+    if action == "refresh" then
+        -- handle the "refresh" keybind action
+    end
+end
 ```
-~/.config/conch/lua_modules/
+
+The `render()` function is called every 10 seconds by default. Use `ui.set_refresh(seconds)` to change the interval.
+
+### Silent Command Execution
+
+`session.exec(cmd)` runs commands **silently** — it does not inject them into the active terminal:
+
+- **SSH sessions**: Opens a separate SSH channel, runs the command, and returns stdout. The terminal PTY is untouched.
+- **Local sessions**: Runs via a subprocess (`sh -c "..."`).
+- **No active session**: Falls back to local subprocess execution.
+
+This means panel plugins can poll system info without interfering with whatever you're typing in the terminal.
+
+### Platform Detection
+
+Use `session.platform()` to detect the OS of the active session and tailor commands accordingly:
+
+```lua
+local platform = session.platform()  -- "macos", "linux", "freebsd", etc.
+
+if platform == "macos" then
+    local mem = session.exec("sysctl -n hw.memsize")
+elseif platform == "linux" then
+    local mem = session.exec("cat /proc/meminfo")
+end
 ```
 
-Install modules with:
+For SSH sessions, this runs `uname -s` on the remote host. For local sessions, it uses compile-time detection.
 
-```bash
-luarocks --tree ~/.config/conch/lua_modules install <module-name>
-```
+### Panel Widget API (`ui.panel_*`)
 
-Plugins can also `require()` other `.lua` files from their own directory.
+| Function | Description |
+|----------|-------------|
+| `ui.panel_clear()` | Clear current panel contents |
+| `ui.panel_heading(text)` | Bold section header |
+| `ui.panel_text(text)` | Monospace text block |
+| `ui.panel_label(text)` | Proportional text |
+| `ui.panel_separator()` | Horizontal divider |
+| `ui.panel_table(columns, rows)` | Data table |
+| `ui.panel_progress(label, fraction, text)` | Progress bar (fraction 0.0–1.0) |
+| `ui.panel_button(id, label)` | Clickable button (triggers `on_click`) |
+| `ui.panel_kv(key, value)` | Key-value pair row |
+| `ui.set_refresh(seconds)` | Set auto-refresh interval (default: 10s, 0 = manual only) |
 
 ## API Reference
 
-Conch exposes four global tables to plugins: `session`, `app`, `ui`, and `crypto`.
+Conch exposes five global tables to plugins: `session`, `app`, `ui`, `crypto`, and `net`.
 
-### `session` — Terminal Session Interaction
+### `session` — Session Interaction
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `session.exec(cmd)` | `string` | Execute a command on the active session and return output |
-| `session.send(text)` | — | Send raw text to the active session (no newline) |
-| `session.run(cmd)` | — | Send a command + newline to the active session |
+| `session.exec(cmd)` | `string` | Execute a command silently and return stdout |
+| `session.send(text)` | — | Send raw text to the active terminal (no newline) |
+| `session.run(cmd)` | — | Send a command + newline to the active terminal |
+| `session.platform()` | `string` | Get the OS: `"macos"`, `"linux"`, `"freebsd"`, etc. |
 | `session.current()` | `table\|nil` | Get info about the active session |
 | `session.all()` | `table` | Get info about all open sessions |
 | `session.named(name)` | `table\|nil` | Get a handle to a session by name |
 
 #### Session Info Table
 
-The tables returned by `session.current()`, `session.all()`, and `session.named()` contain:
+Tables returned by `session.current()`, `session.all()`, and `session.named()` contain:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -95,6 +307,20 @@ end
 | `app.notify(msg)` | — | Show a notification |
 | `app.log(msg)` | — | Log a message (visible in application logs) |
 | `app.servers()` | `table` | Get a list of all configured server names |
+| `app.server_details()` | `table` | Get servers with `name` and `host` fields |
+| `app.set_icon(path)` | `bool` | Set the plugin's icon from a file path (validated) |
+| `app.register_keybind(action, binding, desc?)` | `bool` | Register a keybinding at runtime |
+
+#### Server Details
+
+`app.server_details()` returns an array of tables with `name` and `host` fields:
+
+```lua
+local servers = app.server_details()
+for _, srv in ipairs(servers) do
+    print(srv.name .. " -> " .. srv.host)
+end
+```
 
 ### `ui` — User Interface
 
@@ -128,7 +354,7 @@ All dialog functions are **blocking** — the plugin pauses until the user respo
 
 #### Form Fields
 
-The `ui.form()` function accepts a table of field descriptors. Each field is a table with a `type` key:
+The `ui.form()` function accepts a table of field descriptors:
 
 | Type | Keys | Description |
 |------|------|-------------|
@@ -139,29 +365,11 @@ The `ui.form()` function accepts a table of field descriptors. Each field is a t
 | `"separator"` | — | Visual separator line |
 | `"label"` | `text` | Static text (italic, not editable) |
 
-The return value is a table mapping field `name` to the user's input (strings for all types, `"true"`/`"false"` for checkboxes), or `nil` if the user cancelled.
-
-```lua
-local result = ui.form("Settings", {
-    { type = "text",     name = "host",     label = "Hostname",  default = "localhost" },
-    { type = "text",     name = "port",     label = "Port",      default = "8080" },
-    { type = "combo",    name = "protocol", label = "Protocol",  options = {"HTTP", "HTTPS"}, default = "HTTPS" },
-    { type = "checkbox", name = "verbose",  label = "Verbose",   default = false },
-    { type = "separator" },
-    { type = "label",    text = "Leave blank to use defaults" },
-    { type = "password", name = "token",    label = "API Token" },
-})
-
-if result then
-    print(result.host)       -- "localhost"
-    print(result.protocol)   -- "HTTPS"
-    print(result.verbose)    -- "true" or "false"
-end
-```
+Returns a table mapping field `name` to the user's input, or `nil` if cancelled. Checkbox values are `"true"`/`"false"` strings.
 
 ### `crypto` — Cryptography
 
-AES encryption and decryption with PBKDF2 key derivation. All functions run on a background thread to avoid blocking the UI.
+AES encryption and decryption with PBKDF2 key derivation.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
@@ -169,17 +377,56 @@ AES encryption and decryption with PBKDF2 key derivation. All functions run on a
 | `crypto.decrypt(encoded, passphrase, algorithm)` | `string` | Decrypt base64-encoded ciphertext, returns plaintext |
 | `crypto.algorithms()` | `table` | List supported algorithm strings |
 
-#### Supported Algorithms
+Supported algorithms: `AES-128-CBC`, `AES-256-CBC`, `AES-128-GCM`, `AES-256-GCM`, `AES-128-ECB`, `AES-256-ECB`.
 
-- `AES-128-CBC`, `AES-256-CBC` — CBC mode with PKCS7 padding
-- `AES-128-GCM`, `AES-256-GCM` — GCM mode (authenticated encryption, recommended)
-- `AES-128-ECB`, `AES-256-ECB` — ECB mode (not recommended for most uses)
+Key derivation uses PBKDF2-HMAC-SHA256 with 310,000 iterations and a random 16-byte salt. Output format: `base64(salt || iv || ciphertext)`.
 
-Key derivation uses PBKDF2-HMAC-SHA256 with 310,000 iterations and a random 16-byte salt. The output format is `base64(salt || iv || ciphertext)`.
+### `net` — Networking
+
+TCP port scanning, DNS resolution, and timing utilities. All networking runs from the app machine (not through SSH sessions). For scanning from a remote host's perspective, use `session.exec()` with the appropriate tools.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `net.check_port(host, port, timeout_ms?)` | `bool` | Check if a single TCP port is open (default timeout: 1000ms) |
+| `net.scan(host, ports, timeout_ms?, concurrency?)` | `table` | Scan a list of ports. Returns `{port=N, open=bool}` entries. Default concurrency: 50 |
+| `net.scan_range(host, start, end, timeout_ms?, concurrency?)` | `table` | Scan a port range. Returns only open port numbers. Default concurrency: 100 |
+| `net.resolve(hostname)` | `table` | DNS lookup. Returns a table of IP address strings |
+| `net.time()` | `number` | Monotonic timestamp in seconds (for measuring durations) |
+
+#### Port Scanning Examples
+
+```lua
+-- Check a single port
+if net.check_port("example.com", 443) then
+    print("HTTPS is open")
+end
+
+-- Scan common ports
+local results = net.scan("192.168.1.1", {22, 80, 443, 3306, 5432})
+for _, r in ipairs(results) do
+    if r.open then print("Port " .. r.port .. " is open") end
+end
+
+-- Scan a range, get only open ports
+local open = net.scan_range("10.0.0.1", 1, 1024, 2000, 200)
+for _, port in ipairs(open) do
+    print("Open: " .. port)
+end
+
+-- DNS resolution
+local ips = net.resolve("github.com")
+for _, ip in ipairs(ips) do print(ip) end
+
+-- Timing a scan
+local t0 = net.time()
+net.scan_range("localhost", 1, 100)
+local elapsed = net.time() - t0
+print(string.format("Scan took %.1fs", elapsed))
+```
 
 ## Sandboxing
 
-Plugins run in a restricted Lua environment. The following standard library modules are **removed** for safety:
+Plugins run in a restricted Lua environment. The following standard library modules are **removed**:
 
 - `os` — no file system operations or process execution
 - `io` — no file I/O
@@ -187,109 +434,18 @@ Plugins run in a restricted Lua environment. The following standard library modu
 
 The `require()` function is available but restricted to the plugin's own directory and the LuaRocks module path.
 
-## Example: Encrypt / Decrypt Plugin
+### LuaRocks Modules
 
-```lua
--- plugin-name: Encrypt / Decrypt
--- plugin-description: AES encryption (CBC, GCM, ECB) with PBKDF2 key derivation
--- plugin-version: 2.0.0
+Plugins can `require()` LuaRocks modules installed to:
 
-local ALGORITHMS = crypto.algorithms()
-
-local vals = ui.form("Encrypt / Decrypt", {
-    { type = "combo",    name = "mode",      label = "Mode",       options = { "Encrypt", "Decrypt" }, default = "Encrypt" },
-    { type = "combo",    name = "algorithm",  label = "Algorithm",  options = ALGORITHMS, default = "AES-256-GCM" },
-    { type = "password", name = "key",        label = "Passphrase" },
-    { type = "separator" },
-    { type = "label",    text = "GCM is recommended (authenticated encryption)" },
-    { type = "text",     name = "input",      label = "Input",      default = "" },
-})
-
-if not vals then return end
-
-if not vals.key or vals.key == "" then
-    ui.error("Error", "Passphrase must not be empty.")
-    return
-end
-
-if not vals.input or vals.input == "" then
-    ui.error("Error", "Input text must not be empty.")
-    return
-end
-
-local ok, result = pcall(function()
-    if vals.mode == "Encrypt" then
-        return crypto.encrypt(vals.input, vals.key, vals.algorithm)
-    else
-        return crypto.decrypt(vals.input, vals.key, vals.algorithm)
-    end
-end)
-
-if ok and result then
-    ui.show(vals.mode .. "ed (" .. vals.algorithm .. ")", result)
-    app.clipboard(result)
-    ui.append(vals.mode .. " complete (" .. vals.algorithm .. "). Result copied to clipboard.")
-else
-    ui.error(vals.mode .. " Failed", tostring(result))
-end
+```
+~/.config/conch/lua_modules/
 ```
 
-## Example: Multi-Session Deploy
+Install modules with:
 
-```lua
--- plugin-name: Deploy to Servers
--- plugin-description: Run a deploy command across multiple sessions
--- plugin-version: 1.0.0
-
-local servers = app.servers()
-if #servers == 0 then
-    ui.error("No Servers", "No saved servers found.")
-    return
-end
-
-local vals = ui.form("Deploy", {
-    { type = "text", name = "command", label = "Command", default = "cd /app && git pull && systemctl restart app" },
-})
-if not vals then return end
-
-local confirmed = ui.confirm("Run on all open sessions?\n\nCommand: " .. vals.command)
-if not confirmed then return end
-
-ui.clear()
-local sessions = session.all()
-for _, s in ipairs(sessions) do
-    if s.type == "ssh" then
-        ui.append("Deploying to " .. s.title .. "...")
-        local handle = session.named(s.title)
-        if handle then
-            handle.run(vals.command)
-            ui.append("  Sent to " .. s.title)
-        end
-    end
-end
-ui.append("Deploy complete.")
+```bash
+luarocks --tree ~/.config/conch/lua_modules install <module-name>
 ```
 
-## Example: Quick Connect
-
-```lua
--- plugin-name: Quick Connect
--- plugin-description: Connect to a server from a searchable list
--- plugin-version: 1.0.0
-
-local servers = app.servers()
-if #servers == 0 then
-    ui.alert("No Servers", "No saved servers configured.")
-    return
-end
-
--- Build options table for combo box
-local result = ui.form("Quick Connect", {
-    { type = "combo", name = "server", label = "Server", options = servers, default = servers[1] },
-})
-
-if result then
-    app.open_session(result.server)
-    ui.append("Connecting to " .. result.server .. "...")
-end
-```
+Plugins can also `require()` other `.lua` files from their own directory.

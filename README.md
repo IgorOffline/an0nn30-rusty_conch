@@ -19,7 +19,7 @@ A cross-platform terminal emulator with SSH session management, built in Rust wi
 - **Multi-window & tabs** — Multiple local and SSH sessions with Cmd+number switching, open extra windows with Cmd+Shift+N
 - **File browser** — Dual-pane local/remote browser with SFTP upload/download and progress tracking
 - **SSH tunnels** — Persistent local port forwarding with activate/deactivate
-- **Lua plugin system** — Extend Conch with scripts that have full access to sessions, UI dialogs, crypto, and more ([Plugin docs](docs/plugins.md))
+- **Lua plugin system** — Extend Conch with Lua 5.4 scripts: action plugins for one-shot tasks, panel plugins for live sidebar dashboards. Full API for session interaction, UI dialogs, cryptography, networking (port scanning, DNS), custom keybindings, and icons ([Plugin docs](docs/plugins.md))
 - **Configurable** — Alacritty-compatible config format with Conch-specific extensions for keyboard shortcuts, cursor style, font, colors, and environment variables
 - **Native feel** — Optional macOS native menu bar or transparent in-window title bar menu; window decorations configurable (full, transparent, buttonless, none)
 - **IPC** — Control running instances via `conch msg new-window` / `conch msg new-tab` CLI commands
@@ -77,6 +77,11 @@ toggle_right_sidebar = "cmd+shift+e"
 focus_quick_connect = "cmd+/"          # toggle: opens/closes right sidebar
 focus_plugin_search = "cmd+shift+p"
 
+[conch.keyboard.plugins]
+"system-info.open_panel" = "cmd+shift+i"
+"port-scanner.open_panel" = "cmd+shift+o"
+"encrypt-decrypt.run" = "cmd+shift+y"
+
 [conch.ui]
 native_menu_bar = false    # true = macOS global menu, false = in-window menu
 font_size = 13.0
@@ -87,11 +92,28 @@ decorations = "Full"       # Full, Transparent, Buttonless, or None
 
 ## Plugins
 
-Conch has a Lua-based plugin system for automating tasks, building tools, and extending the terminal. Plugins can show dialogs, interact with sessions, encrypt data, and more.
+Conch has a Lua 5.4 plugin system for automating tasks, building tools, and extending the terminal.
+
+- **Action plugins** — run-once scripts triggered from the Tools menu, sidebar, or keyboard shortcut
+- **Panel plugins** — persistent sidebar tabs with live-updating dashboards (system info, port scanning, etc.)
+
+Plugins can interact with local and SSH sessions (silently, without disturbing the terminal), show form dialogs, encrypt/decrypt data, scan ports, resolve DNS, declare custom keybindings, and set custom icons.
 
 **Quick start:** Drop a `.lua` file in `~/.config/conch/plugins/` and it appears in the Plugins panel.
 
-See the full **[Plugin System Documentation](docs/plugins.md)** for the complete API reference and examples.
+Conch ships with example plugins in `examples/plugins/` — symlink them to get started:
+
+```bash
+ln -s /path/to/rusty_conch/examples/plugins/*.lua ~/.config/conch/plugins/
+```
+
+| Plugin | Type | Description |
+|--------|------|-------------|
+| System Info | Panel | Live hostname, memory, disk, load, top processes (macOS/Linux) |
+| Port Scanner | Panel | TCP port scanning with server dropdown, service identification |
+| Encrypt/Decrypt | Action | AES encryption/decryption with PBKDF2 key derivation |
+
+See the full **[Plugin System Documentation](docs/plugins.md)** for the complete API reference.
 
 ## Project Structure
 
@@ -99,7 +121,7 @@ See the full **[Plugin System Documentation](docs/plugins.md)** for the complete
 crates/
   conch_core/      # Data models, config, color schemes (no framework deps)
   conch_session/   # SSH/local session management, PTY, SFTP, tunnels
-  conch_plugin/    # Lua plugin runtime and API bindings
+  conch_plugin/    # Lua plugin runtime, API bindings (session, app, ui, crypto, net)
   conch_app/       # eframe/egui application, UI, terminal renderer
     src/
       app.rs           # Main application loop, dialogs, menus
@@ -109,6 +131,8 @@ crates/
       state.rs         # Session, AppState, SessionBackend types
       terminal/        # Terminal widget, color conversion, size info
       ui/              # Sidebar, session panel, file browser, dialogs
+      plugins.rs       # Plugin command handling, keybinding resolution
+      shortcuts.rs     # Keyboard shortcut dispatch
       icons.rs         # Icon loading and texture cache
       ipc.rs           # Unix socket IPC listener
       macos_menu.rs    # Native macOS menu bar via objc2

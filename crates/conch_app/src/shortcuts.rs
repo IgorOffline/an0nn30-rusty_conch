@@ -150,6 +150,21 @@ impl ConchApp {
                             }
                         }
 
+                        // Plugin keybindings (lower priority than app shortcuts).
+                        {
+                            let mut triggered = None;
+                            for pkb in &self.plugin_keybinds {
+                                if pkb.binding.matches(key, modifiers) {
+                                    triggered = Some((pkb.plugin_idx, pkb.action.clone()));
+                                    break;
+                                }
+                            }
+                            if let Some((idx, action)) = triggered {
+                                self.handle_plugin_keybind(idx, &action);
+                                return;
+                            }
+                        }
+
                         // File browser keyboard navigation.
                         if self.state.file_browser.focused {
                             self.handle_file_browser_key(key, modifiers);

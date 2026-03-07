@@ -11,6 +11,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -359,6 +361,12 @@ pub struct KeyboardConfig {
     pub zen_mode: String,
     #[serde(default = "default_ssh_tunnels")]
     pub ssh_tunnels: String,
+
+    /// Plugin keybinding overrides. Keys are "plugin-filename.action_name",
+    /// values are binding strings like "cmd+shift+i".
+    /// Example: `{ "system-info.open_panel" = "cmd+shift+i" }`
+    #[serde(default)]
+    pub plugins: HashMap<String, String>,
 }
 
 fn default_theme() -> String { "dracula".into() }
@@ -417,6 +425,7 @@ impl Default for KeyboardConfig {
             focus_files: default_focus_files(),
             zen_mode: default_zen_mode(),
             ssh_tunnels: default_ssh_tunnels(),
+            plugins: HashMap::new(),
         }
     }
 }
@@ -466,6 +475,9 @@ pub struct PersistentState {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub sessions: SessionConfig,
+    /// Filenames of plugins that are loaded (active). Plugins not in this list are discovered but not loaded.
+    #[serde(default)]
+    pub loaded_plugins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,6 +531,7 @@ impl Default for PersistentState {
         Self {
             layout: LayoutConfig::default(),
             sessions: SessionConfig::default(),
+            loaded_plugins: Vec::new(),
         }
     }
 }

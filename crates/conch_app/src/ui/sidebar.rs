@@ -3,6 +3,7 @@
 //! Rendered as two adjacent side panels: a narrow fixed-width tab strip on the
 //! far left, and a resizable content panel beside it.
 
+use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,11 +18,13 @@ use crate::icons::{Icon, IconCache};
 use crate::ui::file_browser::{FileBrowserState, FileListEntry, display_size, format_modified};
 
 /// Which tab is active in the left sidebar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SidebarTab {
     #[default]
     Files,
     Plugins,
+    /// A panel plugin tab, identified by plugin index.
+    PluginPanel(usize),
 }
 
 /// Actions that can be triggered by the sidebar.
@@ -46,8 +49,13 @@ pub enum SidebarAction {
     /// Cancel an in-progress transfer by filename.
     CancelTransfer(String),
     RunPlugin(usize),
-    StopPlugin(usize),
     RefreshPlugins,
+    /// Apply plugin load/unload changes (carries list of plugin indices that should be loaded).
+    ApplyPluginChanges(Vec<usize>),
+    /// A button was clicked in a panel plugin.
+    PanelButtonClick { plugin_idx: usize, button_id: String },
+    /// Deactivate (stop) a panel plugin.
+    DeactivatePanel(usize),
 }
 
 /// Transfer progress shown in the sidebar.
@@ -69,13 +77,39 @@ const TAB_STRIP_WIDTH: f32 = 28.0;
 /// Width of the accent bar on the selected tab's right edge.
 const ACCENT_WIDTH: f32 = 3.0;
 
-const TABS: &[(SidebarTab, &str, Icon)] = &[
-    (SidebarTab::Files, "Files", Icon::TabFiles),
-    (SidebarTab::Plugins, "Plugins", Icon::TabTools),
-];
+/// A tab entry for the sidebar tab strip (static or dynamic).
+struct TabEntry {
+    tab: SidebarTab,
+    label: String,
+    icon: Icon,
+    /// Optional plugin icon texture (overrides the default Icon for plugin tabs).
+    plugin_tex_id: Option<egui::TextureId>,
+}
 
 /// Render the narrow vertical tab strip (far-left panel).
-pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<&IconCache>) {
+/// `panel_tabs` is a list of (plugin_index, name) for active panel plugins.
+/// `plugin_icons` maps plugin index to loaded texture handles.
+pub fn show_tab_strip(
+    ctx: &Context,
+    active_tab: &mut SidebarTab,
+    icons: Option<&IconCache>,
+    panel_tabs: &[(usize, String)],
+    plugin_icons: &HashMap<usize, egui::TextureHandle>,
+) {
+    // Build the tab list: fixed tabs + dynamic panel plugin tabs.
+    let mut tabs = vec![
+        TabEntry { tab: SidebarTab::Files, label: "Files".into(), icon: Icon::TabFiles, plugin_tex_id: None },
+        TabEntry { tab: SidebarTab::Plugins, label: "Plugins".into(), icon: Icon::TabTools, plugin_tex_id: None },
+    ];
+    for (idx, name) in panel_tabs {
+        tabs.push(TabEntry {
+            tab: SidebarTab::PluginPanel(*idx),
+            label: name.clone(),
+            icon: Icon::TabTools,
+            plugin_tex_id: plugin_icons.get(idx).map(|h| h.id()),
+        });
+    }
+
     egui::SidePanel::left("sidebar_tabs")
         .resizable(false)
         .exact_width(TAB_STRIP_WIDTH)
@@ -88,29 +122,25 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
             let base_bg = style.visuals.panel_fill;
             let darker_bg = darken_color(base_bg, 18);
             let accent_color = Color32::from_rgb(47, 101, 202);
-            // Strong text: black in light mode, white in dark mode.
             let text_color = style.visuals.strong_text_color();
             let font_id = FontId::new(13.0, FontFamily::Proportional);
 
-            let tab_height = panel_rect.height() / TABS.len() as f32;
+            let tab_height = panel_rect.height() / tabs.len() as f32;
 
-            // Fill the entire strip with the darker background first.
             painter.rect_filled(panel_rect, 0.0, darker_bg);
 
-            for (i, &(tab, label, icon)) in TABS.iter().enumerate() {
+            for (i, entry) in tabs.iter().enumerate() {
                 let y_min = panel_rect.min.y + i as f32 * tab_height;
                 let tab_rect = Rect::from_min_size(
                     Pos2::new(panel_rect.min.x, y_min),
                     Vec2::new(TAB_STRIP_WIDTH, tab_height),
                 );
 
-                let selected = *active_tab == tab;
+                let selected = *active_tab == entry.tab;
 
-                // Selected tab gets the lighter panel background.
                 if selected {
                     painter.rect_filled(tab_rect, 0.0, base_bg);
 
-                    // Accent bar on the right edge.
                     let accent_rect = Rect::from_min_size(
                         Pos2::new(tab_rect.max.x - ACCENT_WIDTH, tab_rect.min.y),
                         Vec2::new(ACCENT_WIDTH, tab_height),
@@ -118,14 +148,11 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
                     painter.rect_filled(accent_rect, 0.0, accent_color);
                 }
 
-                // Rotated label (90° CCW — reading bottom to top).
                 let galley =
-                    painter.layout_no_wrap(label.to_string(), font_id.clone(), text_color);
+                    painter.layout_no_wrap(entry.label.clone(), font_id.clone(), text_color);
                 let text_w = galley.size().x;
                 let text_h = galley.size().y;
 
-                // Icon goes below the rotated text. Reserve 16px for the icon
-                // and 4px gap. Total content height = text_w (rotated) + 4 + 16.
                 let icon_size = 16.0;
                 let gap = 4.0;
                 let total_h = text_w + gap + icon_size;
@@ -133,7 +160,6 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
                 let cx = tab_rect.center().x;
                 let cy = tab_rect.center().y;
 
-                // Rotated text: pivot so the text + icon block is centered.
                 let text_top = cy - total_h / 2.0;
                 let pos = Pos2::new(cx - text_h / 2.0, text_top + text_w);
 
@@ -141,8 +167,9 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
                     .with_angle(-FRAC_PI_2);
                 painter.add(Shape::Text(text_shape));
 
-                // Icon below the rotated text.
-                if let Some(tex_id) = icons.and_then(|ic| ic.texture_id(icon)) {
+                let tex_id = entry.plugin_tex_id
+                    .or_else(|| icons.and_then(|ic| ic.texture_id(entry.icon)));
+                if let Some(tex_id) = tex_id {
                     let icon_top = text_top + text_w + gap;
                     let icon_rect = Rect::from_min_size(
                         Pos2::new(cx - icon_size / 2.0, icon_top),
@@ -156,7 +183,6 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
                     );
                 }
 
-                // Separator line between tabs.
                 if i > 0 {
                     painter.line_segment(
                         [
@@ -170,15 +196,13 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
                     );
                 }
 
-                // Click detection.
                 let response =
                     ui.interact(tab_rect, ui.id().with(("sidebar_tab", i)), Sense::click());
                 if response.clicked() {
-                    *active_tab = tab;
+                    *active_tab = entry.tab.clone();
                 }
             }
 
-            // Right-edge separator.
             painter.line_segment(
                 [
                     Pos2::new(panel_rect.max.x, panel_rect.min.y),
@@ -193,10 +217,11 @@ pub fn show_tab_strip(ctx: &Context, active_tab: &mut SidebarTab, icons: Option<
 pub struct PluginDisplayInfo {
     pub name: String,
     pub description: String,
-    pub is_running: bool,
+    pub is_panel: bool,
+    pub is_loaded: bool,
 }
 
-/// Render the sidebar content panel (file browser, plugins).
+/// Render the sidebar content panel (file browser, plugins, or panel plugin).
 /// Always shown with a stable panel ID so the user-resized width persists
 /// across tab switches.
 pub fn show_sidebar_content(
@@ -210,6 +235,9 @@ pub fn show_sidebar_content(
     transfers: &[TransferStatus],
     plugin_search_query: &mut String,
     plugin_search_focus: &mut bool,
+    panel_widgets: &HashMap<usize, Vec<conch_plugin::PanelWidget>>,
+    panel_names: &HashMap<usize, String>,
+    pending_plugin_loads: &mut Vec<bool>,
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
 
@@ -219,14 +247,18 @@ pub fn show_sidebar_content(
         .min_width(100.0)
         .max_width(400.0)
         .show(ctx, |ui| {
-            // Lock content to the panel width — never grow wider.
             let w = ui.available_width();
             ui.set_min_width(w);
             ui.set_max_width(w);
 
             action = match active_tab {
                 SidebarTab::Files => show_files_panel(ui, file_browser_state, icons, transfers),
-                SidebarTab::Plugins => show_plugins_panel(ui, plugins, plugin_output, selected_plugin, icons, plugin_search_query, plugin_search_focus),
+                SidebarTab::Plugins => show_plugins_panel(ui, plugins, plugin_output, selected_plugin, icons, plugin_search_query, plugin_search_focus, pending_plugin_loads),
+                SidebarTab::PluginPanel(idx) => {
+                    let name = panel_names.get(idx).map(|s| s.as_str()).unwrap_or("Panel");
+                    let widgets = panel_widgets.get(idx).map(|v| v.as_slice()).unwrap_or(&[]);
+                    show_panel_plugin(ui, *idx, name, widgets)
+                }
             };
         });
 
@@ -237,13 +269,19 @@ fn show_plugins_panel(
     ui: &mut egui::Ui,
     plugins: &[PluginDisplayInfo],
     output: &[String],
-    selected: &mut Option<usize>,
+    _selected: &mut Option<usize>,
     icons: Option<&IconCache>,
     search_query: &mut String,
     search_focus: &mut bool,
+    pending_loads: &mut Vec<bool>,
 ) -> SidebarAction {
     let mut action = SidebarAction::None;
     let dark_mode = ui.visuals().dark_mode;
+
+    // Ensure pending_loads is synced with plugin count.
+    if pending_loads.len() != plugins.len() {
+        *pending_loads = plugins.iter().map(|p| p.is_loaded).collect();
+    }
 
     // Header with refresh icon button.
     ui.horizontal(|ui| {
@@ -288,13 +326,10 @@ fn show_plugins_panel(
         })
         .collect();
 
-    // Enter on search bar → run first matching plugin
+    // Enter on search bar → run first matching loaded action plugin
     if search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         if let Some(&(orig_idx, plugin)) = filtered.first() {
-            *selected = Some(orig_idx);
-            if plugin.is_running {
-                action = SidebarAction::StopPlugin(orig_idx);
-            } else {
+            if !plugin.is_panel && plugin.is_loaded {
                 action = SidebarAction::RunPlugin(orig_idx);
             }
         }
@@ -310,162 +345,90 @@ fn show_plugins_panel(
     } else if filtered.is_empty() {
         ui.weak("No matching plugins");
     } else {
-        // Clamp selection if plugin list changed.
-        if let Some(sel) = *selected {
-            if sel >= plugins.len() {
-                *selected = None;
-            }
-        }
+        // Check if there are pending changes
+        let has_changes = plugins.iter().enumerate().any(|(i, p)| {
+            pending_loads.get(i).copied().unwrap_or(false) != p.is_loaded
+        });
 
-        // Reserve space for buttons + output at the bottom.
-        let btn_bar_height = 32.0;
-        let output_height = 120.0;
-        let reserved = btn_bar_height + output_height + 40.0;
+        // Reserve space for apply button + output at the bottom.
+        let btn_bar_height = if has_changes { 36.0 } else { 0.0 };
+        let output_height = 100.0;
+        let reserved = btn_bar_height + output_height + 30.0;
         let list_height = (ui.available_height() - reserved).max(60.0);
 
-        // Scrollable plugin list with selectable rows.
+        // Scrollable plugin list with checkboxes.
         egui::ScrollArea::vertical()
             .id_salt("plugin_list")
             .max_height(list_height)
             .show(ui, |ui| {
                 for &(i, plugin) in &filtered {
-                    let is_selected = *selected == Some(i);
+                    ui.push_id(i, |ui| {
+                        ui.horizontal(|ui| {
+                            // Checkbox for load/unload
+                            if let Some(checked) = pending_loads.get_mut(i) {
+                                ui.checkbox(checked, "");
+                            }
 
-                    let resp = ui.push_id(i, |ui| {
-                        let (rect, _) = ui.allocate_at_least(
-                            Vec2::new(ui.available_width(), 0.0),
-                            Sense::click(),
-                        );
+                            ui.vertical(|ui| {
+                                // Name + type badge
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&plugin.name).size(12.0));
+                                    if plugin.is_panel {
+                                        ui.label(
+                                            egui::RichText::new("panel")
+                                                .size(9.0)
+                                                .color(Color32::from_rgb(100, 160, 220)),
+                                        );
+                                    }
+                                });
 
-                        let name_galley = ui.painter().layout_no_wrap(
-                            plugin.name.clone(),
-                            FontId::new(12.0, FontFamily::Proportional),
-                            ui.visuals().text_color(),
-                        );
-                        let desc_galley = if !plugin.description.is_empty() {
-                            Some(ui.painter().layout(
-                                plugin.description.clone(),
-                                FontId::new(10.0, FontFamily::Proportional),
-                                ui.visuals().weak_text_color(),
-                                rect.width() - 8.0,
-                            ))
-                        } else {
-                            None
-                        };
-
-                        let padding = 4.0;
-                        let total_h = padding
-                            + name_galley.size().y
-                            + desc_galley.as_ref().map_or(0.0, |g| g.size().y + 2.0)
-                            + padding;
-
-                        let row_rect = Rect::from_min_size(
-                            rect.min,
-                            Vec2::new(rect.width(), total_h),
-                        );
-                        ui.allocate_rect(row_rect, Sense::hover());
-                        let resp = ui.interact(row_rect, ui.id().with(("plugin_row", i)), Sense::click());
-
-                        if is_selected {
-                            ui.painter().rect_filled(
-                                row_rect,
-                                0.0,
-                                ui.visuals().selection.bg_fill,
-                            );
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(
-                                row_rect,
-                                0.0,
-                                ui.visuals().widgets.hovered.bg_fill,
-                            );
-                        }
-
-                        let name_text = if plugin.is_running {
-                            format!("{} (running)", plugin.name)
-                        } else {
-                            plugin.name.clone()
-                        };
-                        let name_galley = ui.painter().layout_no_wrap(
-                            name_text,
-                            FontId::new(12.0, FontFamily::Proportional),
-                            if is_selected {
-                                Color32::WHITE
-                            } else {
-                                ui.visuals().text_color()
-                            },
-                        );
-
-                        let mut y = row_rect.min.y + padding;
-                        ui.painter().galley(
-                            Pos2::new(row_rect.min.x + 4.0, y),
-                            name_galley,
-                            Color32::PLACEHOLDER,
-                        );
-                        y += ui.painter().layout_no_wrap(
-                            String::new(),
-                            FontId::new(12.0, FontFamily::Proportional),
-                            Color32::TRANSPARENT,
-                        ).size().y;
-
-                        if let Some(desc_g) = desc_galley {
-                            let desc_galley2 = ui.painter().layout(
-                                plugin.description.clone(),
-                                FontId::new(10.0, FontFamily::Proportional),
-                                if is_selected {
-                                    Color32::from_gray(200)
+                                // Status indicator
+                                if plugin.is_loaded {
+                                    ui.label(
+                                        egui::RichText::new("\u{25cf} Loaded")
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(60, 180, 60)),
+                                    );
                                 } else {
-                                    ui.visuals().weak_text_color()
-                                },
-                                row_rect.width() - 8.0,
-                            );
-                            y += 2.0;
-                            ui.painter().galley(
-                                Pos2::new(row_rect.min.x + 4.0, y),
-                                desc_galley2,
-                                Color32::PLACEHOLDER,
-                            );
-                            let _ = desc_g;
-                        }
+                                    ui.label(
+                                        egui::RichText::new("\u{25cb} Not loaded")
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(140, 140, 140)),
+                                    );
+                                }
 
-                        resp
-                    }).inner;
-
-                    if resp.clicked() {
-                        *selected = Some(i);
-                    }
-                    if resp.double_clicked() {
-                        *selected = Some(i);
-                        if plugin.is_running {
-                            action = SidebarAction::StopPlugin(i);
-                        } else {
-                            action = SidebarAction::RunPlugin(i);
-                        }
-                    }
+                                // Description
+                                if !plugin.description.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&plugin.description)
+                                            .size(10.0)
+                                            .weak(),
+                                    );
+                                }
+                            });
+                        });
+                    });
 
                     ui.separator();
                 }
             });
 
-        // Button bar
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let btn_size = egui::Vec2::new(60.0, 24.0);
-                if let Some(sel) = *selected {
-                    if let Some(plugin) = plugins.get(sel) {
-                        if plugin.is_running {
-                            if ui.add_sized(btn_size, egui::Button::new("Stop")).clicked() {
-                                action = SidebarAction::StopPlugin(sel);
-                            }
-                        } else if ui.add_sized(btn_size, egui::Button::new("Run")).clicked() {
-                            action = SidebarAction::RunPlugin(sel);
-                        }
+        // Apply button (only visible when there are pending changes)
+        if has_changes {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Apply").clicked() {
+                        let loaded_indices: Vec<usize> = pending_loads
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &loaded)| if loaded { Some(i) } else { None })
+                            .collect();
+                        action = SidebarAction::ApplyPluginChanges(loaded_indices);
                     }
-                } else {
-                    ui.add_enabled(false, egui::Button::new("Run").min_size(btn_size));
-                }
+                });
             });
-        });
+        }
     }
 
     // Output panel at bottom.
@@ -475,7 +438,7 @@ fn show_plugins_panel(
     egui::ScrollArea::vertical()
         .id_salt("plugin_output")
         .stick_to_bottom(true)
-        .max_height(120.0)
+        .max_height(100.0)
         .show(ui, |ui| {
             for line in output {
                 ui.label(egui::RichText::new(line).size(11.0).monospace());
@@ -893,6 +856,116 @@ fn show_file_pane(
     // Status bar
     ui.add_space(2.0);
     ui.small(format!("{} items", entries.len()));
+
+    action
+}
+
+/// Render a panel plugin's declarative widgets in the sidebar content area.
+fn show_panel_plugin(
+    ui: &mut egui::Ui,
+    plugin_idx: usize,
+    name: &str,
+    widgets: &[conch_plugin::PanelWidget],
+) -> SidebarAction {
+    let mut action = SidebarAction::None;
+
+    // Header
+    ui.horizontal(|ui| {
+        ui.strong(name);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("\u{2715}").on_hover_text("Close panel").clicked() {
+                action = SidebarAction::DeactivatePanel(plugin_idx);
+            }
+        });
+    });
+    ui.separator();
+
+    if widgets.is_empty() {
+        ui.weak("Loading...");
+        return action;
+    }
+
+    egui::ScrollArea::vertical()
+        .id_salt(("panel_plugin", plugin_idx))
+        .show(ui, |ui| {
+            for widget in widgets {
+                match widget {
+                    conch_plugin::PanelWidget::Heading(text) => {
+                        ui.add_space(4.0);
+                        ui.strong(text);
+                        ui.add_space(2.0);
+                    }
+                    conch_plugin::PanelWidget::Text(text) => {
+                        ui.label(egui::RichText::new(text).monospace().size(11.0));
+                    }
+                    conch_plugin::PanelWidget::Label(text) => {
+                        ui.label(text);
+                    }
+                    conch_plugin::PanelWidget::Separator => {
+                        ui.separator();
+                    }
+                    conch_plugin::PanelWidget::Table { columns, rows } => {
+                        let num_cols = columns.len();
+                        if num_cols > 0 {
+                            TableBuilder::new(ui)
+                                .striped(true)
+                                .resizable(true)
+                                .columns(Column::remainder().at_least(40.0), num_cols)
+                                .header(16.0, |mut header| {
+                                    for col in columns {
+                                        header.col(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(col).strong().size(10.0),
+                                            );
+                                        });
+                                    }
+                                })
+                                .body(|body| {
+                                    body.rows(16.0, rows.len(), |mut row| {
+                                        let idx = row.index();
+                                        if let Some(cells) = rows.get(idx) {
+                                            for cell in cells {
+                                                row.col(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(cell)
+                                                            .size(11.0)
+                                                            .monospace(),
+                                                    );
+                                                });
+                                            }
+                                        }
+                                    });
+                                });
+                        }
+                    }
+                    conch_plugin::PanelWidget::Progress {
+                        label,
+                        fraction,
+                        text,
+                    } => {
+                        ui.label(egui::RichText::new(label).size(11.0));
+                        let bar = egui::ProgressBar::new(*fraction)
+                            .text(text)
+                            .desired_width(ui.available_width());
+                        ui.add(bar);
+                    }
+                    conch_plugin::PanelWidget::Button { id, label } => {
+                        if ui.button(label).clicked() {
+                            action = SidebarAction::PanelButtonClick {
+                                plugin_idx,
+                                button_id: id.clone(),
+                            };
+                        }
+                    }
+                    conch_plugin::PanelWidget::KeyValue { key, value } => {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(key).strong().size(11.0));
+                            ui.label(egui::RichText::new(value).size(11.0).monospace());
+                        });
+                    }
+                }
+            }
+        });
 
     action
 }

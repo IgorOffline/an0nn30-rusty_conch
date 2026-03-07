@@ -60,6 +60,27 @@ pub fn register(lua: &Lua, ctx: PluginContext) -> LuaResult<()> {
         })?,
     )?;
 
+    // session.platform() — get the OS platform of the current session
+    let ctx_platform = ctx.clone();
+    session.set(
+        "platform",
+        lua.create_async_function(move |_lua, ()| {
+            let ctx = ctx_platform.clone();
+            async move {
+                let resp = ctx
+                    .send_command(PluginCommand::GetPlatform {
+                        target: SessionTarget::Current,
+                    })
+                    .await;
+                match resp {
+                    PluginResponse::Output(s) => Ok(s),
+                    PluginResponse::Error(e) => Err(mlua::Error::runtime(e)),
+                    _ => Ok(String::new()),
+                }
+            }
+        })?,
+    )?;
+
     // session.current() — get info about the active session
     let ctx_current = ctx.clone();
     session.set(

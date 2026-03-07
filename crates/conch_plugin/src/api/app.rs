@@ -68,6 +68,73 @@ pub fn register(lua: &Lua, ctx: PluginContext) -> LuaResult<()> {
         })?,
     )?;
 
+    // app.server_details() — get list of configured servers with name and host
+    let ctx_details = ctx.clone();
+    app.set(
+        "server_details",
+        lua.create_async_function(move |lua, ()| {
+            let ctx = ctx_details.clone();
+            async move {
+                let resp = ctx.send_command(PluginCommand::GetServerDetails).await;
+                match resp {
+                    PluginResponse::ServerDetailList(pairs) => {
+                        let result = lua.create_table()?;
+                        for (i, (name, host)) in pairs.into_iter().enumerate() {
+                            let entry = lua.create_table()?;
+                            entry.set("name", name)?;
+                            entry.set("host", host)?;
+                            result.set(i + 1, entry)?;
+                        }
+                        Ok(mlua::Value::Table(result))
+                    }
+                    _ => Ok(mlua::Value::Nil),
+                }
+            }
+        })?,
+    )?;
+
+    // app.set_icon(path) — set the plugin's icon from a file path
+    let ctx_icon = ctx.clone();
+    app.set(
+        "set_icon",
+        lua.create_async_function(move |_lua, path: String| {
+            let ctx = ctx_icon.clone();
+            async move {
+                let resp = ctx
+                    .send_command(PluginCommand::SetIcon { path })
+                    .await;
+                match resp {
+                    PluginResponse::Ok => Ok(true),
+                    PluginResponse::Error(_) => Ok(false),
+                    _ => Ok(false),
+                }
+            }
+        })?,
+    )?;
+
+    // app.register_keybind(action, binding, description) — register a keybinding at runtime
+    let ctx_kb = ctx.clone();
+    app.set(
+        "register_keybind",
+        lua.create_async_function(move |_lua, (action, binding, description): (String, String, Option<String>)| {
+            let ctx = ctx_kb.clone();
+            async move {
+                let resp = ctx
+                    .send_command(PluginCommand::RegisterKeybind {
+                        action,
+                        binding,
+                        description: description.unwrap_or_default(),
+                    })
+                    .await;
+                match resp {
+                    PluginResponse::Ok => Ok(true),
+                    PluginResponse::Error(_) => Ok(false),
+                    _ => Ok(false),
+                }
+            }
+        })?,
+    )?;
+
     lua.globals().set("app", app)?;
     Ok(())
 }

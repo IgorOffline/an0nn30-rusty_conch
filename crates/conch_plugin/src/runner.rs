@@ -3,9 +3,9 @@ use std::path::Path;
 use anyhow::Result;
 use mlua::Lua;
 
-use crate::api::{self, PluginContext};
+use crate::api::{self, PluginCommand, PluginContext};
 
-/// Execute a Lua plugin script with the full API available.
+/// Execute a Lua plugin script with the full API available (run-once action).
 pub async fn run_plugin(path: &Path, ctx: PluginContext) -> Result<()> {
     let lua = Lua::new();
 
@@ -20,11 +20,80 @@ pub async fn run_plugin(path: &Path, ctx: PluginContext) -> Result<()> {
     api::app::register(&lua, ctx.clone())?;
     api::ui::register(&lua, ctx)?;
     api::crypto::register(&lua)?;
+    api::net::register(&lua)?;
 
     let script = std::fs::read_to_string(path)?;
     lua.load(&script).exec_async().await?;
 
     Ok(())
+}
+
+/// Execute a panel plugin: call setup(), then loop calling render() and
+/// flushing the widget list to the app at the configured refresh interval.
+pub async fn run_panel_plugin(path: &Path, ctx: PluginContext) -> Result<()> {
+    let lua = Lua::new();
+
+    sandbox(&lua)?;
+    configure_package_paths(&lua, path)?;
+
+    api::session::register(&lua, ctx.clone())?;
+    api::app::register(&lua, ctx.clone())?;
+    api::ui::register(&lua, ctx.clone())?;
+    api::crypto::register(&lua)?;
+    api::net::register(&lua)?;
+
+    // Load the script (defines setup/render/on_click functions)
+    let script = std::fs::read_to_string(path)?;
+    lua.load(&script).exec_async().await?;
+
+    // Call setup() if defined
+    let globals = lua.globals();
+    if let Ok(setup_fn) = globals.get::<mlua::Function>("setup") {
+        setup_fn.call_async::<()>(()).await?;
+    }
+
+    // Default refresh interval: 10 seconds
+    let refresh_secs: f64 = 10.0;
+
+    loop {
+        // Call render() if defined
+        if let Ok(render_fn) = globals.get::<mlua::Function>("render") {
+            render_fn.call_async::<()>(()).await?;
+        }
+
+        // Collect widgets from Lua registry and send to app
+        let widgets = api::ui::collect_panel_widgets(&lua)?;
+        let _ = ctx
+            .send_command(PluginCommand::PanelSetWidgets(widgets))
+            .await;
+
+        // Poll for button/keybind events while waiting for the refresh interval.
+        let interval = if refresh_secs > 0.0 { refresh_secs } else { 60.0 };
+        let poll_interval = std::time::Duration::from_millis(150);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(interval);
+
+        while tokio::time::Instant::now() < deadline {
+            let resp = ctx.send_command(PluginCommand::PanelPollEvent).await;
+            match resp {
+                api::PluginResponse::PanelEvent(button_id) => {
+                    if let Ok(on_click) = globals.get::<mlua::Function>("on_click") {
+                        let _ = on_click.call_async::<()>(button_id).await;
+                    }
+                    break; // Re-render immediately after handling event
+                }
+                api::PluginResponse::KeybindTriggered(action) => {
+                    if let Ok(on_keybind) = globals.get::<mlua::Function>("on_keybind") {
+                        let _ = on_keybind.call_async::<()>(action).await;
+                    }
+                    break; // Re-render immediately after handling event
+                }
+                _ => {
+                    // No event — sleep briefly before polling again
+                    tokio::time::sleep(poll_interval).await;
+                }
+            }
+        }
+    }
 }
 
 /// Remove dangerous Lua standard library functions for sandboxing.
