@@ -27,6 +27,7 @@ pub struct ExtraWindow {
     pub cell_width: f32,
     pub cell_height: f32,
     cell_size_measured: bool,
+    last_pixels_per_point: f32,
     cursor_visible: bool,
     last_blink: Instant,
     last_cols: u16,
@@ -52,6 +53,7 @@ impl ExtraWindow {
             cell_width: 8.0,
             cell_height: 16.0,
             cell_size_measured: false,
+            last_pixels_per_point: 0.0,
             cursor_visible: true,
             last_blink: Instant::now(),
             last_cols: DEFAULT_COLS,
@@ -120,14 +122,16 @@ impl ExtraWindow {
         // Track OS-level focus for this window.
         self.is_focused = ctx.input(|i| i.focused);
 
-        // Measure cell size.
-        if !self.cell_size_measured {
+        // Measure cell size, and re-measure when pixels_per_point changes.
+        let ppp = ctx.pixels_per_point();
+        if !self.cell_size_measured || self.last_pixels_per_point != ppp {
             let (cw, ch) = measure_cell_size(ctx, user_config.font.size);
             let offset = &user_config.font.offset;
             if cw > 0.0 && ch > 0.0 {
                 self.cell_width = (cw + offset.x).max(1.0);
                 self.cell_height = (ch + offset.y).max(1.0);
                 self.cell_size_measured = true;
+                self.last_pixels_per_point = ppp;
                 self.last_cols = 0;
                 self.last_rows = 0;
             }

@@ -6,6 +6,8 @@ mod icons;
 mod input;
 mod ipc;
 #[cfg(target_os = "macos")]
+mod macos_locale;
+#[cfg(target_os = "macos")]
 mod macos_menu;
 mod mouse;
 mod state;
@@ -107,6 +109,12 @@ fn send_ipc_message(_msg: &str) -> Result<(), String> {
 }
 
 fn main() -> eframe::Result<()> {
+    // When launched from Finder, macOS provides a minimal launchd environment
+    // without LANG/LC_ALL. Query NSLocale to set proper UTF-8 locale so that
+    // font rendering and child processes work correctly.
+    #[cfg(target_os = "macos")]
+    macos_locale::set_locale_environment();
+
     let cli = Cli::parse();
 
     // Handle `conch msg ...` subcommands — these don't launch the GUI.

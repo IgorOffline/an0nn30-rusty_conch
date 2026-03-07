@@ -105,6 +105,7 @@ pub struct ConchApp {
     cell_width: f32,
     cell_height: f32,
     cell_size_measured: bool,
+    last_pixels_per_point: f32,
 
     // Cursor blink
     cursor_visible: bool,
@@ -222,6 +223,7 @@ impl ConchApp {
             cell_width: 8.0,
             cell_height: 16.0,
             cell_size_measured: false,
+            last_pixels_per_point: 0.0,
             cursor_visible: true,
             last_blink: Instant::now(),
             last_cols: DEFAULT_COLS,
@@ -1165,14 +1167,18 @@ impl eframe::App for ConchApp {
             self.apply_initial_style(ctx);
         }
 
-        // Measure cell size from the monospace font on the first frame.
-        if !self.cell_size_measured {
+        // Measure cell size from the monospace font, and re-measure when
+        // pixels_per_point changes (e.g. app launch on Retina where ppp
+        // starts at 1.0 then jumps to 2.0, or moving between displays).
+        let ppp = ctx.pixels_per_point();
+        if !self.cell_size_measured || self.last_pixels_per_point != ppp {
             let (cw, ch) = measure_cell_size(ctx, self.state.user_config.font.size);
             let offset = &self.state.user_config.font.offset;
             if cw > 0.0 && ch > 0.0 {
                 self.cell_width = (cw + offset.x).max(1.0);
                 self.cell_height = (ch + offset.y).max(1.0);
                 self.cell_size_measured = true;
+                self.last_pixels_per_point = ppp;
                 // Force a resize on the next render pass.
                 self.last_cols = 0;
                 self.last_rows = 0;
