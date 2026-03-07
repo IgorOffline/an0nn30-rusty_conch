@@ -91,6 +91,7 @@ struct CellInfo {
     underline: UnderlineStyle,
     underline_color: Option<[f32; 4]>,
     strikeout: bool,
+    wide: bool,
 }
 
 /// Paint the terminal grid into the given UI region.
@@ -148,6 +149,8 @@ pub fn show_terminal(
             if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
                 continue;
             }
+
+            let wide = flags.contains(CellFlags::WIDE_CHAR);
 
             let mut fg = convert_color(cell.fg, colors);
             let mut bg = convert_color(cell.bg, colors);
@@ -207,6 +210,7 @@ pub fn show_terminal(
                 underline,
                 underline_color,
                 strikeout: flags.contains(CellFlags::STRIKEOUT),
+                wide,
             });
         }
 
@@ -219,10 +223,12 @@ pub fn show_terminal(
     for ci in &cells {
         let (x, y) = size_info.cell_position(ci.col, ci.row);
 
+        let char_cell_width = if ci.wide { cell_width * 2.0 } else { cell_width };
+
         if ci.bg != colors.background {
             let cell_rect = Rect::from_min_size(
                 Pos2::new(rect.min.x + x, rect.min.y + y),
-                Vec2::new(cell_width, cell_height),
+                Vec2::new(char_cell_width, cell_height),
             );
             painter.rect_filled(cell_rect, 0.0, rgba_to_color32(ci.bg));
         }
@@ -230,10 +236,6 @@ pub fn show_terminal(
         let fg_color = rgba_to_color32(ci.fg);
 
         if ci.c != ' ' && ci.c != '\0' {
-            // Select font variant for bold/italic.
-            // egui's monospace font doesn't have true bold/italic variants,
-            // so we synthesize: bold via proportional bold, italic via skew.
-            // For now, use the monospace font but adjust rendering.
             paint_char(
                 &painter,
                 ci.c,
@@ -242,7 +244,7 @@ pub fn show_terminal(
                 fg_color,
                 ci.bold,
                 ci.italic,
-                cell_width,
+                char_cell_width,
                 cell_height,
             );
         }
@@ -252,15 +254,15 @@ pub fn show_terminal(
             let ul_color = ci.underline_color.map(rgba_to_color32).unwrap_or(fg_color);
             let y_base = rect.min.y + y + cell_height - 1.0;
             let x_start = rect.min.x + x;
-            let x_end = x_start + cell_width;
-            draw_underline(&painter, ci.underline, x_start, x_end, y_base, cell_width, ul_color);
+            let x_end = x_start + char_cell_width;
+            draw_underline(&painter, ci.underline, x_start, x_end, y_base, char_cell_width, ul_color);
         }
 
         // Draw strikeout.
         if ci.strikeout {
             let y_mid = rect.min.y + y + cell_height * 0.5;
             painter.line_segment(
-                [Pos2::new(rect.min.x + x, y_mid), Pos2::new(rect.min.x + x + cell_width, y_mid)],
+                [Pos2::new(rect.min.x + x, y_mid), Pos2::new(rect.min.x + x + char_cell_width, y_mid)],
                 egui::Stroke::new(1.0, fg_color),
             );
         }
@@ -452,7 +454,11 @@ pub fn get_selected_text(
     lines.join("\n")
 }
 
-/// Render a single character centered in its cell, with synthetic bold/italic.
+/// Render a single character in its cell, with synthetic bold/italic.
+///
+/// Characters are left-aligned within the cell to maintain consistent grid
+/// positioning. This is critical for box-drawing, braille art, and other
+/// characters that must align precisely across cells.
 fn paint_char(
     painter: &Painter,
     c: char,
@@ -461,15 +467,14 @@ fn paint_char(
     color: Color32,
     bold: bool,
     italic: bool,
-    cell_width: f32,
+    _cell_width: f32,
     cell_height: f32,
 ) {
     let galley = painter.layout_no_wrap(c.to_string(), font_id.clone(), color);
-    let text_width = galley.size().x;
-    let mut offset_x = (cell_width - text_width) / 2.0;
+
+    let mut offset_x = 0.0;
 
     // Synthetic italic: shift top of glyph right by ~12% of cell height.
-    // We approximate by shifting the entire glyph right by half the skew.
     if italic {
         offset_x += cell_height * 0.06;
     }
