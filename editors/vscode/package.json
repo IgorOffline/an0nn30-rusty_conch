@@ -1,0 +1,54 @@
+{
+  "name": "conch-lua",
+  "displayName": "Conch Plugin Support",
+  "description": "Lua language support for Conch terminal emulator plugins — completions, hover docs, and diagnostics.",
+  "version": "0.1.0",
+  "publisher": "an0nn30",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/an0nn30/rusty_conch"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/*.lua"
+  ],
+  "main": "./out/extension.js",
+  "extensionDependencies": [
+    "sumneko.lua"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Conch Plugin Support",
+      "properties": {
+        "conch.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run `conch check` on save to validate plugin files."
+        },
+        "conch.executablePath": {
+          "type": "string",
+          "default": "conch",
+          "description": "Path to the `conch` executable (for `conch check` diagnostics)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

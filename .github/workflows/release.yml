@@ -203,3 +203,49 @@ jobs:
             ./conch-v${{ steps.version.outputs.version }}-arm64.deb $GITHUB_TOKEN
           ./.github/workflows/upload_asset.sh \
             ./conch-v${{ steps.version.outputs.version }}-1.aarch64.rpm $GITHUB_TOKEN
+
+  # ---------------------------------------------------------------------------
+  # Extras — VS Code extension, example config & plugins
+  # ---------------------------------------------------------------------------
+  extras:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build VS Code extension
+        working-directory: editors/vscode
+        run: |
+          npm install --silent
+          npx tsc -p ./
+          npx --yes @vscode/vsce package
+
+      - name: Upload VS Code extension
+        run: |
+          ./.github/workflows/upload_asset.sh \
+            ./editors/vscode/conch-lua-*.vsix $GITHUB_TOKEN
+
+      - name: Package example config & plugins
+        run: |
+          mkdir -p conch-examples
+          cp config.example.toml conch-examples/
+          cp -r examples/plugins conch-examples/plugins
+          tar czf conch-examples-v${{ steps.version.outputs.version }}.tar.gz conch-examples/
+
+      - name: Upload examples archive
+        run: |
+          ./.github/workflows/upload_asset.sh \
+            ./conch-examples-v${{ steps.version.outputs.version }}.tar.gz $GITHUB_TOKEN
