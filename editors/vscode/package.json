@@ -4,7 +4,7 @@
   "description": "Lua language support for Conch terminal emulator plugins — completions, hover docs, and diagnostics.",
   "version": "0.1.0",
   "publisher": "an0nn30",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/an0nn30/rusty_conch"
