@@ -29,6 +29,7 @@ pub(crate) struct FileWatcher {
     /// Known paths and their associated change kinds.
     config_path: PathBuf,
     plugins_dir: PathBuf,
+    legacy_plugins_dir: Option<PathBuf>,
     themes_dir: PathBuf,
     ssh_config: PathBuf,
     /// Debounce: last event time per kind.
@@ -60,6 +61,11 @@ impl FileWatcher {
         let themes_dir = config_dir.join("themes");
         let ssh_config = conch_core::ssh_config::ssh_config_path();
 
+        // Legacy plugins dir: ~/.config/conch/plugins (differs from native on macOS/Windows).
+        let legacy_plugins_dir = std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home).join(".config/conch/plugins")
+        }).filter(|p| *p != plugins_dir);
+
         // Ensure the config directory exists so we can watch it.
         if !config_dir.exists() {
             let _ = std::fs::create_dir_all(&config_dir);
@@ -70,6 +76,24 @@ impl FileWatcher {
         // subdirectories don't exist yet (they'll be detected when created).
         if let Err(e) = watcher.watch(&config_dir, RecursiveMode::Recursive) {
             log::warn!("Cannot watch config dir {}: {e}", config_dir.display());
+        }
+
+        // Watch the legacy plugins directory if it differs from the native one.
+        // scan_plugin_dirs() discovers plugins from both locations, so we need
+        // to watch both for live-reload to work on macOS/Windows.
+        if let Some(ref legacy_dir) = legacy_plugins_dir {
+            if legacy_dir.exists() {
+                if let Err(e) = watcher.watch(legacy_dir, RecursiveMode::Recursive) {
+                    log::warn!("Cannot watch legacy plugins dir {}: {e}", legacy_dir.display());
+                }
+            } else if let Some(parent) = legacy_dir.parent() {
+                // Watch ~/.config/conch/ so we detect the plugins dir being created.
+                if parent.exists() {
+                    if let Err(e) = watcher.watch(parent, RecursiveMode::Recursive) {
+                        log::warn!("Cannot watch legacy config dir {}: {e}", parent.display());
+                    }
+                }
+            }
         }
 
         // Watch SSH config separately (it's outside the conch config dir).
@@ -91,6 +115,7 @@ impl FileWatcher {
             _watcher: watcher,
             config_path,
             plugins_dir,
+            legacy_plugins_dir,
             themes_dir,
             ssh_config,
             last_event: std::collections::HashMap::new(),
@@ -104,6 +129,11 @@ impl FileWatcher {
         }
         if path.starts_with(&self.plugins_dir) {
             return Some(FileChangeKind::Plugins);
+        }
+        if let Some(ref legacy) = self.legacy_plugins_dir {
+            if path.starts_with(legacy) {
+                return Some(FileChangeKind::Plugins);
+            }
         }
         if path.starts_with(&self.themes_dir) {
             return Some(FileChangeKind::Themes);
