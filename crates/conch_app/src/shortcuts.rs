@@ -145,6 +145,12 @@ impl ConchApp {
                                 return;
                             }
                         }
+                        if let Some(ref kb) = self.shortcuts.toggle_bottom_panel {
+                            if kb.matches(key, modifiers) {
+                                self.toggle_bottom_panel();
+                                return;
+                            }
+                        }
                         if let Some(ref kb) = self.shortcuts.quit {
                             if kb.matches(key, modifiers) {
                                 self.quit_requested = true;
@@ -237,17 +243,34 @@ impl ConchApp {
         let _ = config::save_persistent_state(&self.state.persistent);
     }
 
+    pub(crate) fn toggle_bottom_panel(&mut self) {
+        if self.show_bottom_panel {
+            // Always allow hiding.
+            self.show_bottom_panel = false;
+        } else if !self.bottom_panel_tabs.is_empty() {
+            // Only show if there are active bottom panel plugins.
+            self.show_bottom_panel = true;
+        } else {
+            return;
+        }
+        self.state.persistent.layout.bottom_panel_collapsed = !self.show_bottom_panel;
+        let _ = config::save_persistent_state(&self.state.persistent);
+    }
+
     pub(crate) fn toggle_zen_mode(&mut self) {
-        if self.state.show_left_sidebar || self.state.show_right_sidebar {
+        if self.state.show_left_sidebar || self.state.show_right_sidebar || self.show_bottom_panel {
             self.state.show_left_sidebar = false;
             self.state.show_right_sidebar = false;
+            self.show_bottom_panel = false;
             self.state.file_browser.focused = false;
         } else {
             self.state.show_left_sidebar = true;
             self.state.show_right_sidebar = true;
+            self.show_bottom_panel = !self.bottom_panel_tabs.is_empty();
         }
         self.state.persistent.layout.left_panel_collapsed = !self.state.show_left_sidebar;
         self.state.persistent.layout.right_panel_collapsed = !self.state.show_right_sidebar;
+        self.state.persistent.layout.bottom_panel_collapsed = !self.show_bottom_panel;
         let _ = config::save_persistent_state(&self.state.persistent);
     }
 

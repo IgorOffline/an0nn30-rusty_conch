@@ -23,6 +23,7 @@ Conch ships with example plugins in `examples/plugins/`:
 | **System Info** (`system-info.lua`) | Panel | Cmd+Shift+I | Live system information — hostname, memory, disk, load average, top processes. Platform-aware (macOS/Linux). |
 | **Port Scanner** (`port-scanner.lua`) | Panel | Cmd+Shift+O | TCP port scanner with common port detection, range scanning, and service identification. |
 | **Encrypt / Decrypt** (`encrypt-decrypt.lua`) | Action | Cmd+Shift+Y | AES encryption/decryption (CBC, GCM, ECB) with PBKDF2 key derivation. |
+| **Demo Bottom Panel** (`demo-bottom-panel.lua`) | Bottom Panel | Cmd+Shift+D | Showcase of bottom-panel widgets — service table, cluster stats, progress bars, live scrolling logs, action buttons. |
 
 To use them, symlink into your plugins directory:
 
@@ -47,6 +48,18 @@ Panel plugins create persistent sidebar tabs with live-updating content. They st
 ```
 
 Panel plugins appear as additional tabs in the left sidebar alongside Files and Plugins. They are activated when loaded and run continuously until unloaded.
+
+### Bottom Panel Plugins
+
+Bottom panel plugins work like panel plugins but render in a resizable area below the terminal — similar to VS Code's terminal/output/problems panels. Multiple bottom panels can be open simultaneously as tabs. Declare a bottom panel plugin with:
+
+```lua
+-- plugin-type: bottom-panel
+```
+
+Bottom panels use the same widget API as sidebar panels (`ui.panel_*` functions) and the same lifecycle (`setup`, `render`, `on_click`, `on_keybind`). They are ideal for log tailing, container monitoring, build output, and other content that benefits from horizontal space.
+
+The bottom panel area is resizable (drag the top edge), collapsible (toggle from View menu or the close button), and its state persists across sessions.
 
 ## Plugin Header
 
@@ -257,6 +270,7 @@ For SSH sessions, this runs `uname -s` on the remote host. For local sessions, i
 | `ui.panel_progress(label, fraction, text)` | Progress bar (fraction 0.0–1.0) |
 | `ui.panel_button(id, label)` | Clickable button (triggers `on_click`) |
 | `ui.panel_kv(key, value)` | Key-value pair row |
+| `ui.panel_scroll_text(lines)` | Scrollable monospace text area (auto-scrolls to bottom) |
 | `ui.set_refresh(seconds)` | Set auto-refresh interval (default: 10s, 0 = manual only) |
 
 ## API Reference

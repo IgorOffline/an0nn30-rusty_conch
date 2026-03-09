@@ -211,13 +211,25 @@ pub struct ConchApp {
     pub(crate) pending_clipboard: Option<String>,
     pub(crate) selected_plugin: Option<usize>,
 
-    // Panel plugins
+    // Bottom panel plugins
+    /// Indices of active bottom-panel plugins (tab order).
+    pub(crate) bottom_panel_tabs: Vec<usize>,
+    /// Which bottom panel tab is currently selected.
+    pub(crate) active_bottom_panel: Option<usize>,
+    /// Whether the bottom panel strip is visible.
+    pub(crate) show_bottom_panel: bool,
+    /// Height of the bottom panel strip in logical pixels.
+    pub(crate) bottom_panel_height: f32,
+
+    // Panel plugins (shared state for both sidebar and bottom panels)
     /// Widget lists for active panel plugins, keyed by discovered_plugins index.
     pub(crate) panel_widgets: std::collections::HashMap<usize, Vec<conch_plugin::PanelWidget>>,
     /// Panel plugin names, keyed by discovered_plugins index.
     pub(crate) panel_names: std::collections::HashMap<usize, String>,
     /// Pending button click events for panel plugins, keyed by plugin index.
     pub(crate) panel_button_events: std::collections::HashMap<usize, Vec<String>>,
+    /// Pending keybind events for panel plugins, keyed by plugin index.
+    pub(crate) panel_keybind_events: std::collections::HashMap<usize, Vec<String>>,
     /// Response senders waiting for panel events, keyed by plugin index.
     pub(crate) panel_event_waiters: std::collections::HashMap<usize, tokio::sync::mpsc::UnboundedSender<conch_plugin::PluginResponse>>,
     /// Checkbox states in the plugin list (mirrors loaded state, user toggles before applying).
@@ -325,6 +337,9 @@ impl ConchApp {
             crate::macos_menu::setup_menu_bar(&plugins);
         }
 
+        let bottom_panel_collapsed = state.persistent.layout.bottom_panel_collapsed;
+        let bottom_panel_height = state.persistent.layout.bottom_panel_height;
+
         let mut app = Self {
             state,
             rt,
@@ -376,9 +391,14 @@ impl ConchApp {
             plugin_progress: None,
             pending_clipboard: None,
             selected_plugin: None,
+            bottom_panel_tabs: Vec::new(),
+            active_bottom_panel: None,
+            show_bottom_panel: !bottom_panel_collapsed,
+            bottom_panel_height,
             panel_widgets: std::collections::HashMap::new(),
             panel_names: std::collections::HashMap::new(),
             panel_button_events: std::collections::HashMap::new(),
+            panel_keybind_events: std::collections::HashMap::new(),
             panel_event_waiters: std::collections::HashMap::new(),
             pending_plugin_loads: Vec::new(),
             plugin_keybinds: Vec::new(),
@@ -1492,6 +1512,11 @@ impl eframe::App for ConchApp {
                                 self.toggle_right_sidebar();
                                 ui.close_menu();
                             }
+                            let bottom_check = if self.show_bottom_panel { "✓ " } else { "   " };
+                            if ui.add(egui::Button::new(format!("{bottom_check}Bottom Panel")).shortcut_text(cmd_shortcut("J"))).clicked() {
+                                self.toggle_bottom_panel();
+                                ui.close_menu();
+                            }
                             ui.separator();
                             if ui.button("Preferences...").clicked() {
                                 self.preferences_form =
@@ -1582,6 +1607,7 @@ impl eframe::App for ConchApp {
                         name: meta.name.clone(),
                         description: meta.description.clone(),
                         is_panel: meta.plugin_type == conch_plugin::PluginType::Panel,
+                        is_bottom_panel: meta.plugin_type == conch_plugin::PluginType::BottomPanel,
                         is_loaded,
                     }
                 })
@@ -1896,6 +1922,20 @@ impl eframe::App for ConchApp {
                 }
             });
         } // end tab bar (multi-tab only)
+
+        // Bottom panel (bottom-panel plugins).
+        if self.show_bottom_panel && !self.bottom_panel_tabs.is_empty() {
+            let bp_action = crate::ui::bottom_panel::show_bottom_panel(
+                ctx,
+                &self.bottom_panel_tabs,
+                &mut self.active_bottom_panel,
+                &self.panel_widgets,
+                &self.panel_names,
+                &mut self.bottom_panel_height,
+                &mut self.show_bottom_panel,
+            );
+            self.handle_bottom_panel_action(bp_action);
+        }
 
         // Central panel (active terminal or connecting screen).
         let font_size = self.state.user_config.font.size;
@@ -2234,6 +2274,8 @@ impl ConchApp {
             self.state.persistent.layout.window_height = rect.height();
         }
         self.state.persistent.layout.zoom_factor = ctx.zoom_factor();
+        self.state.persistent.layout.bottom_panel_collapsed = !self.show_bottom_panel;
+        self.state.persistent.layout.bottom_panel_height = self.bottom_panel_height;
         let _ = config::save_persistent_state(&self.state.persistent);
     }
 
@@ -2262,6 +2304,9 @@ impl ConchApp {
             }
             MenuAction::ToggleRightSidebar => {
                 self.toggle_right_sidebar();
+            }
+            MenuAction::ToggleBottomPanel => {
+                self.toggle_bottom_panel();
             }
             MenuAction::Preferences => {
                 self.preferences_form =
