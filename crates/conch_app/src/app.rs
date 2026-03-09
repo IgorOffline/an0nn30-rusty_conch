@@ -721,11 +721,7 @@ impl ConchApp {
         let mut what_changed = Vec::new();
 
         // Font change.
-        if new_config.font.normal.family != self.state.user_config.font.normal.family
-            || new_config.font.size != self.state.user_config.font.size
-            || new_config.font.offset.x != self.state.user_config.font.offset.x
-            || new_config.font.offset.y != self.state.user_config.font.offset.y
-        {
+        if new_config.font != self.state.user_config.font {
             what_changed.push("font");
             self.cell_size_measured = false;
             self.style_applied = false;

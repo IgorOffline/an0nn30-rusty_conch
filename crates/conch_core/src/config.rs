@@ -293,7 +293,7 @@ impl Default for UiConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FontConfig {
     #[serde(default)]
     pub normal: FontFamily,
@@ -306,7 +306,7 @@ pub struct FontConfig {
 }
 
 /// Extra pixel offset applied to each character cell.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FontOffset {
     #[serde(default)]
     pub x: f32,
@@ -320,7 +320,7 @@ impl Default for FontOffset {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FontFamily {
     #[serde(default = "default_font_name")]
     pub family: String,
