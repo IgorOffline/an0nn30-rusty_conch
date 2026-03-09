@@ -188,7 +188,11 @@ impl ExtraWindow {
             show_left_sidebar: false,
             show_right_sidebar: false,
             sidebar_tab: SidebarTab::default(),
-            file_browser: FileBrowserState::default(),
+            file_browser: {
+                let mut fb = FileBrowserState::default();
+                fb.local_entries = load_local_entries(&fb.local_path);
+                fb
+            },
             session_panel_state: SessionPanelState::default(),
 
             selected_plugin: None,
@@ -363,6 +367,9 @@ impl ExtraWindow {
             self.show_bottom_panel = false;
         } else if !bottom_panel_tabs.is_empty() {
             self.show_bottom_panel = true;
+            if self.active_bottom_panel.is_none() {
+                self.active_bottom_panel = bottom_panel_tabs.first().copied();
+            }
         }
     }
 
@@ -517,9 +524,10 @@ impl ExtraWindow {
         let decorations = shared.user_config.window.decorations;
         if decorations == WindowDecorations::Buttonless {
             let drag_h = self.cell_height.max(6.0);
+            let drag_frame = egui::Frame::NONE.fill(ctx.style().visuals.panel_fill);
             egui::TopBottomPanel::top("extra_drag_region")
                 .exact_height(drag_h)
-                .frame(egui::Frame::NONE)
+                .frame(drag_frame)
                 .show(ctx, |ui| {
                     let rect = ui.available_rect_before_wrap();
                     let response =
@@ -573,6 +581,7 @@ impl ExtraWindow {
                 shared.icon_cache.as_ref(),
                 &panel_tabs,
                 shared.plugin_icons,
+                egui::Id::new("extra_sidebar_tabs"),
             );
             sidebar::show_sidebar_content(
                 ctx,
@@ -588,6 +597,7 @@ impl ExtraWindow {
                 shared.panel_widgets,
                 shared.panel_names,
                 &mut self.pending_plugin_loads,
+                egui::Id::new("extra_sidebar_content"),
             )
         } else {
             SidebarAction::None
@@ -693,11 +703,20 @@ impl ExtraWindow {
                 shared.panel_names,
                 &mut self.bottom_panel_height,
                 &mut self.show_bottom_panel,
+                egui::Id::new("extra_bottom_panel"),
             );
             if !matches!(bp_action, BottomPanelAction::None) {
                 self.pending_actions
                     .push(ExtraWindowAction::BottomPanelAction(bp_action));
             }
+
+            // Thin spacer above the bottom panel so the terminal's
+            // click_and_drag sense doesn't overlap the resize handle.
+            let grab = ctx.style().interaction.resize_grab_radius_side;
+            egui::TopBottomPanel::bottom(egui::Id::new("extra_bottom_panel_resize_spacer"))
+                .exact_height(grab)
+                .frame(egui::Frame::NONE)
+                .show(ctx, |_ui| {});
         }
 
         // ---------------------------------------------------------------
