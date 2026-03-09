@@ -148,6 +148,14 @@ impl LocalSession {
         }
         let cwd = working_directory
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")));
+        log::debug!(
+            "PTY spawn: shell={:?}, cwd={:?}, env_keys={:?}, size={}x{}",
+            shell,
+            cwd,
+            env.keys().collect::<Vec<_>>(),
+            cols,
+            rows,
+        );
         let options = tty::Options {
             shell,
             working_directory: Some(cwd),

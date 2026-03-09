@@ -254,6 +254,11 @@ impl ConchApp {
         let initial_path = state.file_browser.local_path.clone();
         state.file_browser.local_entries = load_local_entries(&initial_path);
 
+        log::info!(
+            "Opening initial terminal: shell.program={:?}, shell.args={:?}",
+            state.user_config.terminal.shell.program,
+            state.user_config.terminal.shell.args,
+        );
         let _ = open_local_terminal(&mut state, DEFAULT_COLS, DEFAULT_ROWS, 8.0, 16.0);
 
         // Discover plugins — check both native config dir and legacy ~/.config/conch/

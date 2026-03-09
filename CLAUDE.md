@@ -2,7 +2,8 @@
 
 ## Branching Rules (STRICT)
 
-- **Never commit or push directly to `main`.**
+- **Claude must never commit or push directly to `main`.**
+- The repo owner (`an0nn30`) may push directly to `main` when appropriate.
 - Every feature, fix, or change — no matter how small — must go on its own branch.
 - Branch naming convention:
   - `feat/short-description` — new features

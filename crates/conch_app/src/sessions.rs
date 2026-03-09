@@ -130,7 +130,7 @@ pub(crate) fn create_local_session(
             Some((id, session))
         }
         Err(e) => {
-            log::error!("Failed to open local terminal: {e}");
+            log::error!("Failed to open local terminal: {e:#}");
             None
         }
     }
