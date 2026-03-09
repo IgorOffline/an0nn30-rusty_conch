@@ -244,7 +244,15 @@ impl ConchApp {
     }
 
     pub(crate) fn toggle_bottom_panel(&mut self) {
-        self.show_bottom_panel = !self.show_bottom_panel;
+        if self.show_bottom_panel {
+            // Always allow hiding.
+            self.show_bottom_panel = false;
+        } else if !self.bottom_panel_tabs.is_empty() {
+            // Only show if there are active bottom panel plugins.
+            self.show_bottom_panel = true;
+        } else {
+            return;
+        }
         self.state.persistent.layout.bottom_panel_collapsed = !self.show_bottom_panel;
         let _ = config::save_persistent_state(&self.state.persistent);
     }
