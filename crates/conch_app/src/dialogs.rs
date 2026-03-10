@@ -65,7 +65,7 @@ impl ConchApp {
                     ui.heading("Conch");
                     ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                     ui.add_space(4.0);
-                    ui.label("A cross-platform SSH terminal emulator.");
+                    ui.label("A cross-platform, pluggable terminal emulator.");
                     ui.add_space(8.0);
                     if crate::ui::widgets::dialog_button(ui, "OK").clicked() {
                         self.show_about = false;
