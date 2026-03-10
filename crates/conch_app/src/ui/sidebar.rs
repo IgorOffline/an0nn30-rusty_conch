@@ -95,13 +95,16 @@ pub fn show_tab_strip(
     icons: Option<&IconCache>,
     panel_tabs: &[(usize, String)],
     plugin_icons: &HashMap<usize, egui::TextureHandle>,
+    plugins_enabled: bool,
     panel_id: egui::Id,
 ) {
     // Build the tab list: fixed tabs + dynamic panel plugin tabs.
     let mut tabs = vec![
         TabEntry { tab: SidebarTab::Files, label: "Files".into(), icon: Icon::TabFiles, plugin_tex_id: None },
-        TabEntry { tab: SidebarTab::Plugins, label: "Plugins".into(), icon: Icon::TabTools, plugin_tex_id: None },
     ];
+    if plugins_enabled {
+        tabs.push(TabEntry { tab: SidebarTab::Plugins, label: "Plugins".into(), icon: Icon::TabTools, plugin_tex_id: None });
+    }
     for (idx, name) in panel_tabs {
         tabs.push(TabEntry {
             tab: SidebarTab::PluginPanel(*idx),

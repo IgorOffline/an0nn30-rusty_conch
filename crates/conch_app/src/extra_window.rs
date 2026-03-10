@@ -573,6 +573,7 @@ impl ExtraWindow {
                 shared.icon_cache.as_ref(),
                 &panel_tabs,
                 shared.plugin_icons,
+                shared.user_config.conch.plugins_enabled,
                 egui::Id::from(self.viewport_id).with("sidebar_tabs"),
             );
             sidebar::show_sidebar_content(
