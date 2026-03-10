@@ -263,6 +263,10 @@ pub struct ConchConfig {
     pub keyboard: KeyboardConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    /// Set to `false` to completely disable the plugin engine.
+    /// The Lua runtime will not load and no plugins will be scanned or run.
+    #[serde(default = "default_true")]
+    pub plugins_enabled: bool,
 }
 
 impl Default for ConchConfig {
@@ -270,6 +274,7 @@ impl Default for ConchConfig {
         Self {
             keyboard: KeyboardConfig::default(),
             ui: UiConfig::default(),
+            plugins_enabled: true,
         }
     }
 }

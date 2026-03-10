@@ -309,7 +309,12 @@ impl ConchApp {
         let _ = open_local_terminal(&mut state, DEFAULT_COLS, DEFAULT_ROWS, 8.0, 16.0);
 
         // Discover plugins — check both native config dir and legacy ~/.config/conch/
-        let discovered_plugins = scan_plugin_dirs();
+        let plugins_enabled = state.user_config.conch.plugins_enabled;
+        let discovered_plugins = if plugins_enabled {
+            scan_plugin_dirs()
+        } else {
+            Vec::new()
+        };
 
         // Set up native macOS menu bar (if enabled in config).
         let use_native_menu = cfg!(target_os = "macos")
@@ -413,11 +418,13 @@ impl ConchApp {
             file_watcher: crate::watcher::FileWatcher::start(),
         };
 
-        // Activate panel plugins that were loaded in the previous session.
-        app.activate_loaded_panel_plugins();
+        if plugins_enabled {
+            // Activate panel plugins that were loaded in the previous session.
+            app.activate_loaded_panel_plugins();
 
-        // Resolve plugin keybindings.
-        app.resolve_plugin_keybinds();
+            // Resolve plugin keybindings.
+            app.resolve_plugin_keybinds();
+        }
 
         // Queue startup warnings as toast notifications.
         for msg in startup_warnings {
@@ -698,12 +705,14 @@ impl ConchApp {
             }
         }
 
-        // Poll running plugins.
-        self.poll_plugin_events(ctx);
+        // Poll running plugins (skip if plugin engine is disabled).
+        if self.state.user_config.conch.plugins_enabled {
+            self.poll_plugin_events(ctx);
 
-        // Flush any pending plugin icon textures.
-        if !self.pending_plugin_icons.is_empty() {
-            self.flush_pending_icons(ctx);
+            // Flush any pending plugin icon textures.
+            if !self.pending_plugin_icons.is_empty() {
+                self.flush_pending_icons(ctx);
+            }
         }
 
         // Poll file watcher for live-reload.
@@ -1735,7 +1744,7 @@ impl eframe::App for ConchApp {
                 .map(|(idx, name)| (*idx, name.clone()))
                 .collect();
             let action = if self.state.show_left_sidebar {
-                sidebar::show_tab_strip(ctx, &mut self.state.sidebar_tab, icons, &panel_tabs, &self.plugin_icons, egui::Id::new("sidebar_tabs"));
+                sidebar::show_tab_strip(ctx, &mut self.state.sidebar_tab, icons, &panel_tabs, &self.plugin_icons, self.state.user_config.conch.plugins_enabled, egui::Id::new("sidebar_tabs"));
                 sidebar::show_sidebar_content(
                     ctx,
                     &self.state.sidebar_tab,

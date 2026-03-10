@@ -140,6 +140,14 @@ notification_history = "cmd+shift+h"
 # "demo-bottom-panel.open_panel" = "cmd+shift+d"
 
 # ---------------------------------------------------------------------------
+# Conch — Plugin Engine
+# ---------------------------------------------------------------------------
+
+# Set to false to completely disable the plugin engine.
+# The Lua runtime will not load and no plugins will be scanned or run.
+# plugins_enabled = false
+
+# ---------------------------------------------------------------------------
 # Conch — UI Settings
 # ---------------------------------------------------------------------------
 
