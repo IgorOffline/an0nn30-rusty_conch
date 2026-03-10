@@ -110,6 +110,7 @@ pub fn display_size(bytes: u64) -> String {
 
 /// Recursively copy a directory and its contents.
 /// Skips symlinks to avoid infinite recursion from cyclic links.
+// TODO: prompt for confirmation before overwriting existing files.
 pub fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
