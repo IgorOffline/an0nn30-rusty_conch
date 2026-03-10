@@ -690,8 +690,9 @@ fn show_file_pane(
 
     let mut action = SidebarAction::None;
     let pane_focused = state.focused && match kind {
-        PaneKind::Local | PaneKind::Local2 => state.active_pane == FileBrowserPane::Local,
+        PaneKind::Local => state.active_pane == FileBrowserPane::Local,
         PaneKind::Remote => state.active_pane == FileBrowserPane::Remote,
+        PaneKind::Local2 => state.active_pane == FileBrowserPane::Local2,
     };
 
     let (label, entries, current_path, path_edit, selected): (&str, &[FileListEntry], Option<&PathBuf>, &mut String, &mut Option<usize>) = match kind {
@@ -710,7 +711,7 @@ fn show_file_pane(
             &mut state.local_selected,
         ),
         PaneKind::Local2 => (
-            "Local",
+            "Local (2)",
             &state.local2_entries as &[_],
             Some(&state.local2_path),
             &mut state.local2_path_edit,

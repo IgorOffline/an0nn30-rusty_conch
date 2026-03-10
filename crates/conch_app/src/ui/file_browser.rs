@@ -8,6 +8,7 @@ pub enum FileBrowserPane {
     #[default]
     Local,
     Remote,
+    Local2,
 }
 
 /// State for the file browser panel.
