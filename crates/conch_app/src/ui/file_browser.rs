@@ -82,7 +82,7 @@ impl Default for FileBrowserState {
             remote_selected: None,
             local2_path: home,
             local2_entries: Vec::new(),
-            local2_path_edit: local2_path_edit,
+            local2_path_edit,
             local2_back_stack: Vec::new(),
             local2_forward_stack: Vec::new(),
             local2_selected: None,
@@ -105,6 +105,24 @@ pub fn display_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Recursively copy a directory and its contents.
+/// Skips symlinks to avoid infinite recursion from cyclic links.
+pub fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+        // symlinks are silently skipped
+    }
+    Ok(())
 }
 
 /// Format an optional UNIX timestamp as a short date string.

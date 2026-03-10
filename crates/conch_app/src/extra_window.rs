@@ -329,24 +329,13 @@ impl ExtraWindow {
                 self.file_browser.local2_selected = None;
             }
             SidebarAction::CopyLocal { source, dest_dir } => {
-                let filename = source.file_name().unwrap_or_default();
+                let Some(filename) = source.file_name() else {
+                    log::error!("Cannot copy: path has no filename component");
+                    return;
+                };
                 let dest = dest_dir.join(filename);
                 if source.is_dir() {
-                    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-                        std::fs::create_dir_all(dst)?;
-                        for entry in std::fs::read_dir(src)? {
-                            let entry = entry?;
-                            let ty = entry.file_type()?;
-                            let dest_path = dst.join(entry.file_name());
-                            if ty.is_dir() {
-                                copy_dir_recursive(&entry.path(), &dest_path)?;
-                            } else {
-                                std::fs::copy(entry.path(), &dest_path)?;
-                            }
-                        }
-                        Ok(())
-                    }
-                    if let Err(e) = copy_dir_recursive(&source, &dest) {
+                    if let Err(e) = crate::ui::file_browser::copy_dir_recursive(&source, &dest) {
                         log::error!("Failed to copy directory: {e}");
                     }
                 } else if let Err(e) = std::fs::copy(&source, &dest) {
