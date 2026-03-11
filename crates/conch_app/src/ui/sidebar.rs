@@ -15,7 +15,7 @@ use egui::{
 use egui_extras::{TableBuilder, Column};
 
 use crate::icons::{Icon, IconCache};
-use crate::ui::file_browser::{FileBrowserState, FileListEntry, display_size, format_modified};
+use crate::ui::file_browser::{FileBrowserState, FileListEntry, display_size, extension_label, format_modified};
 
 /// Which tab is active in the left sidebar.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -182,16 +182,40 @@ pub fn show_tab_strip(
                     .or_else(|| icons.and_then(|ic| ic.texture_id(entry.icon)));
                 if let Some(tex_id) = tex_id {
                     let icon_top = text_top + text_w + gap;
-                    let icon_rect = Rect::from_min_size(
-                        Pos2::new(cx - icon_size / 2.0, icon_top),
-                        Vec2::new(icon_size, icon_size),
-                    );
-                    painter.image(
-                        tex_id,
-                        icon_rect,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    let icon_center = Pos2::new(cx, icon_top + icon_size / 2.0);
+
+                    // Build a quad and rotate it -90° to match the text.
+                    let half = icon_size / 2.0;
+                    let corners = [
+                        Vec2::new(-half, -half),
+                        Vec2::new( half, -half),
+                        Vec2::new( half,  half),
+                        Vec2::new(-half,  half),
+                    ];
+                    let (sin, cos) = (-FRAC_PI_2 as f32).sin_cos();
+                    let rotated: Vec<Pos2> = corners.iter().map(|c| {
+                        Pos2::new(
+                            icon_center.x + c.x * cos - c.y * sin,
+                            icon_center.y + c.x * sin + c.y * cos,
+                        )
+                    }).collect();
+
+                    let uvs = [
+                        Pos2::new(0.0, 0.0),
+                        Pos2::new(1.0, 0.0),
+                        Pos2::new(1.0, 1.0),
+                        Pos2::new(0.0, 1.0),
+                    ];
+                    let mut mesh = egui::Mesh::with_texture(tex_id);
+                    for (p, uv) in rotated.iter().zip(&uvs) {
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: *p,
+                            uv: *uv,
+                            color: Color32::WHITE,
+                        });
+                    }
+                    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+                    painter.add(Shape::mesh(mesh));
                 }
 
                 if i > 0 {
@@ -508,17 +532,28 @@ fn show_files_panel(
 
     // Button bar between the panes.
     ui.add_space(2.0);
+    let dark_mode = ui.visuals().dark_mode;
+    // Two icon buttons (~16px each) + spacing (8px) ≈ 40px total.
+    let buttons_width = 40.0;
+    let centering_pad = ((ui.available_width() - buttons_width) / 2.0).max(0.0);
+
     if remote_connected {
         // Upload / Download buttons for remote transfers.
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(centering_pad);
+            ui.spacing_mut().item_spacing.x = 8.0;
 
             let can_upload = state.local_selected.is_some() && state.remote_path.is_some();
-            if ui
-                .add_enabled(can_upload, egui::Button::new("\u{2191} Upload").small())
-                .on_hover_text("Upload selected local item to remote directory")
-                .clicked()
-            {
+            let upload_clicked = if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::TransferUp, dark_mode)) {
+                ui.add_enabled(can_upload, egui::ImageButton::new(img).frame(false))
+                    .on_hover_text("Upload selected local item to remote directory")
+                    .clicked()
+            } else {
+                ui.add_enabled(can_upload, egui::Button::new("\u{2191}").small())
+                    .on_hover_text("Upload selected local item to remote directory")
+                    .clicked()
+            };
+            if upload_clicked {
                 if let (Some(idx), Some(remote_dir)) =
                     (state.local_selected, state.remote_path.clone())
                 {
@@ -532,11 +567,16 @@ fn show_files_panel(
             }
 
             let can_download = state.remote_selected.is_some();
-            if ui
-                .add_enabled(can_download, egui::Button::new("\u{2193} Download").small())
-                .on_hover_text("Download selected remote item to local directory")
-                .clicked()
-            {
+            let download_clicked = if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::TransferDown, dark_mode)) {
+                ui.add_enabled(can_download, egui::ImageButton::new(img).frame(false))
+                    .on_hover_text("Download selected remote item to local directory")
+                    .clicked()
+            } else {
+                ui.add_enabled(can_download, egui::Button::new("\u{2193}").small())
+                    .on_hover_text("Download selected remote item to local directory")
+                    .clicked()
+            };
+            if download_clicked {
                 if let Some(idx) = state.remote_selected {
                     if let Some(entry) = state.remote_entries.get(idx) {
                         action = SidebarAction::Download {
@@ -550,15 +590,21 @@ fn show_files_panel(
     } else {
         // Copy buttons between two local panes.
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(centering_pad);
+            ui.spacing_mut().item_spacing.x = 8.0;
 
             // Copy from local → local2
             let can_copy_down = state.local_selected.is_some();
-            if ui
-                .add_enabled(can_copy_down, egui::Button::new("\u{2193} Copy \u{2193}").small())
-                .on_hover_text("Copy selected file to the other pane's directory")
-                .clicked()
-            {
+            let copy_down_clicked = if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::TransferDown, dark_mode)) {
+                ui.add_enabled(can_copy_down, egui::ImageButton::new(img).frame(false))
+                    .on_hover_text("Copy selected file to the other pane's directory")
+                    .clicked()
+            } else {
+                ui.add_enabled(can_copy_down, egui::Button::new("\u{2193}").small())
+                    .on_hover_text("Copy selected file to the other pane's directory")
+                    .clicked()
+            };
+            if copy_down_clicked {
                 if let Some(idx) = state.local_selected {
                     if let Some(entry) = state.local_entries.get(idx) {
                         action = SidebarAction::CopyLocal {
@@ -571,11 +617,16 @@ fn show_files_panel(
 
             // Copy from local2 → local
             let can_copy_up = state.local2_selected.is_some();
-            if ui
-                .add_enabled(can_copy_up, egui::Button::new("\u{2191} Copy \u{2191}").small())
-                .on_hover_text("Copy selected file to the other pane's directory")
-                .clicked()
-            {
+            let copy_up_clicked = if let Some(img) = icons.and_then(|ic| ic.themed_image(Icon::TransferUp, dark_mode)) {
+                ui.add_enabled(can_copy_up, egui::ImageButton::new(img).frame(false))
+                    .on_hover_text("Copy selected file to the other pane's directory")
+                    .clicked()
+            } else {
+                ui.add_enabled(can_copy_up, egui::Button::new("\u{2191}").small())
+                    .on_hover_text("Copy selected file to the other pane's directory")
+                    .clicked()
+            };
+            if copy_up_clicked {
                 if let Some(idx) = state.local2_selected {
                     if let Some(entry) = state.local2_entries.get(idx) {
                         action = SidebarAction::CopyLocal {
@@ -694,6 +745,10 @@ fn show_file_pane(
         PaneKind::Remote => state.active_pane == FileBrowserPane::Remote,
         PaneKind::Local2 => state.active_pane == FileBrowserPane::Local2,
     };
+
+    // Column visibility — clone so we can pass &mut bools to checkboxes
+    // without conflicting with other borrows of `state`.
+    let mut col_vis = state.columns.clone();
 
     let (label, entries, current_path, path_edit, selected): (&str, &[FileListEntry], Option<&PathBuf>, &mut String, &mut Option<usize>) = match kind {
         PaneKind::Remote => (
@@ -849,17 +904,64 @@ fn show_file_pane(
     // for the table header row that sits outside max_scroll_height.
     let status_bar_height = 38.0;
     let table_height = (ui.available_height() - status_bar_height).max(0.0);
-    TableBuilder::new(ui)
+    let show_ext = col_vis.ext;
+    let show_size = col_vis.size;
+    let show_modified = col_vis.modified;
+
+    // Build table with dynamic columns.
+    let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .max_scroll_height(table_height)
-        .column(Column::initial(100.0).at_least(60.0).resizable(true))
-        .column(Column::auto().at_least(40.0).resizable(true))
-        .column(Column::remainder().at_least(70.0))
+        .column(Column::initial(100.0).at_least(60.0).resizable(true)); // Name (always)
+    if show_ext { table = table.column(Column::auto().at_least(30.0).resizable(true)); }
+    if show_size { table = table.column(Column::auto().at_least(40.0).resizable(true)); }
+    if show_modified { table = table.column(Column::remainder().at_least(70.0)); }
+    // If no optional columns, Name takes remainder space.
+    if !show_ext && !show_size && !show_modified {
+        // Already added Name as initial; that's fine, it'll fill.
+    }
+
+    table
         .header(16.0, |mut header| {
-            header.col(|ui| { ui.label(egui::RichText::new("Name").strong().size(10.0)); });
-            header.col(|ui| { ui.label(egui::RichText::new("Size").strong().size(10.0)); });
-            header.col(|ui| { ui.label(egui::RichText::new("Modified").strong().size(10.0)); });
+            header.col(|ui| {
+                let resp = ui.label(egui::RichText::new("Name").strong().size(10.0));
+                resp.context_menu(|ui| {
+                    ui.checkbox(&mut col_vis.ext, "Ext");
+                    ui.checkbox(&mut col_vis.size, "Size");
+                    ui.checkbox(&mut col_vis.modified, "Modified");
+                });
+            });
+            if show_ext {
+                header.col(|ui| {
+                    let resp = ui.label(egui::RichText::new("Ext").strong().size(10.0));
+                    resp.context_menu(|ui| {
+                        ui.checkbox(&mut col_vis.ext, "Ext");
+                        ui.checkbox(&mut col_vis.size, "Size");
+                        ui.checkbox(&mut col_vis.modified, "Modified");
+                    });
+                });
+            }
+            if show_size {
+                header.col(|ui| {
+                    let resp = ui.label(egui::RichText::new("Size").strong().size(10.0));
+                    resp.context_menu(|ui| {
+                        ui.checkbox(&mut col_vis.ext, "Ext");
+                        ui.checkbox(&mut col_vis.size, "Size");
+                        ui.checkbox(&mut col_vis.modified, "Modified");
+                    });
+                });
+            }
+            if show_modified {
+                header.col(|ui| {
+                    let resp = ui.label(egui::RichText::new("Modified").strong().size(10.0));
+                    resp.context_menu(|ui| {
+                        ui.checkbox(&mut col_vis.ext, "Ext");
+                        ui.checkbox(&mut col_vis.size, "Size");
+                        ui.checkbox(&mut col_vis.modified, "Modified");
+                    });
+                });
+            }
         })
         .body(|body| {
             body.rows(16.0, entries.len(), |mut row| {
@@ -903,31 +1005,60 @@ fn show_file_pane(
                     }
                 });
 
-                row.col(|ui| {
-                    let size_text = if entry.is_dir {
-                        "<DIR>".to_string()
-                    } else {
-                        display_size(entry.size)
-                    };
-                    ui.label(egui::RichText::new(size_text).size(11.0).weak());
-                });
+                if show_ext {
+                    row.col(|ui| {
+                        let label = if entry.is_dir {
+                            "<DIR>".to_string()
+                        } else {
+                            let ext = std::path::Path::new(&entry.name)
+                                .extension()
+                                .map(|e| e.to_string_lossy().to_lowercase())
+                                .unwrap_or_default();
+                            extension_label(&ext)
+                                .map(|s| s.to_string())
+                                .unwrap_or(ext.to_uppercase())
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(label).size(11.0).weak())
+                                .truncate(),
+                        );
+                    });
+                }
 
-                row.col(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format_modified(entry.modified))
-                                .size(11.0)
-                                .weak(),
-                        )
-                        .truncate(),
-                    );
-                });
+                if show_size {
+                    row.col(|ui| {
+                        let size_text = if entry.is_dir {
+                            "<DIR>".to_string()
+                        } else {
+                            display_size(entry.size)
+                        };
+                        ui.label(egui::RichText::new(size_text).size(11.0).weak());
+                    });
+                }
+
+                if show_modified {
+                    row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format_modified(entry.modified))
+                                    .size(11.0)
+                                    .weak(),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
             });
         });
 
     // Status bar
     ui.add_space(2.0);
-    ui.small(format!("{} items", entries.len()));
+    let entry_count = entries.len();
+    let _ = entries;
+    ui.small(format!("{entry_count} items"));
+
+    // Write back column visibility (may have changed via context menu).
+    state.columns = col_vis;
 
     action
 }

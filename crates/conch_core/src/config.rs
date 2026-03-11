@@ -523,6 +523,25 @@ pub struct LayoutConfig {
     pub bottom_panel_collapsed: bool,
     #[serde(default = "default_bottom_panel_height")]
     pub bottom_panel_height: f32,
+    /// Which file browser columns are visible.
+    #[serde(default)]
+    pub file_browser_columns: FileBrowserColumns,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileBrowserColumns {
+    #[serde(default = "default_true")]
+    pub ext: bool,
+    #[serde(default = "default_true")]
+    pub size: bool,
+    #[serde(default = "default_true")]
+    pub modified: bool,
+}
+
+impl Default for FileBrowserColumns {
+    fn default() -> Self {
+        Self { ext: true, size: true, modified: true }
+    }
 }
 
 fn default_zoom() -> f32 { 1.0 }
@@ -547,6 +566,7 @@ impl Default for LayoutConfig {
             zoom_factor: 1.0,
             bottom_panel_collapsed: false,
             bottom_panel_height: default_bottom_panel_height(),
+            file_browser_columns: FileBrowserColumns::default(),
         }
     }
 }
