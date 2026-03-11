@@ -9,7 +9,9 @@ use egui::{Color32, ViewportCommand};
 use crate::extra_window::ExtraWindow;
 use crate::input::ResolvedShortcuts;
 use crate::ipc::{IpcListener, IpcMessage};
+use crate::menu_bar::MenuBarState;
 use crate::mouse::Selection;
+use crate::platform::PlatformCapabilities;
 use crate::sessions::create_local_session;
 use crate::state::AppState;
 use crate::terminal::color::ResolvedColors;
@@ -35,8 +37,10 @@ pub struct ConchApp {
     pub(crate) last_blink: Instant,
     pub(crate) terminal_frame_cache: TerminalFrameCache,
 
-    // Tab bar.
+    // UI chrome.
     pub(crate) tab_bar_state: crate::tab_bar::TabBarState,
+    pub(crate) menu_bar_state: MenuBarState,
+    pub(crate) platform: PlatformCapabilities,
 
     // Multi-window.
     pub(crate) extra_windows: Vec<ExtraWindow>,
@@ -47,7 +51,6 @@ pub struct ConchApp {
     pub(crate) file_watcher: Option<FileWatcher>,
     pub(crate) has_ever_had_session: bool,
     pub(crate) quit_requested: bool,
-    pub(crate) use_native_menu: bool,
     pub(crate) rt: Arc<tokio::runtime::Runtime>,
 }
 
@@ -60,7 +63,7 @@ impl ConchApp {
         let persistent = config::load_persistent_state().unwrap_or_default();
 
         let shortcuts = ResolvedShortcuts::from_config(&user_config.conch.keyboard);
-        let use_native_menu = cfg!(target_os = "macos") && user_config.conch.ui.native_menu_bar;
+        let platform = PlatformCapabilities::current();
         let state = AppState::new(user_config, persistent);
 
         let ipc_listener = IpcListener::start();
@@ -80,53 +83,28 @@ impl ConchApp {
             last_blink: Instant::now(),
             terminal_frame_cache: TerminalFrameCache::default(),
             tab_bar_state: crate::tab_bar::TabBarState::default(),
+            menu_bar_state: MenuBarState::default(),
+            platform,
             extra_windows: Vec::new(),
             next_viewport_num: 1,
             ipc_listener,
             file_watcher,
             has_ever_had_session: false,
             quit_requested: false,
-            use_native_menu,
             rt,
         }
     }
 
     /// Build a `ViewportBuilder` for extra windows matching main window decorations.
     pub(crate) fn build_extra_viewport(&self) -> egui::ViewportBuilder {
-        use config::WindowDecorations;
-        let native_menu = self.use_native_menu;
-        let mut builder = egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 600.0]);
-        match self.state.user_config.window.decorations {
-            WindowDecorations::Full => {
-                if cfg!(target_os = "macos") && !native_menu {
-                    builder = builder
-                        .with_fullsize_content_view(true)
-                        .with_titlebar_shown(true)
-                        .with_title_shown(false);
-                } else {
-                    builder = builder
-                        .with_title_shown(true)
-                        .with_titlebar_shown(true);
-                }
-            }
-            WindowDecorations::Transparent => {
-                builder = builder
-                    .with_fullsize_content_view(true)
-                    .with_titlebar_shown(true)
-                    .with_title_shown(false)
-                    .with_transparent(true);
-            }
-            WindowDecorations::Buttonless => {
-                builder = builder
-                    .with_decorations(false)
-                    .with_transparent(true);
-            }
-            WindowDecorations::None => {
-                builder = builder.with_decorations(false);
-            }
-        }
-        builder
+        let decorations = self.platform.effective_decorations(
+            self.state.user_config.window.decorations,
+        );
+        crate::build_viewport(
+            egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+            decorations,
+            &self.platform,
+        )
     }
 
     /// Open a new OS window with a fresh local terminal tab.
@@ -328,7 +306,10 @@ impl eframe::App for ConchApp {
 
         // Buttonless: no native title bar, so add a thin drag region at the top
         // so the user can still move the window.
-        if self.state.user_config.window.decorations == config::WindowDecorations::Buttonless {
+        let effective_decorations = self.platform.effective_decorations(
+            self.state.user_config.window.decorations,
+        );
+        if effective_decorations == config::WindowDecorations::Buttonless {
             let drag_h = self.cell_height.max(6.0);
             egui::TopBottomPanel::top("drag_region")
                 .exact_height(drag_h)
@@ -354,6 +335,11 @@ impl eframe::App for ConchApp {
                     self.remove_session(id);
                 }
             }
+        }
+
+        // Menu bar.
+        if let Some(action) = crate::menu_bar::show(ctx, &mut self.menu_bar_state, &self.platform) {
+            crate::menu_bar::handle_action(action, ctx, self);
         }
 
         // Central panel: terminal.

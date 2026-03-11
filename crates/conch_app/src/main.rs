@@ -4,6 +4,7 @@ mod app;
 mod extra_window;
 mod input;
 mod ipc;
+mod menu_bar;
 mod mouse;
 mod platform;
 mod sessions;
@@ -88,6 +89,45 @@ fn window_size_from_config(cfg: &config::WindowDimensions) -> [f32; 2] {
     ]
 }
 
+/// Apply window decoration settings to a viewport builder using platform capabilities.
+pub(crate) fn build_viewport(
+    mut builder: egui::ViewportBuilder,
+    decorations: config::WindowDecorations,
+    platform: &platform::PlatformCapabilities,
+) -> egui::ViewportBuilder {
+    use config::WindowDecorations;
+    match decorations {
+        WindowDecorations::Full => {
+            if platform.fullsize_content_view {
+                builder = builder
+                    .with_fullsize_content_view(true)
+                    .with_titlebar_shown(true)
+                    .with_title_shown(false);
+            } else {
+                builder = builder
+                    .with_title_shown(true)
+                    .with_titlebar_shown(true);
+            }
+        }
+        WindowDecorations::Transparent => {
+            builder = builder
+                .with_fullsize_content_view(true)
+                .with_titlebar_shown(true)
+                .with_title_shown(false)
+                .with_transparent(true);
+        }
+        WindowDecorations::Buttonless => {
+            builder = builder
+                .with_decorations(false)
+                .with_transparent(true);
+        }
+        WindowDecorations::None => {
+            builder = builder.with_decorations(false);
+        }
+    }
+    builder
+}
+
 /// Send an IPC message to a running Conch instance.
 #[cfg(unix)]
 fn send_ipc_message(msg: &str) -> Result<(), String> {
@@ -160,42 +200,14 @@ fn main() -> eframe::Result<()> {
             .expect("Failed to create tokio runtime"),
     );
 
-    let native_menu = cfg!(target_os = "macos") && user_config.conch.ui.native_menu_bar;
+    let platform = platform::PlatformCapabilities::current();
+    let decorations = platform.effective_decorations(user_config.window.decorations);
 
-    let mut viewport = egui::ViewportBuilder::default()
+    let base_viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
         .with_icon(Arc::new(load_app_icon()));
 
-    use config::WindowDecorations;
-    match user_config.window.decorations {
-        WindowDecorations::Full => {
-            if cfg!(target_os = "macos") && !native_menu {
-                viewport = viewport
-                    .with_fullsize_content_view(true)
-                    .with_titlebar_shown(true)
-                    .with_title_shown(false);
-            } else {
-                viewport = viewport
-                    .with_title_shown(true)
-                    .with_titlebar_shown(true);
-            }
-        }
-        WindowDecorations::Transparent => {
-            viewport = viewport
-                .with_fullsize_content_view(true)
-                .with_titlebar_shown(true)
-                .with_title_shown(false)
-                .with_transparent(true);
-        }
-        WindowDecorations::Buttonless => {
-            viewport = viewport
-                .with_decorations(false)
-                .with_transparent(true);
-        }
-        WindowDecorations::None => {
-            viewport = viewport.with_decorations(false);
-        }
-    }
+    let viewport = build_viewport(base_viewport, decorations, &platform);
 
     let options = eframe::NativeOptions {
         viewport,
