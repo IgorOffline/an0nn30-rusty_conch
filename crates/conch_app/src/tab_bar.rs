@@ -7,7 +7,7 @@ use egui::{Color32, Rect, Sense, Vec2};
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::terminal::color::ResolvedColors;
+use crate::ui_theme::UiTheme;
 
 /// Duration of tab open/close animations in seconds.
 const ANIM_SECS: f32 = 0.15;
@@ -136,7 +136,7 @@ pub fn show(ctx: &egui::Context, state: &AppState, tab_state: &mut TabBarState) 
         ctx.request_repaint();
     }
 
-    let colors = TabBarColors::from_scheme(&state.colors);
+    let colors = TabBarColors::from_theme(&state.theme);
     let mut actions = Vec::new();
 
     let tab_height = 28.0;
@@ -249,7 +249,7 @@ pub fn show(ctx: &egui::Context, state: &AppState, tab_state: &mut TabBarState) 
     actions
 }
 
-/// Pre-computed colors for the tab bar, derived from the terminal color scheme.
+/// Pre-computed colors for the tab bar, derived from the UI theme.
 struct TabBarColors {
     bar_bg: Color32,
     active_bg: Color32,
@@ -260,30 +260,18 @@ struct TabBarColors {
 }
 
 impl TabBarColors {
-    fn from_scheme(colors: &ResolvedColors) -> Self {
-        let bg_r = (colors.background[0] * 255.0) as u8;
-        let bg_g = (colors.background[1] * 255.0) as u8;
-        let bg_b = (colors.background[2] * 255.0) as u8;
-
+    fn from_theme(theme: &UiTheme) -> Self {
         Self {
-            bar_bg: Color32::from_rgb(bg_r.saturating_add(15), bg_g.saturating_add(15), bg_b.saturating_add(15)),
-            active_bg: Color32::from_rgb(bg_r.saturating_add(35), bg_g.saturating_add(35), bg_b.saturating_add(35)),
-            hover_bg: Color32::from_rgb(bg_r.saturating_add(25), bg_g.saturating_add(25), bg_b.saturating_add(25)),
-            text: Color32::from_rgb(
-                (colors.foreground[0] * 255.0) as u8,
-                (colors.foreground[1] * 255.0) as u8,
-                (colors.foreground[2] * 255.0) as u8,
+            bar_bg: theme.surface,
+            active_bg: theme.surface_raised,
+            hover_bg: Color32::from_rgb(
+                (theme.surface.r() + theme.surface_raised.r()) / 2,
+                (theme.surface.g() + theme.surface_raised.g()) / 2,
+                (theme.surface.b() + theme.surface_raised.b()) / 2,
             ),
-            text_dim: Color32::from_rgb(
-                (colors.foreground[0] * 180.0) as u8,
-                (colors.foreground[1] * 180.0) as u8,
-                (colors.foreground[2] * 180.0) as u8,
-            ),
-            divider: Color32::from_rgb(
-                (colors.foreground[0] * 50.0) as u8,
-                (colors.foreground[1] * 50.0) as u8,
-                (colors.foreground[2] * 50.0) as u8,
-            ),
+            text: theme.text,
+            text_dim: theme.text_secondary,
+            divider: theme.text_muted,
         }
     }
 }

@@ -12,6 +12,7 @@ mod shortcuts;
 mod state;
 mod tab_bar;
 mod terminal;
+mod ui_theme;
 mod watcher;
 
 use std::sync::Arc;

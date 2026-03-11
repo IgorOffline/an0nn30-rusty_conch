@@ -160,6 +160,8 @@ impl ConchApp {
                         self.shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
                         let scheme = conch_core::color_scheme::resolve_theme(&new_config.colors.theme);
                         self.state.colors = ResolvedColors::from_scheme(&scheme);
+                        self.state.theme = crate::ui_theme::UiTheme::from_colors(&self.state.colors);
+                        self.state.theme_dirty = true;
                         crate::apply_appearance_mode(ctx, new_config.colors.appearance_mode);
                         self.state.user_config = new_config;
                     }
@@ -168,6 +170,8 @@ impl ConchApp {
                     log::info!("Themes changed, reloading...");
                     let scheme = conch_core::color_scheme::resolve_theme(&self.state.user_config.colors.theme);
                     self.state.colors = ResolvedColors::from_scheme(&scheme);
+                    self.state.theme = crate::ui_theme::UiTheme::from_colors(&self.state.colors);
+                    self.state.theme_dirty = true;
                 }
             }
         }
@@ -296,13 +300,12 @@ impl eframe::App for ConchApp {
             self.extra_windows.remove(i);
         }
 
-        // ── Main window UI ──
-        let bg_color = Color32::from_rgba_unmultiplied(
-            (self.state.colors.background[0] * 255.0) as u8,
-            (self.state.colors.background[1] * 255.0) as u8,
-            (self.state.colors.background[2] * 255.0) as u8,
-            255,
-        );
+        // ── Apply centralized UI theme (only when changed) ──
+        if self.state.theme_dirty {
+            self.state.theme.apply(ctx);
+            self.state.theme_dirty = false;
+        }
+        let bg_color = self.state.theme.bg;
 
         // Buttonless: no native title bar, so add a thin drag region at the top
         // so the user can still move the window.

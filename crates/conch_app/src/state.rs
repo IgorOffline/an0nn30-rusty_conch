@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::terminal::color::ResolvedColors;
+use crate::ui_theme::UiTheme;
 
 /// A single terminal session backed by a local PTY.
 pub struct Session {
@@ -51,6 +52,8 @@ pub struct AppState {
     pub user_config: UserConfig,
     pub persistent: PersistentState,
     pub colors: ResolvedColors,
+    pub theme: UiTheme,
+    pub theme_dirty: bool,
     pub sessions: HashMap<Uuid, Session>,
     pub active_tab: Option<Uuid>,
     pub tab_order: Vec<Uuid>,
@@ -60,11 +63,14 @@ impl AppState {
     pub fn new(user_config: UserConfig, persistent: PersistentState) -> Self {
         let scheme = color_scheme::resolve_theme(&user_config.colors.theme);
         let colors = ResolvedColors::from_scheme(&scheme);
+        let theme = UiTheme::from_colors(&colors);
 
         Self {
             user_config,
             persistent,
             colors,
+            theme,
+            theme_dirty: true,
             sessions: HashMap::new(),
             active_tab: None,
             tab_order: Vec::new(),
