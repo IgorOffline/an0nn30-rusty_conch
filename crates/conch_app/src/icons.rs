@@ -38,6 +38,10 @@ const COMPUTER_DARK_PNG: &[u8] = include_bytes!("../icons/computer-dark.png");
 const COMPUTER_LIGHT_PNG: &[u8] = include_bytes!("../icons/computer-light.png");
 const TAB_CLOSE_DARK_PNG: &[u8] = include_bytes!("../icons/tab-close-dark.png");
 const TAB_CLOSE_LIGHT_PNG: &[u8] = include_bytes!("../icons/tab-close-light.png");
+const TRANSFER_DOWN_DARK_PNG: &[u8] = include_bytes!("../icons/transfer-down-dark.png");
+const TRANSFER_DOWN_LIGHT_PNG: &[u8] = include_bytes!("../icons/transfer-down-light.png");
+const TRANSFER_UP_DARK_PNG: &[u8] = include_bytes!("../icons/transfer-up-dark.png");
+const TRANSFER_UP_LIGHT_PNG: &[u8] = include_bytes!("../icons/transfer-up-light.png");
 
 /// Icons that have a single (color) variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,6 +67,8 @@ pub enum Icon {
     GoNext,
     Computer,
     TabClose,
+    TransferDown,
+    TransferUp,
 }
 
 /// Internal key for the texture map — separates dark/light variants.
@@ -74,10 +80,10 @@ enum TexKey {
 }
 
 /// Which icons have dark/light variants.
-const THEMED_ICONS: &[Icon] = &[Icon::File, Icon::TabSessions, Icon::TabClose, Icon::GoUp, Icon::GoHome, Icon::Refresh, Icon::FolderNew, Icon::SidebarFolder, Icon::GoPrevious, Icon::GoNext, Icon::Computer];
+const THEMED_ICONS: &[Icon] = &[Icon::File, Icon::TabSessions, Icon::TabClose, Icon::GoUp, Icon::GoHome, Icon::Refresh, Icon::FolderNew, Icon::SidebarFolder, Icon::GoPrevious, Icon::GoNext, Icon::Computer, Icon::TransferDown, Icon::TransferUp];
 
 fn is_themed(icon: Icon) -> bool {
-    matches!(icon, Icon::File | Icon::TabSessions | Icon::TabClose | Icon::GoUp | Icon::GoHome | Icon::Refresh | Icon::FolderNew | Icon::SidebarFolder | Icon::GoPrevious | Icon::GoNext | Icon::Computer)
+    matches!(icon, Icon::File | Icon::TabSessions | Icon::TabClose | Icon::GoUp | Icon::GoHome | Icon::Refresh | Icon::FolderNew | Icon::SidebarFolder | Icon::GoPrevious | Icon::GoNext | Icon::Computer | Icon::TransferDown | Icon::TransferUp)
 }
 
 fn single_bytes(icon: Icon) -> &'static [u8] {
@@ -103,6 +109,8 @@ fn single_bytes(icon: Icon) -> &'static [u8] {
         Icon::SidebarFolder => SIDEBAR_FOLDER_DARK_PNG,
         Icon::GoPrevious => GO_PREVIOUS_DARK_PNG,
         Icon::GoNext => GO_NEXT_DARK_PNG,
+        Icon::TransferDown => TRANSFER_DOWN_DARK_PNG,
+        Icon::TransferUp => TRANSFER_UP_DARK_PNG,
     }
 }
 
@@ -119,6 +127,8 @@ fn dark_bytes(icon: Icon) -> &'static [u8] {
         Icon::SidebarFolder => SIDEBAR_FOLDER_DARK_PNG,
         Icon::GoPrevious => GO_PREVIOUS_DARK_PNG,
         Icon::GoNext => GO_NEXT_DARK_PNG,
+        Icon::TransferDown => TRANSFER_DOWN_DARK_PNG,
+        Icon::TransferUp => TRANSFER_UP_DARK_PNG,
         _ => unreachable!(),
     }
 }
@@ -136,6 +146,8 @@ fn light_bytes(icon: Icon) -> &'static [u8] {
         Icon::SidebarFolder => SIDEBAR_FOLDER_LIGHT_PNG,
         Icon::GoPrevious => GO_PREVIOUS_LIGHT_PNG,
         Icon::GoNext => GO_NEXT_LIGHT_PNG,
+        Icon::TransferDown => TRANSFER_DOWN_LIGHT_PNG,
+        Icon::TransferUp => TRANSFER_UP_LIGHT_PNG,
         _ => unreachable!(),
     }
 }
