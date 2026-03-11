@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
-use conch_session::EventProxy;
+use conch_pty::EventProxy;
 use std::sync::Arc;
 
 use crate::terminal::size_info::SizeInfo;

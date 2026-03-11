@@ -8,12 +8,7 @@
 use conch_core::config::KeyboardConfig;
 use egui::{Key, Modifiers};
 
-/// A parsed key binding (e.g. "cmd+t" → Key::T + command modifier).
-///
-/// Uses the cross-platform `command` modifier: Cmd on macOS, Ctrl on
-/// Windows/Linux.  The keywords "cmd", "super", "meta", "ctrl", and
-/// "control" all map to this single modifier so that config strings
-/// like `"cmd+t"` work on every platform.
+/// A parsed key binding (e.g. "cmd+t" -> Key::T + command modifier).
 #[derive(Debug, Clone)]
 pub struct KeyBinding {
     pub key: Key,
@@ -63,18 +58,9 @@ impl KeyBinding {
 pub struct ResolvedShortcuts {
     pub new_tab: Option<KeyBinding>,
     pub close_tab: Option<KeyBinding>,
-    pub new_connection: Option<KeyBinding>,
     pub quit: Option<KeyBinding>,
-    pub toggle_left_sidebar: Option<KeyBinding>,
-    pub toggle_right_sidebar: Option<KeyBinding>,
-    pub focus_quick_connect: Option<KeyBinding>,
-    pub focus_plugin_search: Option<KeyBinding>,
     pub new_window: Option<KeyBinding>,
-    pub focus_files: Option<KeyBinding>,
     pub zen_mode: Option<KeyBinding>,
-    pub ssh_tunnels: Option<KeyBinding>,
-    pub toggle_bottom_panel: Option<KeyBinding>,
-    pub notification_history: Option<KeyBinding>,
 }
 
 impl ResolvedShortcuts {
@@ -83,43 +69,25 @@ impl ResolvedShortcuts {
         Self {
             new_tab: KeyBinding::parse(&config.new_tab),
             close_tab: KeyBinding::parse(&config.close_tab),
-            new_connection: KeyBinding::parse(&config.new_connection),
             quit: KeyBinding::parse(&config.quit),
-            toggle_left_sidebar: KeyBinding::parse(&config.toggle_left_sidebar),
-            toggle_right_sidebar: KeyBinding::parse(&config.toggle_right_sidebar),
-            focus_quick_connect: KeyBinding::parse(&config.focus_quick_connect),
-            focus_plugin_search: KeyBinding::parse(&config.focus_plugin_search),
             new_window: KeyBinding::parse(&config.new_window),
-            focus_files: KeyBinding::parse(&config.focus_files),
             zen_mode: KeyBinding::parse(&config.zen_mode),
-            ssh_tunnels: KeyBinding::parse(&config.ssh_tunnels),
-            toggle_bottom_panel: KeyBinding::parse(&config.toggle_bottom_panel),
-            notification_history: KeyBinding::parse(&config.notification_history),
         }
     }
 
     /// Check if the given key+modifiers match any app shortcut.
     pub fn is_app_shortcut(&self, key: &Key, modifiers: &Modifiers) -> bool {
-        let bindings = [
+        let bindings: [&Option<KeyBinding>; 5] = [
             &self.new_tab,
             &self.close_tab,
-            &self.new_connection,
             &self.quit,
-            &self.toggle_left_sidebar,
-            &self.toggle_right_sidebar,
-            &self.focus_quick_connect,
-            &self.focus_plugin_search,
             &self.new_window,
-            &self.focus_files,
             &self.zen_mode,
-            &self.ssh_tunnels,
-            &self.toggle_bottom_panel,
-            &self.notification_history,
         ];
         if bindings.iter().any(|b| b.as_ref().is_some_and(|kb| kb.matches(key, modifiers))) {
             return true;
         }
-        // Command+number for tab switching (Cmd on macOS, Ctrl on Linux/Windows).
+        // Command+number for tab switching.
         if modifiers.command && !modifiers.alt && !modifiers.shift {
             matches!(key, Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9)
         } else {
@@ -131,10 +99,6 @@ impl ResolvedShortcuts {
 /// Convert an egui key event into bytes to send to the PTY.
 ///
 /// Returns `None` for events that are app shortcuts or have no terminal mapping.
-///
-/// `app_cursor` should be `true` when the terminal is in application cursor mode
-/// (DECCKM / `TermMode::APP_CURSOR`). This changes arrow keys and Home/End from
-/// CSI sequences (`\x1b[A`) to SS3 sequences (`\x1bOA`).
 pub fn key_to_bytes(
     key: &Key,
     modifiers: &Modifiers,
@@ -142,12 +106,11 @@ pub fn key_to_bytes(
     shortcuts: &ResolvedShortcuts,
     app_cursor: bool,
 ) -> Option<Vec<u8>> {
-    // Suppress app shortcuts from reaching the terminal.
     if shortcuts.is_app_shortcut(key, modifiers) {
         return None;
     }
 
-    // Ctrl+letter -> ASCII control character (0x01..0x1F).
+    // Ctrl+letter -> ASCII control character.
     if modifiers.ctrl {
         if let Some(ch) = key_to_char(key) {
             if ch.is_ascii_lowercase() {
@@ -215,44 +178,20 @@ pub fn key_to_bytes(
     None
 }
 
-/// Parse a key name string to an egui Key.
 fn parse_key_name(name: &str) -> Option<Key> {
     match name.to_lowercase().as_str() {
-        "a" => Some(Key::A),
-        "b" => Some(Key::B),
-        "c" => Some(Key::C),
-        "d" => Some(Key::D),
-        "e" => Some(Key::E),
-        "f" => Some(Key::F),
-        "g" => Some(Key::G),
-        "h" => Some(Key::H),
-        "i" => Some(Key::I),
-        "j" => Some(Key::J),
-        "k" => Some(Key::K),
-        "l" => Some(Key::L),
-        "m" => Some(Key::M),
-        "n" => Some(Key::N),
-        "o" => Some(Key::O),
-        "p" => Some(Key::P),
-        "q" => Some(Key::Q),
-        "r" => Some(Key::R),
-        "s" => Some(Key::S),
-        "t" => Some(Key::T),
-        "u" => Some(Key::U),
-        "v" => Some(Key::V),
-        "w" => Some(Key::W),
-        "x" => Some(Key::X),
-        "y" => Some(Key::Y),
-        "z" => Some(Key::Z),
-        "0" => Some(Key::Num0),
-        "1" => Some(Key::Num1),
-        "2" => Some(Key::Num2),
-        "3" => Some(Key::Num3),
-        "4" => Some(Key::Num4),
-        "5" => Some(Key::Num5),
-        "6" => Some(Key::Num6),
-        "7" => Some(Key::Num7),
-        "8" => Some(Key::Num8),
+        "a" => Some(Key::A), "b" => Some(Key::B), "c" => Some(Key::C),
+        "d" => Some(Key::D), "e" => Some(Key::E), "f" => Some(Key::F),
+        "g" => Some(Key::G), "h" => Some(Key::H), "i" => Some(Key::I),
+        "j" => Some(Key::J), "k" => Some(Key::K), "l" => Some(Key::L),
+        "m" => Some(Key::M), "n" => Some(Key::N), "o" => Some(Key::O),
+        "p" => Some(Key::P), "q" => Some(Key::Q), "r" => Some(Key::R),
+        "s" => Some(Key::S), "t" => Some(Key::T), "u" => Some(Key::U),
+        "v" => Some(Key::V), "w" => Some(Key::W), "x" => Some(Key::X),
+        "y" => Some(Key::Y), "z" => Some(Key::Z),
+        "0" => Some(Key::Num0), "1" => Some(Key::Num1), "2" => Some(Key::Num2),
+        "3" => Some(Key::Num3), "4" => Some(Key::Num4), "5" => Some(Key::Num5),
+        "6" => Some(Key::Num6), "7" => Some(Key::Num7), "8" => Some(Key::Num8),
         "9" => Some(Key::Num9),
         "enter" | "return" => Some(Key::Enter),
         "tab" => Some(Key::Tab),
@@ -269,52 +208,26 @@ fn parse_key_name(name: &str) -> Option<Key> {
         "down" => Some(Key::ArrowDown),
         "left" => Some(Key::ArrowLeft),
         "right" => Some(Key::ArrowRight),
-        "f1" => Some(Key::F1),
-        "f2" => Some(Key::F2),
-        "f3" => Some(Key::F3),
-        "f4" => Some(Key::F4),
-        "f5" => Some(Key::F5),
-        "f6" => Some(Key::F6),
-        "f7" => Some(Key::F7),
-        "f8" => Some(Key::F8),
-        "f9" => Some(Key::F9),
-        "f10" => Some(Key::F10),
-        "f11" => Some(Key::F11),
-        "f12" => Some(Key::F12),
+        "f1" => Some(Key::F1), "f2" => Some(Key::F2), "f3" => Some(Key::F3),
+        "f4" => Some(Key::F4), "f5" => Some(Key::F5), "f6" => Some(Key::F6),
+        "f7" => Some(Key::F7), "f8" => Some(Key::F8), "f9" => Some(Key::F9),
+        "f10" => Some(Key::F10), "f11" => Some(Key::F11), "f12" => Some(Key::F12),
         "/" | "slash" => Some(Key::Slash),
         _ => None,
     }
 }
 
-/// Map an egui `Key` variant to its lowercase ASCII character, if applicable.
 fn key_to_char(key: &Key) -> Option<char> {
     match key {
-        Key::A => Some('a'),
-        Key::B => Some('b'),
-        Key::C => Some('c'),
-        Key::D => Some('d'),
-        Key::E => Some('e'),
-        Key::F => Some('f'),
-        Key::G => Some('g'),
-        Key::H => Some('h'),
-        Key::I => Some('i'),
-        Key::J => Some('j'),
-        Key::K => Some('k'),
-        Key::L => Some('l'),
-        Key::M => Some('m'),
-        Key::N => Some('n'),
-        Key::O => Some('o'),
-        Key::P => Some('p'),
-        Key::Q => Some('q'),
-        Key::R => Some('r'),
-        Key::S => Some('s'),
-        Key::T => Some('t'),
-        Key::U => Some('u'),
-        Key::V => Some('v'),
-        Key::W => Some('w'),
-        Key::X => Some('x'),
-        Key::Y => Some('y'),
-        Key::Z => Some('z'),
+        Key::A => Some('a'), Key::B => Some('b'), Key::C => Some('c'),
+        Key::D => Some('d'), Key::E => Some('e'), Key::F => Some('f'),
+        Key::G => Some('g'), Key::H => Some('h'), Key::I => Some('i'),
+        Key::J => Some('j'), Key::K => Some('k'), Key::L => Some('l'),
+        Key::M => Some('m'), Key::N => Some('n'), Key::O => Some('o'),
+        Key::P => Some('p'), Key::Q => Some('q'), Key::R => Some('r'),
+        Key::S => Some('s'), Key::T => Some('t'), Key::U => Some('u'),
+        Key::V => Some('v'), Key::W => Some('w'), Key::X => Some('x'),
+        Key::Y => Some('y'), Key::Z => Some('z'),
         Key::OpenBracket => Some('['),
         Key::CloseBracket => Some(']'),
         Key::Backslash => Some('\\'),
@@ -322,14 +235,9 @@ fn key_to_char(key: &Key) -> Option<char> {
     }
 }
 
-/// Build an arrow-key escape sequence with modifier parameters.
-///
-/// In application cursor mode (no extra modifiers), arrows use SS3: `\x1bOA`.
-/// With modifiers or in normal mode, arrows use CSI: `\x1b[A` or `\x1b[1;2A`.
 fn arrow_key(dir: u8, modifiers: &Modifiers, app_cursor: bool) -> Vec<u8> {
     let modifier = modifier_param(modifiers);
     if modifier > 1 {
-        // Modifiers always use CSI format, even in app cursor mode.
         format!("\x1b[1;{modifier}{}", dir as char).into_bytes()
     } else if app_cursor {
         vec![0x1b, b'O', dir]
@@ -338,17 +246,10 @@ fn arrow_key(dir: u8, modifiers: &Modifiers, app_cursor: bool) -> Vec<u8> {
     }
 }
 
-/// Compute the xterm modifier parameter (1 = none, +1 shift, +2 alt, +4 ctrl).
 fn modifier_param(m: &Modifiers) -> u8 {
     let mut p = 1u8;
-    if m.shift {
-        p += 1;
-    }
-    if m.alt {
-        p += 2;
-    }
-    if m.ctrl {
-        p += 4;
-    }
+    if m.shift { p += 1; }
+    if m.alt { p += 2; }
+    if m.ctrl { p += 4; }
     p
 }

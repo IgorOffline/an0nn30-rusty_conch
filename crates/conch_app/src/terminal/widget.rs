@@ -9,7 +9,7 @@ use std::sync::Arc;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::Term;
-use conch_session::EventProxy;
+use conch_pty::EventProxy;
 use egui::{Color32, FontFamily, FontId, Painter, Pos2, Rect, Sense, Vec2};
 
 use super::color::{convert_color, ResolvedColors};

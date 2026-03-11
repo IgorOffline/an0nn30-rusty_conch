@@ -170,7 +170,6 @@ impl LocalSession {
             .context("Failed to create PTY")?;
 
         // Extract child PID before EventLoop takes ownership of the Pty.
-        // Windows ConPTY doesn't expose child(); use 0 sentinel (CWD polling is macOS-only).
         #[cfg(not(windows))]
         let child_pid = pty.child().id();
         #[cfg(windows)]
@@ -215,10 +214,6 @@ impl LocalSession {
 
     /// Resize the terminal.
     pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
-        // Resize the Term grid directly — Msg::Resize only resizes the PTY,
-        // not the terminal grid. Without this, display_iter stays at the old size.
-        // Use try_lock_unfair to avoid blocking the main thread if the event loop
-        // is holding the FairMutex lease during PTY reads.
         if let Some(mut term) = self.term.try_lock_unfair() {
             term.resize(TermSize {
                 columns: cols as usize,
@@ -226,7 +221,6 @@ impl LocalSession {
             });
         }
 
-        // Resize the PTY (sends TIOCSWINSZ → SIGWINCH to the shell).
         let size = WindowSize {
             num_lines: rows,
             num_cols: cols,
@@ -246,10 +240,6 @@ impl Drop for LocalSession {
     fn drop(&mut self) {
         self.shutdown();
 
-        // Move the join handle to a background thread so that the blocking
-        // Pty::drop → Child::wait() call doesn't freeze the main thread.
-        // We SIGKILL the child first (SIGHUP can be trapped by shells) to
-        // ensure Child::wait() returns promptly on the background thread.
         let child_pid = self.child_pid;
         if let Some(join_handle) = self.join_handle.take() {
             std::thread::Builder::new()

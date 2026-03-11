@@ -1,7 +1,7 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use tokio::sync::mpsc;
 
-/// Bridges alacritty_terminal events into an async channel for iced consumption.
+/// Bridges alacritty_terminal events into an async channel.
 #[derive(Clone)]
 pub struct EventProxy {
     sender: mpsc::UnboundedSender<TermEvent>,

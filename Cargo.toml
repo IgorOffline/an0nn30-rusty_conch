@@ -2,21 +2,19 @@
 resolver = "3"
 members = [
     "crates/conch_core",
-    "crates/conch_session",
-    "crates/conch_plugin",
+    "crates/conch_pty",
     "crates/conch_app",
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
 # Workspace crates
 conch_core = { path = "crates/conch_core" }
-conch_session = { path = "crates/conch_session" }
-conch_plugin = { path = "crates/conch_plugin" }
+conch_pty = { path = "crates/conch_pty" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -32,23 +30,6 @@ anyhow = "1"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "6.0"
-rfd = "0.15"
 parking_lot = "0.12"
 log = "0.4"
 env_logger = "0.11"
-
-# Optimize crypto crates even in debug builds (PBKDF2 is ~100x slower unoptimized)
-[profile.dev.package.pbkdf2]
-opt-level = 3
-[profile.dev.package.sha2]
-opt-level = 3
-[profile.dev.package.aes]
-opt-level = 3
-[profile.dev.package.aes-gcm]
-opt-level = 3
-[profile.dev.package.cbc]
-opt-level = 3
-[profile.dev.package.ecb]
-opt-level = 3
-[profile.dev.package.hmac]
-opt-level = 3
