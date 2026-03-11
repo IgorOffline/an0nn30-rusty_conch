@@ -15,7 +15,7 @@ use egui::{
 use egui_extras::{TableBuilder, Column};
 
 use crate::icons::{Icon, IconCache};
-use crate::ui::file_browser::{FileBrowserState, FileListEntry, display_size, format_modified};
+use crate::ui::file_browser::{FileBrowserState, FileListEntry, display_size, extension_label, format_modified};
 
 /// Which tab is active in the left sidebar.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -746,6 +746,10 @@ fn show_file_pane(
         PaneKind::Local2 => state.active_pane == FileBrowserPane::Local2,
     };
 
+    // Column visibility — clone so we can pass &mut bools to checkboxes
+    // without conflicting with other borrows of `state`.
+    let mut col_vis = state.columns.clone();
+
     let (label, entries, current_path, path_edit, selected): (&str, &[FileListEntry], Option<&PathBuf>, &mut String, &mut Option<usize>) = match kind {
         PaneKind::Remote => (
             "Remote",
@@ -900,17 +904,64 @@ fn show_file_pane(
     // for the table header row that sits outside max_scroll_height.
     let status_bar_height = 38.0;
     let table_height = (ui.available_height() - status_bar_height).max(0.0);
-    TableBuilder::new(ui)
+    let show_ext = col_vis.ext;
+    let show_size = col_vis.size;
+    let show_modified = col_vis.modified;
+
+    // Build table with dynamic columns.
+    let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .max_scroll_height(table_height)
-        .column(Column::initial(100.0).at_least(60.0).resizable(true))
-        .column(Column::auto().at_least(40.0).resizable(true))
-        .column(Column::remainder().at_least(70.0))
+        .column(Column::initial(100.0).at_least(60.0).resizable(true)); // Name (always)
+    if show_ext { table = table.column(Column::auto().at_least(30.0).resizable(true)); }
+    if show_size { table = table.column(Column::auto().at_least(40.0).resizable(true)); }
+    if show_modified { table = table.column(Column::remainder().at_least(70.0)); }
+    // If no optional columns, Name takes remainder space.
+    if !show_ext && !show_size && !show_modified {
+        // Already added Name as initial; that's fine, it'll fill.
+    }
+
+    table
         .header(16.0, |mut header| {
-            header.col(|ui| { ui.label(egui::RichText::new("Name").strong().size(10.0)); });
-            header.col(|ui| { ui.label(egui::RichText::new("Size").strong().size(10.0)); });
-            header.col(|ui| { ui.label(egui::RichText::new("Modified").strong().size(10.0)); });
+            header.col(|ui| {
+                let resp = ui.label(egui::RichText::new("Name").strong().size(10.0));
+                resp.context_menu(|ui| {
+                    ui.checkbox(&mut col_vis.ext, "Ext");
+                    ui.checkbox(&mut col_vis.size, "Size");
+                    ui.checkbox(&mut col_vis.modified, "Modified");
+                });
+            });
+            if show_ext {
+                header.col(|ui| {
+                    let resp = ui.label(egui::RichText::new("Ext").strong().size(10.0));
+                    resp.context_menu(|ui| {
+                        ui.checkbox(&mut col_vis.ext, "Ext");
+                        ui.checkbox(&mut col_vis.size, "Size");
+                        ui.checkbox(&mut col_vis.modified, "Modified");
+                    });
+                });
+            }
+            if show_size {
+                header.col(|ui| {
+                    let resp = ui.label(egui::RichText::new("Size").strong().size(10.0));
+                    resp.context_menu(|ui| {
+                        ui.checkbox(&mut col_vis.ext, "Ext");
+                        ui.checkbox(&mut col_vis.size, "Size");
+                        ui.checkbox(&mut col_vis.modified, "Modified");
+                    });
+                });
+            }
+            if show_modified {
+                header.col(|ui| {
+                    let resp = ui.label(egui::RichText::new("Modified").strong().size(10.0));
+                    resp.context_menu(|ui| {
+                        ui.checkbox(&mut col_vis.ext, "Ext");
+                        ui.checkbox(&mut col_vis.size, "Size");
+                        ui.checkbox(&mut col_vis.modified, "Modified");
+                    });
+                });
+            }
         })
         .body(|body| {
             body.rows(16.0, entries.len(), |mut row| {
@@ -954,31 +1005,60 @@ fn show_file_pane(
                     }
                 });
 
-                row.col(|ui| {
-                    let size_text = if entry.is_dir {
-                        "<DIR>".to_string()
-                    } else {
-                        display_size(entry.size)
-                    };
-                    ui.label(egui::RichText::new(size_text).size(11.0).weak());
-                });
+                if show_ext {
+                    row.col(|ui| {
+                        let label = if entry.is_dir {
+                            "<DIR>".to_string()
+                        } else {
+                            let ext = std::path::Path::new(&entry.name)
+                                .extension()
+                                .map(|e| e.to_string_lossy().to_lowercase())
+                                .unwrap_or_default();
+                            extension_label(&ext)
+                                .map(|s| s.to_string())
+                                .unwrap_or(ext.to_uppercase())
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(label).size(11.0).weak())
+                                .truncate(),
+                        );
+                    });
+                }
 
-                row.col(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format_modified(entry.modified))
-                                .size(11.0)
-                                .weak(),
-                        )
-                        .truncate(),
-                    );
-                });
+                if show_size {
+                    row.col(|ui| {
+                        let size_text = if entry.is_dir {
+                            "<DIR>".to_string()
+                        } else {
+                            display_size(entry.size)
+                        };
+                        ui.label(egui::RichText::new(size_text).size(11.0).weak());
+                    });
+                }
+
+                if show_modified {
+                    row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format_modified(entry.modified))
+                                    .size(11.0)
+                                    .weak(),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
             });
         });
 
     // Status bar
     ui.add_space(2.0);
-    ui.small(format!("{} items", entries.len()));
+    let entry_count = entries.len();
+    let _ = entries;
+    ui.small(format!("{entry_count} items"));
+
+    // Write back column visibility (may have changed via context menu).
+    state.columns = col_vis;
 
     action
 }

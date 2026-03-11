@@ -100,6 +100,15 @@ impl AppState {
         let scheme = color_scheme::resolve_theme(&user_config.colors.theme);
         let colors = ResolvedColors::from_scheme(&scheme);
 
+        let file_browser = {
+            let mut fb = FileBrowserState::default();
+            let cols = &persistent.layout.file_browser_columns;
+            fb.columns.ext = cols.ext;
+            fb.columns.size = cols.size;
+            fb.columns.modified = cols.modified;
+            fb
+        };
+
         Self {
             user_config,
             persistent,
@@ -112,7 +121,7 @@ impl AppState {
             sidebar_tab: SidebarTab::default(),
             new_connection_form: None,
             editing_server_addr: None,
-            file_browser: FileBrowserState::default(),
+            file_browser,
             show_left_sidebar,
             show_right_sidebar,
         }

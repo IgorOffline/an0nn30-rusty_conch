@@ -1771,6 +1771,18 @@ impl eframe::App for ConchApp {
         };
         self.handle_sidebar_action(sidebar_action);
 
+        // Sync file browser column visibility to persistent state.
+        {
+            let cols = &self.state.file_browser.columns;
+            let p = &mut self.state.persistent.layout.file_browser_columns;
+            if cols.ext != p.ext || cols.size != p.size || cols.modified != p.modified {
+                p.ext = cols.ext;
+                p.size = cols.size;
+                p.modified = cols.modified;
+                let _ = config::save_persistent_state(&self.state.persistent);
+            }
+        }
+
         // Right sidebar (session / server tree).
         let mut panel_action = SessionPanelAction::None;
         if self.state.show_right_sidebar {
