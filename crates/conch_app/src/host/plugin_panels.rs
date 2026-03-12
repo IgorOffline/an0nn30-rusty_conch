@@ -9,6 +9,46 @@ use conch_plugin_sdk::PanelLocation;
 use crate::app::ConchApp;
 use crate::ui_theme::UiTheme;
 
+/// Seed egui's internal panel state with a persisted width.
+/// Uses the available rect to construct a properly positioned panel rect.
+/// Only writes if no state exists yet (i.e., first frame this panel appears).
+fn seed_side_panel(ctx: &egui::Context, id: egui::Id, width: f32, is_right: bool) {
+    use egui::containers::panel::PanelState;
+    if PanelState::load(ctx, id).is_some() {
+        return;
+    }
+    let available = ctx.available_rect();
+    let rect = if is_right {
+        egui::Rect::from_min_max(
+            egui::pos2(available.max.x - width, available.min.y),
+            available.max,
+        )
+    } else {
+        egui::Rect::from_min_max(
+            available.min,
+            egui::pos2(available.min.x + width, available.max.y),
+        )
+    };
+    ctx.data_mut(|d| d.insert_persisted(id, PanelState { rect }));
+}
+
+/// Seed egui's internal panel state with a persisted height (bottom panels).
+fn seed_bottom_panel(ctx: &egui::Context, id: egui::Id, height: f32) {
+    use egui::containers::panel::PanelState;
+    if PanelState::load(ctx, id).is_some() {
+        return;
+    }
+    let available = ctx.available_rect();
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(available.min.x, available.max.y - height),
+        available.max,
+    );
+    ctx.data_mut(|d| d.insert_persisted(id, PanelState { rect }));
+}
+
+const DEFAULT_SIDE_WIDTH: f32 = 240.0;
+const DEFAULT_BOTTOM_HEIGHT: f32 = 180.0;
+
 /// Width of the vertical tab strip panel.
 const TAB_STRIP_WIDTH: f32 = 28.0;
 /// Width of the accent bar on the active tab.
@@ -90,6 +130,12 @@ impl ConchApp {
             let mut widget_events = Vec::new();
             let mut new_active: Option<u64> = None;
 
+            // Use persisted sizes when available, otherwise fall back to defaults.
+            let layout = &self.state.persistent.layout;
+            let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width } else { DEFAULT_SIDE_WIDTH };
+            let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width } else { DEFAULT_SIDE_WIDTH };
+            let bottom_h = if layout.bottom_panel_height > 0.0 { layout.bottom_panel_height } else { DEFAULT_BOTTOM_HEIGHT };
+
             match location {
                 PanelLocation::Left => {
                     // Tab strip as a separate narrow panel (outermost edge).
@@ -104,12 +150,18 @@ impl ConchApp {
                             location,
                         );
                     }
+                    // Seed persisted width into egui memory on first appearance.
+                    let eid = egui::Id::new(&panel_id);
+                    if left_w > 0.0 {
+                        seed_side_panel(ctx, eid, left_w, false);
+                    }
                     // Content panel.
-                    egui::SidePanel::left(egui::Id::new(&panel_id))
-                        .default_width(240.0)
+                    let resp = egui::SidePanel::left(eid)
+                        .default_width(left_w)
                         .resizable(true)
                         .frame(egui::Frame::NONE.fill(theme.surface).inner_margin(8.0))
                         .show(ctx, |ui| {
+                            ui.set_min_width(ui.available_width());
                             if !multi {
                                 ui.label(
                                     egui::RichText::new(&active_name)
@@ -127,6 +179,7 @@ impl ConchApp {
                                     &mut self.plugin_text_state,
                                 );
                         });
+                    self.state.persistent.layout.left_panel_width = resp.response.rect.width();
                 }
                 PanelLocation::Right => {
                     // Tab strip as a separate narrow panel (outermost edge).
@@ -141,12 +194,18 @@ impl ConchApp {
                             location,
                         );
                     }
+                    // Seed persisted width into egui memory on first appearance.
+                    let eid = egui::Id::new(&panel_id);
+                    if right_w > 0.0 {
+                        seed_side_panel(ctx, eid, right_w, true);
+                    }
                     // Content panel.
-                    egui::SidePanel::right(egui::Id::new(&panel_id))
-                        .default_width(240.0)
+                    let resp = egui::SidePanel::right(eid)
+                        .default_width(right_w)
                         .resizable(true)
                         .frame(egui::Frame::NONE.fill(theme.surface).inner_margin(8.0))
                         .show(ctx, |ui| {
+                            ui.set_min_width(ui.available_width());
                             if !multi {
                                 ui.label(
                                     egui::RichText::new(&active_name)
@@ -164,13 +223,20 @@ impl ConchApp {
                                     &mut self.plugin_text_state,
                                 );
                         });
+                    self.state.persistent.layout.right_panel_width = resp.response.rect.width();
                 }
                 PanelLocation::Bottom => {
-                    egui::TopBottomPanel::bottom(egui::Id::new(&panel_id))
-                        .default_height(180.0)
+                    // Seed persisted height into egui memory on first appearance.
+                    let eid = egui::Id::new(&panel_id);
+                    if bottom_h > 0.0 {
+                        seed_bottom_panel(ctx, eid, bottom_h);
+                    }
+                    let resp = egui::TopBottomPanel::bottom(eid)
+                        .default_height(bottom_h)
                         .resizable(true)
                         .frame(egui::Frame::NONE.fill(theme.surface).inner_margin(8.0))
                         .show(ctx, |ui| {
+                            ui.set_min_height(ui.available_height());
                             if multi {
                                 ui.horizontal(|ui| {
                                     for (handle, name) in &tab_data {
@@ -204,6 +270,7 @@ impl ConchApp {
                                 &mut self.plugin_text_state,
                             );
                         });
+                    self.state.persistent.layout.bottom_panel_height = resp.response.rect.height();
                 }
                 _ => {}
             }
