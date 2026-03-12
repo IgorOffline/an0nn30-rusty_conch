@@ -42,6 +42,7 @@ unsafe impl Send for SessionMeta {}
 /// first argument. The plugin is responsible for routing that to the correct
 /// internal session (e.g., an SSH channel).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SessionBackendVtable {
     /// Write input bytes (user keystrokes) to the session.
     pub write: extern "C" fn(handle: *mut c_void, buf: *const u8, len: usize),

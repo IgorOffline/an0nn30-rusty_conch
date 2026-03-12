@@ -56,7 +56,8 @@ pub struct PluginSessionBridge {
     /// VTE parser that feeds into the terminal handler.
     parser: alacritty_terminal::vte::ansi::Processor,
     /// Receives terminal events (Title, Bell, etc.) from the EventProxy.
-    pub event_rx: mpsc::UnboundedReceiver<TermEvent>,
+    /// Option so it can be taken out for the Session struct.
+    event_rx: Option<mpsc::UnboundedReceiver<TermEvent>>,
     /// Session handle assigned by the host.
     pub handle: SessionHandle,
     /// The boxed bridge pointer passed as `output_ctx`. We keep this to free
@@ -110,7 +111,7 @@ impl PluginSessionBridge {
         let mut bridge = Self {
             term,
             parser,
-            event_rx,
+            event_rx: Some(event_rx),
             handle,
             bridge_ptr: ctx_ptr,
         };
@@ -128,6 +129,11 @@ impl PluginSessionBridge {
         }
 
         (bridge, output_callback, ctx_ptr as *mut c_void)
+    }
+
+    /// Take the event receiver (can only be called once).
+    pub fn take_event_rx(&mut self) -> mpsc::UnboundedReceiver<TermEvent> {
+        self.event_rx.take().expect("event_rx already taken")
     }
 
     /// Resize the terminal grid.
@@ -289,7 +295,8 @@ mod tests {
         cb(ctx, data.as_ptr(), data.len());
 
         // The EventProxy should have forwarded a Title event.
-        match bridge.event_rx.try_recv() {
+        let mut event_rx = bridge.take_event_rx();
+        match event_rx.try_recv() {
             Ok(TermEvent::Title(title)) => {
                 assert_eq!(title, "My Title");
             }

@@ -121,15 +121,18 @@ enum ActiveDialog {
     Form {
         descriptor: FormDescriptor,
         values: HashMap<String, FormValue>,
+        submitted: bool,
         reply: oneshot::Sender<Option<String>>,
     },
     Confirm {
         msg: String,
+        confirmed: bool,
         reply: oneshot::Sender<bool>,
     },
     Prompt {
         msg: String,
         value: String,
+        submitted: bool,
         reply: oneshot::Sender<Option<String>>,
     },
     Alert {
@@ -171,15 +174,16 @@ impl DialogState {
             ActiveDialog::Form {
                 descriptor,
                 values,
+                submitted,
                 ..
             } => {
-                should_close = show_form_dialog(ctx, descriptor, values);
+                should_close = show_form_dialog(ctx, descriptor, values, submitted);
             }
-            ActiveDialog::Confirm { msg, .. } => {
-                should_close = show_confirm_dialog(ctx, msg);
+            ActiveDialog::Confirm { msg, confirmed, .. } => {
+                should_close = show_confirm_dialog(ctx, msg, confirmed);
             }
-            ActiveDialog::Prompt { msg, value, .. } => {
-                should_close = show_prompt_dialog(ctx, msg, value);
+            ActiveDialog::Prompt { msg, value, submitted, .. } => {
+                should_close = show_prompt_dialog(ctx, msg, value, submitted);
             }
             ActiveDialog::Alert { title, msg, .. } => {
                 should_close = show_alert_dialog(ctx, title, msg, false);
@@ -212,10 +216,11 @@ fn activate_request(request: DialogRequest) -> ActiveDialog {
             ActiveDialog::Form {
                 descriptor,
                 values,
+                submitted: false,
                 reply,
             }
         }
-        DialogRequest::Confirm { msg, reply } => ActiveDialog::Confirm { msg, reply },
+        DialogRequest::Confirm { msg, reply } => ActiveDialog::Confirm { msg, confirmed: false, reply },
         DialogRequest::Prompt {
             msg,
             default_value,
@@ -223,6 +228,7 @@ fn activate_request(request: DialogRequest) -> ActiveDialog {
         } => ActiveDialog::Prompt {
             msg,
             value: default_value,
+            submitted: false,
             reply,
         },
         DialogRequest::Alert { title, msg, reply } => ActiveDialog::Alert { title, msg, reply },
@@ -255,17 +261,24 @@ fn initial_form_values(descriptor: &FormDescriptor) -> HashMap<String, FormValue
 fn send_dialog_result(dialog: ActiveDialog) {
     match dialog {
         ActiveDialog::Form {
-            values, reply, ..
+            values, submitted, reply, ..
         } => {
-            let result = form_values_to_json(&values);
-            let _ = reply.send(Some(result));
+            if submitted {
+                let result = form_values_to_json(&values);
+                let _ = reply.send(Some(result));
+            } else {
+                let _ = reply.send(None);
+            }
         }
-        ActiveDialog::Confirm { reply, .. } => {
-            // Default to false for close/cancel.
-            let _ = reply.send(false);
+        ActiveDialog::Confirm { confirmed, reply, .. } => {
+            let _ = reply.send(confirmed);
         }
-        ActiveDialog::Prompt { value, reply, .. } => {
-            let _ = reply.send(Some(value));
+        ActiveDialog::Prompt { value, submitted, reply, .. } => {
+            if submitted {
+                let _ = reply.send(Some(value));
+            } else {
+                let _ = reply.send(None);
+            }
         }
         ActiveDialog::Alert { reply, .. } | ActiveDialog::Error { reply, .. } => {
             let _ = reply.send(());
@@ -295,9 +308,9 @@ fn show_form_dialog(
     ctx: &egui::Context,
     descriptor: &FormDescriptor,
     values: &mut HashMap<String, FormValue>,
+    submitted: &mut bool,
 ) -> bool {
     let mut close = false;
-    let mut submitted = false;
 
     egui::Window::new(&descriptor.title)
         .collapsible(false)
@@ -369,23 +382,19 @@ fn show_form_dialog(
                     close = true;
                 }
                 if ui.button("OK").clicked() {
-                    submitted = true;
+                    *submitted = true;
                 }
             });
         });
 
-    if submitted {
-        return true; // Close and send values.
-    }
-    if close {
-        // Cancel — send null result.
+    if *submitted {
         return true;
     }
-    false
+    close
 }
 
-fn show_confirm_dialog(ctx: &egui::Context, msg: &str) -> bool {
-    let mut result = false;
+fn show_confirm_dialog(ctx: &egui::Context, msg: &str, confirmed: &mut bool) -> bool {
+    let mut close = false;
 
     egui::Window::new("Confirm")
         .collapsible(false)
@@ -396,18 +405,20 @@ fn show_confirm_dialog(ctx: &egui::Context, msg: &str) -> bool {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("No").clicked() {
-                    result = true;
+                    *confirmed = false;
+                    close = true;
                 }
                 if ui.button("Yes").clicked() {
-                    result = true;
+                    *confirmed = true;
+                    close = true;
                 }
             });
         });
 
-    result
+    close
 }
 
-fn show_prompt_dialog(ctx: &egui::Context, msg: &str, value: &mut String) -> bool {
+fn show_prompt_dialog(ctx: &egui::Context, msg: &str, value: &mut String, submitted: &mut bool) -> bool {
     let mut close = false;
 
     egui::Window::new("Input")
@@ -418,6 +429,7 @@ fn show_prompt_dialog(ctx: &egui::Context, msg: &str, value: &mut String) -> boo
             ui.label(msg);
             let response = ui.text_edit_singleline(value);
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                *submitted = true;
                 close = true;
             }
             ui.add_space(8.0);
@@ -426,6 +438,7 @@ fn show_prompt_dialog(ctx: &egui::Context, msg: &str, value: &mut String) -> boo
                     close = true;
                 }
                 if ui.button("OK").clicked() {
+                    *submitted = true;
                     close = true;
                 }
             });

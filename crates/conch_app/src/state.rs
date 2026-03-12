@@ -1,6 +1,7 @@
 //! Application state: sessions, tabs, and UI state.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use alacritty_terminal::event::Event as TermEvent;
@@ -8,42 +9,101 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 use conch_core::color_scheme;
 use conch_core::config::{PersistentState, UserConfig};
+use conch_plugin_sdk::SessionBackendVtable;
 use conch_pty::EventProxy;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::host::session_bridge::PluginSessionBridge;
 use crate::terminal::color::ResolvedColors;
 use crate::ui_theme::UiTheme;
 
-/// A single terminal session backed by a local PTY.
+/// The underlying backend for a terminal session.
+pub enum SessionBackend {
+    /// A local PTY process (shell).
+    Local(conch_pty::LocalSession),
+    /// A plugin-provided session (e.g. SSH).
+    Plugin {
+        bridge: PluginSessionBridge,
+        vtable: SessionBackendVtable,
+        backend_handle: *mut c_void,
+    },
+}
+
+// SAFETY: The backend_handle raw pointer is only used through the vtable
+// callbacks which are thread-safe by contract with the plugin.
+unsafe impl Send for SessionBackend {}
+
+/// A single terminal session.
 pub struct Session {
     pub id: Uuid,
     pub title: String,
     /// User-set custom title (overrides `title` for display when `Some`).
     pub custom_title: Option<String>,
-    pub pty: conch_pty::LocalSession,
+    pub backend: SessionBackend,
     pub event_rx: mpsc::UnboundedReceiver<TermEvent>,
 }
 
 impl Session {
     /// Get the terminal state.
     pub fn term(&self) -> &Arc<FairMutex<Term<EventProxy>>> {
-        &self.pty.term
+        match &self.backend {
+            SessionBackend::Local(local) => &local.term,
+            SessionBackend::Plugin { bridge, .. } => &bridge.term,
+        }
     }
 
-    /// Send raw bytes to the PTY.
+    /// Send raw bytes to the session.
     pub fn write(&self, data: &[u8]) {
-        self.pty.write(data);
+        match &self.backend {
+            SessionBackend::Local(local) => local.write(data),
+            SessionBackend::Plugin { vtable, backend_handle, .. } => {
+                (vtable.write)(*backend_handle, data.as_ptr(), data.len());
+            }
+        }
     }
 
-    /// Resize the PTY.
+    /// Resize the session.
     pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
-        self.pty.resize(cols, rows, cell_width, cell_height);
+        match &self.backend {
+            SessionBackend::Local(local) => local.resize(cols, rows, cell_width, cell_height),
+            SessionBackend::Plugin { vtable, backend_handle, .. } => {
+                (vtable.resize)(*backend_handle, cols, rows);
+            }
+        }
+    }
+
+    /// Shut down the session backend.
+    pub fn shutdown(&self) {
+        match &self.backend {
+            SessionBackend::Local(local) => local.shutdown(),
+            SessionBackend::Plugin { vtable, backend_handle, .. } => {
+                (vtable.shutdown)(*backend_handle);
+            }
+        }
+    }
+
+    /// Get the child PID if this is a local session.
+    pub fn child_pid(&self) -> Option<u32> {
+        match &self.backend {
+            SessionBackend::Local(local) => Some(local.child_pid()),
+            SessionBackend::Plugin { .. } => None,
+        }
     }
 
     /// Display title (custom overrides auto-detected).
     pub fn display_title(&self) -> &str {
         self.custom_title.as_deref().unwrap_or(&self.title)
+    }
+}
+
+impl Drop for SessionBackend {
+    fn drop(&mut self) {
+        if let SessionBackend::Plugin { vtable, backend_handle, .. } = self {
+            if !backend_handle.is_null() {
+                (vtable.drop)(*backend_handle);
+            }
+        }
     }
 }
 

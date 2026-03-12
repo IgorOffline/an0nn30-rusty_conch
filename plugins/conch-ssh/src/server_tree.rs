@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use conch_plugin_sdk::widgets::*;
 
 use crate::config::SshConfig;
-use crate::session_backend::SshSessionBackend;
+use crate::session_backend::SshBackendState;
 
 /// Build the full widget tree for the SSH Sessions panel.
 pub fn build_server_tree(
     config: &SshConfig,
-    sessions: &HashMap<u64, SshSessionBackend>,
+    sessions: &HashMap<u64, Box<SshBackendState>>,
     selected: Option<&str>,
 ) -> Vec<Widget> {
     let mut widgets = Vec::new();
@@ -120,7 +120,7 @@ pub fn build_server_tree(
 /// Convert a ServerEntry to a tree node, with "connected" badge if active.
 fn server_to_tree_node(
     entry: &crate::config::ServerEntry,
-    sessions: &HashMap<u64, SshSessionBackend>,
+    sessions: &HashMap<u64, Box<SshBackendState>>,
 ) -> TreeNode {
     let is_connected = sessions.values().any(|s| s.host() == entry.host);
 
@@ -188,7 +188,7 @@ mod tests {
         }
     }
 
-    fn empty_sessions() -> HashMap<u64, SshSessionBackend> {
+    fn empty_sessions() -> HashMap<u64, Box<SshBackendState>> {
         HashMap::new()
     }
 
@@ -311,7 +311,7 @@ mod tests {
     fn connected_server_shows_badge_and_disables_connect() {
         let cfg = make_config_with_folder();
         let entry = &cfg.ungrouped[0];
-        let backend = SshSessionBackend::new_stub(entry);
+        let backend = SshBackendState::new_preallocated(entry.host.clone(), entry.user.clone());
         let mut sessions = HashMap::new();
         sessions.insert(1, backend);
 
@@ -331,7 +331,7 @@ mod tests {
     fn active_sessions_appends_summary_widgets() {
         let cfg = make_config_with_folder();
         let entry = &cfg.ungrouped[0];
-        let backend = SshSessionBackend::new_stub(entry);
+        let backend = SshBackendState::new_preallocated(entry.host.clone(), entry.user.clone());
         let mut sessions = HashMap::new();
         sessions.insert(42, backend);
 

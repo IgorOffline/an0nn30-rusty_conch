@@ -13,7 +13,8 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 use crate::extra_window::ExtraWindow;
-use crate::host::bridge::{self, PanelRegistry};
+use crate::host::bridge::{self, PanelRegistry, SessionRegistry};
+use crate::host::dialogs::{self, DialogState};
 use crate::host::plugin_manager_ui::PluginManagerState;
 use crate::input::ResolvedShortcuts;
 use crate::ipc::{IpcListener, IpcMessage};
@@ -74,6 +75,12 @@ pub struct ConchApp {
     pub(crate) extra_windows: Vec<ExtraWindow>,
     pub(crate) next_viewport_num: u32,
 
+    // Host dialogs (plugin → UI thread).
+    pub(crate) dialog_state: DialogState,
+
+    // Plugin session registry (pending open/close from plugins).
+    pub(crate) session_registry: Arc<Mutex<SessionRegistry>>,
+
     // System.
     pub(crate) ipc_listener: Option<IpcListener>,
     pub(crate) file_watcher: Option<FileWatcher>,
@@ -101,7 +108,14 @@ impl ConchApp {
         // Plugin infrastructure.
         let plugin_bus = Arc::new(PluginBus::new());
         let panel_registry = Arc::new(Mutex::new(PanelRegistry::new()));
-        bridge::init_bridge(Arc::clone(&plugin_bus), Arc::clone(&panel_registry));
+        let (dialog_tx, dialog_state) = dialogs::dialog_channel();
+        let session_registry = Arc::new(Mutex::new(SessionRegistry::new()));
+        bridge::init_bridge(
+            Arc::clone(&plugin_bus),
+            Arc::clone(&panel_registry),
+            dialog_tx,
+            Arc::clone(&session_registry),
+        );
         let host_api = bridge::build_host_api();
         let native_plugin_mgr = NativePluginManager::new(Arc::clone(&plugin_bus), host_api);
 
@@ -136,6 +150,8 @@ impl ConchApp {
             active_panel_tab: HashMap::new(),
             extra_windows: Vec::new(),
             next_viewport_num: 1,
+            dialog_state,
+            session_registry,
             ipc_listener,
             file_watcher,
             has_ever_had_session: false,
@@ -166,7 +182,7 @@ impl ConchApp {
     pub(crate) fn spawn_extra_window(&mut self) {
         let cwd = self.state
             .active_session()
-            .map(|s| s.pty.child_pid())
+            .and_then(|s| s.child_pid())
             .and_then(conch_pty::get_cwd_of_pid);
         let Some((_, session)) = create_local_session(&self.state.user_config, cwd) else {
             return;
@@ -263,6 +279,57 @@ impl ConchApp {
             }
         }
     }
+
+    /// Drain pending session open/close requests from plugins.
+    fn drain_pending_sessions(&mut self) {
+        let mut registry = self.session_registry.lock();
+        let pending: Vec<_> = registry.pending_open.drain(..).collect();
+        let closing: Vec<_> = registry.pending_close.drain(..).collect();
+        drop(registry);
+
+        // Process session opens.
+        for mut ps in pending {
+            let id = uuid::Uuid::new_v4();
+            let event_rx = ps.bridge.take_event_rx();
+            let session = crate::state::Session {
+                id,
+                title: ps.title,
+                custom_title: None,
+                backend: crate::state::SessionBackend::Plugin {
+                    bridge: ps.bridge,
+                    vtable: ps.vtable,
+                    backend_handle: ps.backend_handle,
+                },
+                event_rx,
+            };
+
+            if self.last_cols > 0 && self.last_rows > 0 {
+                session.resize(
+                    self.last_cols, self.last_rows,
+                    self.cell_width as u16, self.cell_height as u16,
+                );
+            }
+            self.state.sessions.insert(id, session);
+            self.state.tab_order.push(id);
+            self.state.active_tab = Some(id);
+            self.has_ever_had_session = true;
+        }
+
+        // Process session closes.
+        for handle in closing {
+            let id = self.state.sessions.iter().find_map(|(id, s)| {
+                if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
+                    if bridge.handle == handle {
+                        return Some(*id);
+                    }
+                }
+                None
+            });
+            if let Some(id) = id {
+                self.remove_session(id);
+            }
+        }
+    }
 }
 
 impl eframe::App for ConchApp {
@@ -292,6 +359,10 @@ impl eframe::App for ConchApp {
         self.handle_file_changes(ctx);
         self.handle_ipc();
         self.poll_plugin_renders();
+        self.drain_pending_sessions();
+
+        // Show plugin dialogs (form, confirm, prompt, alert, error).
+        self.dialog_state.show(ctx);
 
         // Open initial tab on first frame, close app when all sessions have exited.
         if self.state.sessions.is_empty() {
