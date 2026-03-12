@@ -6,11 +6,16 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct PersistentState {
     pub layout: LayoutConfig,
+    /// Names of plugins that were loaded when the app last exited.
+    pub loaded_plugins: Vec<String>,
 }
 
 impl Default for PersistentState {
     fn default() -> Self {
-        Self { layout: LayoutConfig::default() }
+        Self {
+            layout: LayoutConfig::default(),
+            loaded_plugins: Vec::new(),
+        }
     }
 }
 
