@@ -389,12 +389,10 @@ fn render_widget(
             );
         }
 
-        Widget::TreeView { .. } => {
-            ui.label(
-                RichText::new("[TreeView]")
-                    .size(theme.font_small)
-                    .color(theme.text_muted),
-            );
+        Widget::TreeView { id, nodes, selected } => {
+            for node in nodes {
+                render_tree_node(ui, id, node, selected.as_deref(), 0, theme, text_input_state, events);
+            }
         }
 
         Widget::PathBar { segments, .. } => {
@@ -430,6 +428,97 @@ fn render_widget(
         Widget::ContextMenu { child, .. } => {
             // MVP: just render the child, ignore context menu.
             render_widget(ui, child, theme, text_input_state, events);
+        }
+    }
+}
+
+/// Render a single tree node (recursive for children).
+fn render_tree_node(
+    ui: &mut egui::Ui,
+    tree_id: &str,
+    node: &conch_plugin_sdk::widgets::TreeNode,
+    selected: Option<&str>,
+    depth: usize,
+    theme: &UiTheme,
+    text_input_state: &mut HashMap<String, String>,
+    events: &mut Vec<WidgetEvent>,
+) {
+    let indent = depth as f32 * 16.0;
+    let is_selected = selected == Some(node.id.as_str());
+    let has_children = !node.children.is_empty();
+    let is_expanded = node.expanded.unwrap_or(false);
+
+    // Render the node row.
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+
+        // Expand/collapse toggle for nodes with children.
+        if has_children {
+            let arrow = if is_expanded { "▼" } else { "▶" };
+            if ui.small_button(arrow).clicked() {
+                events.push(WidgetEvent::TreeToggle {
+                    id: tree_id.to_string(),
+                    node_id: node.id.clone(),
+                    expanded: !is_expanded,
+                });
+            }
+        } else {
+            // Spacer to align leaf nodes with parent nodes.
+            ui.add_space(18.0);
+        }
+
+        // Node label — selectable, with highlight when selected.
+        let label_text = RichText::new(&node.label)
+            .size(theme.font_normal)
+            .color(if is_selected { theme.accent } else { theme.text });
+
+        let response = ui.selectable_label(is_selected, label_text);
+        if response.clicked() {
+            events.push(WidgetEvent::TreeSelect {
+                id: tree_id.to_string(),
+                node_id: node.id.clone(),
+            });
+        }
+        if response.double_clicked() {
+            events.push(WidgetEvent::TreeActivate {
+                id: tree_id.to_string(),
+                node_id: node.id.clone(),
+            });
+        }
+
+        // Badge (e.g., "connected").
+        if let Some(badge) = &node.badge {
+            ui.label(
+                RichText::new(badge)
+                    .size(theme.font_small)
+                    .strong()
+                    .color(theme.accent),
+            );
+        }
+
+        // Context menu on right-click.
+        if let Some(menu_items) = &node.context_menu {
+            response.context_menu(|ui| {
+                for item in menu_items {
+                    let enabled = item.enabled.unwrap_or(true);
+                    let btn = egui::Button::new(&item.label);
+                    if ui.add_enabled(enabled, btn).clicked() {
+                        events.push(WidgetEvent::TreeContextMenu {
+                            id: tree_id.to_string(),
+                            node_id: node.id.clone(),
+                            action: item.id.clone(),
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+    });
+
+    // Render children if expanded.
+    if has_children && is_expanded {
+        for child in &node.children {
+            render_tree_node(ui, tree_id, child, selected, depth + 1, theme, text_input_state, events);
         }
     }
 }

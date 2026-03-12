@@ -67,7 +67,12 @@ impl Session {
     pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16) {
         match &self.backend {
             SessionBackend::Local(local) => local.resize(cols, rows, cell_width, cell_height),
-            SessionBackend::Plugin { vtable, backend_handle, .. } => {
+            SessionBackend::Plugin { bridge, vtable, backend_handle } => {
+                // Resize the terminal emulator grid so rendered output matches.
+                if let Some(mut term) = bridge.term.try_lock_unfair() {
+                    term.resize(crate::host::session_bridge::TermSize::new(cols, rows));
+                }
+                // Resize the remote PTY (e.g. SSH channel window-change).
                 (vtable.resize)(*backend_handle, cols, rows);
             }
         }
@@ -97,15 +102,9 @@ impl Session {
     }
 }
 
-impl Drop for SessionBackend {
-    fn drop(&mut self) {
-        if let SessionBackend::Plugin { vtable, backend_handle, .. } = self {
-            if !backend_handle.is_null() {
-                (vtable.drop)(*backend_handle);
-            }
-        }
-    }
-}
+// NOTE: No Drop impl — the plugin owns the backend state (via its own
+// HashMap<SessionHandle, Box<SshBackendState>>). The host only borrows
+// the backend_handle pointer. Calling vtable.drop here would double-free.
 
 /// The full application state.
 pub struct AppState {

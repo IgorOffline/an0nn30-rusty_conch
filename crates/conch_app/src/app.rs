@@ -364,7 +364,8 @@ impl eframe::App for ConchApp {
         // Show plugin dialogs (form, confirm, prompt, alert, error).
         self.dialog_state.show(ctx);
 
-        // Open initial tab on first frame, close app when all sessions have exited.
+        // Close the app when the last tab is closed. On first launch (no
+        // session yet), open an initial local shell tab instead.
         if self.state.sessions.is_empty() {
             if self.has_ever_had_session {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -589,8 +590,9 @@ impl eframe::App for ConchApp {
             self.resize_sessions(cols, rows);
         }
 
-        // Keyboard handling — always forward to PTY in Phase 1.
-        self.handle_keyboard(ctx, true);
+        // Keyboard handling — forward to PTY unless a dialog is consuming input.
+        let forward_to_pty = !self.dialog_state.is_active();
+        self.handle_keyboard(ctx, forward_to_pty);
 
         // Quit handling.
         if self.quit_requested {

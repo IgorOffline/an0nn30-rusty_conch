@@ -572,6 +572,8 @@ fn do_ssh_connect_sync(
         open_result.output_cb,
         open_result.output_ctx,
         rt.handle(),
+        session_handle,
+        api.close_session,
     );
 
     Ok((session_handle, backend_state))

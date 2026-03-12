@@ -458,7 +458,7 @@ pub enum WidgetEvent {
 ///
 /// This wraps both widget events and system events (IPC, lifecycle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginEvent {
     /// A widget interaction in one of the plugin's panels.
     Widget(WidgetEvent),
@@ -1057,6 +1057,20 @@ mod tests {
     }
 
     // -- PluginEvent serde roundtrips --
+
+    #[test]
+    fn plugin_event_widget_roundtrip() {
+        let e = PluginEvent::Widget(WidgetEvent::ButtonClick { id: "add_server".into() });
+        let json = serde_json::to_string(&e).unwrap();
+        // Verify no "type" collision — "kind" tags the outer, "type" tags the inner.
+        assert!(json.contains("\"kind\":\"widget\""), "expected kind tag, got: {json}");
+        assert!(json.contains("\"type\":\"button_click\""), "expected type tag, got: {json}");
+        if let PluginEvent::Widget(WidgetEvent::ButtonClick { id }) = roundtrip_plugin_event(&e) {
+            assert_eq!(id, "add_server");
+        } else {
+            panic!("Wrong variant after roundtrip");
+        }
+    }
 
     #[test]
     fn plugin_event_menu_action() {

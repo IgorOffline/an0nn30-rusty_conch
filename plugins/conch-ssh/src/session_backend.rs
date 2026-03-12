@@ -3,10 +3,13 @@
 
 use std::ffi::c_void;
 
-use conch_plugin_sdk::{OutputCallback, SessionBackendVtable};
+use conch_plugin_sdk::{OutputCallback, SessionBackendVtable, SessionHandle};
 use russh::ChannelMsg;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
+
+/// Function pointer type for `host_close_session`.
+type CloseSessionFn = extern "C" fn(SessionHandle);
 
 /// Send-safe wrapper for the output callback + context pointer pair.
 /// SAFETY: The output callback and context are thread-safe by contract with
@@ -68,12 +71,14 @@ impl SshBackendState {
         output_cb: OutputCallback,
         output_ctx: *mut c_void,
         rt: &TokioHandle,
+        session_handle: SessionHandle,
+        close_session: CloseSessionFn,
     ) {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         self.input_tx = Some(input_tx);
 
         let sink = OutputSink::new(output_cb, output_ctx);
-        rt.spawn(channel_loop(channel, sink, input_rx));
+        rt.spawn(channel_loop(channel, sink, input_rx, session_handle, close_session));
     }
 
     pub fn host(&self) -> &str {
@@ -103,7 +108,10 @@ async fn channel_loop(
     mut channel: russh::Channel<russh::client::Msg>,
     sink: OutputSink,
     mut input_rx: mpsc::UnboundedReceiver<BackendMsg>,
+    session_handle: SessionHandle,
+    close_session: CloseSessionFn,
 ) {
+    let mut initiated_by_host = false;
     loop {
         tokio::select! {
             // Read from SSH channel → push to host terminal.
@@ -142,6 +150,7 @@ async fn channel_loop(
                         }
                     }
                     Some(BackendMsg::Shutdown) | None => {
+                        initiated_by_host = true;
                         let _ = channel.eof().await;
                         let _ = channel.close().await;
                         break;
@@ -149,6 +158,13 @@ async fn channel_loop(
                 }
             }
         }
+    }
+
+    // If the channel closed on its own (e.g. user typed "exit"), tell the host
+    // to remove the tab. Skip if the host initiated the shutdown.
+    if !initiated_by_host {
+        log::info!("SSH channel ended, requesting host close session {:?}", session_handle);
+        close_session(session_handle);
     }
 }
 
