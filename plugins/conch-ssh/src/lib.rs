@@ -555,40 +555,100 @@ impl SshPlugin {
     // Service queries
     // -----------------------------------------------------------------------
 
-    fn handle_query(&self, method: &str, args: serde_json::Value) -> serde_json::Value {
+    fn handle_query(&mut self, method: &str, args: serde_json::Value) -> serde_json::Value {
         match method {
             "get_sessions" => {
                 let sessions: Vec<serde_json::Value> = self.sessions.iter().map(|(id, backend)| {
                     serde_json::json!({
                         "session_id": id,
                         "host": backend.host(),
+                        "port": backend.port(),
                         "user": backend.user(),
+                        "status": if backend.connected { "connected" } else { "connecting" },
                     })
                 }).collect();
                 serde_json::json!(sessions)
             }
             "exec" => {
                 let session_id = args["session_id"].as_u64().unwrap_or(0);
-                let command = args["command"].as_str().unwrap_or("");
-                if self.sessions.contains_key(&session_id) {
-                    // TODO: Open a separate SSH exec channel for this.
-                    serde_json::json!({
-                        "status": "ok",
-                        "stdout": format!("(not yet implemented) executed: {command}"),
-                        "exit_code": 0,
-                    })
-                } else {
-                    serde_json::json!({ "status": "error", "message": "session not found" })
+                let command = args["command"].as_str().unwrap_or("").to_string();
+                match self.sessions.get(&session_id) {
+                    Some(backend) if backend.connected => {
+                        match self.rt.block_on(backend.exec(&command)) {
+                            Ok((stdout, stderr, exit_code)) => {
+                                serde_json::json!({
+                                    "status": "ok",
+                                    "stdout": stdout,
+                                    "stderr": stderr,
+                                    "exit_code": exit_code,
+                                })
+                            }
+                            Err(e) => {
+                                serde_json::json!({ "status": "error", "message": e })
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        serde_json::json!({ "status": "error", "message": "session not connected" })
+                    }
+                    None => {
+                        serde_json::json!({ "status": "error", "message": "session not found" })
+                    }
                 }
             }
             "connect" => {
-                let host = args["host"].as_str().unwrap_or("");
-                serde_json::json!({ "status": "ok", "host": host })
+                // Support connecting by server_name (label) or by explicit host/user/port.
+                if let Some(server_name) = args["server_name"].as_str() {
+                    if let Some(server) = self.config.find_server_by_label(server_name).cloned() {
+                        self.connect_to_server(&server.id);
+                        // Find the session that was just created for this server.
+                        let session_id = self.sessions.keys().max().copied().unwrap_or(0);
+                        serde_json::json!({ "status": "ok", "session_id": session_id })
+                    } else {
+                        serde_json::json!({ "status": "error", "message": "server not found" })
+                    }
+                } else {
+                    let host = args["host"].as_str().unwrap_or("").to_string();
+                    let port = args["port"].as_u64().unwrap_or(22) as u16;
+                    let user = args["user"].as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "root".to_string()));
+                    let auth_method = args["auth_method"].as_str().unwrap_or("key").to_string();
+
+                    if host.is_empty() {
+                        return serde_json::json!({ "status": "error", "message": "host is required" });
+                    }
+
+                    let entry = ServerEntry {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        label: format!("{user}@{host}:{port}"),
+                        host,
+                        port,
+                        user,
+                        auth_method,
+                        key_path: args["key_path"].as_str().map(String::from),
+                        proxy_command: None,
+                        proxy_jump: None,
+                    };
+
+                    let server_id = entry.id.clone();
+                    self.config.add_server(entry);
+                    self.connect_to_server(&server_id);
+                    let session_id = self.sessions.keys().max().copied().unwrap_or(0);
+                    serde_json::json!({ "status": "ok", "session_id": session_id })
+                }
             }
             "get_handle" => {
                 let session_id = args["session_id"].as_u64().unwrap_or(0);
-                if self.sessions.contains_key(&session_id) {
-                    serde_json::json!({ "status": "ok", "session_id": session_id })
+                if let Some(backend) = self.sessions.get(&session_id) {
+                    serde_json::json!({
+                        "status": "ok",
+                        "session_id": session_id,
+                        "host": backend.host(),
+                        "port": backend.port(),
+                        "user": backend.user(),
+                        "connected": backend.connected,
+                    })
                 } else {
                     serde_json::json!({ "status": "error", "message": "session not found" })
                 }
@@ -604,7 +664,7 @@ impl SshPlugin {
 
 /// The russh client handler — implements host key verification via the host
 /// dialog API, with `~/.ssh/known_hosts` support.
-struct SshHandler {
+pub(crate) struct SshHandler {
     api: &'static HostApi,
     host: String,
     port: u16,
@@ -689,6 +749,7 @@ fn do_ssh_connect_sync(
     let mut backend_state = SshBackendState::new_preallocated(
         server.host.clone(),
         server.user.clone(),
+        server.port,
     );
 
     let title = CString::new(format!("{}@{}", server.user, server.host)).unwrap();
@@ -786,14 +847,15 @@ fn do_ssh_connect_sync(
             .map_err(|e| format!("Shell request failed: {e}"))?;
 
         host_log(api, 2, &format!("SSH session ready for {}@{}", server.user, server.host));
-        Ok::<_, String>(channel)
+        Ok::<_, String>((channel, session))
     });
 
     match channel_result {
-        Ok(channel) => {
+        Ok((channel, ssh_handle)) => {
             // Phase 3: Activate — wire up the channel and output callback.
             backend_state.activate(
                 channel,
+                ssh_handle,
                 open_result.output_cb,
                 open_result.output_ctx,
                 rt.handle(),
