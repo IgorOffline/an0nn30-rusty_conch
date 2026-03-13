@@ -905,6 +905,8 @@ pub(crate) fn show_connecting_screen(
                     let pw_resp = ui.add(
                         egui::TextEdit::singleline(&mut prompt.password_buf)
                             .password(true)
+                            .margin(egui::Margin::symmetric(8, 6))
+                            .font(egui::TextStyle::Body)
                             .desired_width(300.0)
                             .hint_text("Password"),
                     );
