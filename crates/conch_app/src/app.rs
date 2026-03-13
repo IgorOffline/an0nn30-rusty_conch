@@ -309,23 +309,46 @@ impl ConchApp {
                 status: conch_plugin_sdk::SessionStatus::Connecting,
                 status_detail: None,
                 connect_started: Some(std::time::Instant::now()),
+                prompt: None,
             };
 
-            if self.last_cols > 0 && self.last_rows > 0 {
-                session.resize(
-                    self.last_cols, self.last_rows,
-                    self.cell_width as u16, self.cell_height as u16,
-                );
+            // Route session to the window that triggered the interaction.
+            let target = ps.target_viewport;
+            let routed = target.and_then(|vp| {
+                if vp == egui::ViewportId::ROOT {
+                    return None; // main window — fall through
+                }
+                self.extra_windows.iter_mut().find(|w| w.viewport_id == vp)
+            });
+
+            if let Some(window) = routed {
+                if window.last_cols > 0 && window.last_rows > 0 {
+                    session.resize(
+                        window.last_cols, window.last_rows,
+                        window.cell_width as u16, window.cell_height as u16,
+                    );
+                }
+                window.sessions.insert(id, session);
+                window.tab_order.push(id);
+                window.active_tab = Some(id);
+            } else {
+                if self.last_cols > 0 && self.last_rows > 0 {
+                    session.resize(
+                        self.last_cols, self.last_rows,
+                        self.cell_width as u16, self.cell_height as u16,
+                    );
+                }
+                self.state.sessions.insert(id, session);
+                self.state.tab_order.push(id);
+                self.state.active_tab = Some(id);
+                self.has_ever_had_session = true;
             }
-            self.state.sessions.insert(id, session);
-            self.state.tab_order.push(id);
-            self.state.active_tab = Some(id);
-            self.has_ever_had_session = true;
         }
 
-        // Process session closes.
+        // Process session closes (search main window and extra windows).
         for handle in closing {
-            let id = self.state.sessions.iter().find_map(|(id, s)| {
+            // Try main window first.
+            let main_id = self.state.sessions.iter().find_map(|(id, s)| {
                 if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
                     if bridge.handle == handle {
                         return Some(*id);
@@ -333,14 +356,76 @@ impl ConchApp {
                 }
                 None
             });
-            if let Some(id) = id {
+            if let Some(id) = main_id {
                 self.remove_session(id);
+            } else {
+                // Search extra windows.
+                for window in &mut self.extra_windows {
+                    let ew_id = window.sessions.iter().find_map(|(id, s)| {
+                        if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
+                            if bridge.handle == handle {
+                                return Some(*id);
+                            }
+                        }
+                        None
+                    });
+                    if let Some(id) = ew_id {
+                        if let Some(session) = window.sessions.remove(&id) {
+                            session.shutdown();
+                        }
+                        window.tab_order.retain(|&tab_id| tab_id != id);
+                        if window.active_tab == Some(id) {
+                            window.active_tab = window.tab_order.last().copied();
+                        }
+                        break;
+                    }
+                }
             }
         }
 
-        // Process status updates.
+        // Process session prompts (attach to the correct session).
+        let prompts: Vec<_> = {
+            let mut reg = self.session_registry.lock();
+            reg.pending_prompts.drain(..).collect()
+        };
+        for prompt_req in prompts {
+            let handle = prompt_req.handle;
+            let prompt_state = crate::state::SessionPrompt {
+                prompt_type: prompt_req.prompt_type,
+                message: prompt_req.message,
+                detail: prompt_req.detail,
+                password_buf: String::new(),
+                focus_password: true,
+                reply: Some(prompt_req.reply),
+            };
+
+            // Find the session in main window or extra windows.
+            let main_match = self.state.sessions.values_mut().find(|s| {
+                matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
+            });
+            if let Some(session) = main_match {
+                session.prompt = Some(prompt_state);
+            } else {
+                let mut placed = false;
+                for window in &mut self.extra_windows {
+                    let ew_match = window.sessions.values_mut().find(|s| {
+                        matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
+                    });
+                    if let Some(session) = ew_match {
+                        session.prompt = Some(prompt_state);
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed {
+                    log::warn!("session_prompt: no session found for handle {:?}", handle);
+                }
+            }
+        }
+
+        // Process status updates (search main window and extra windows).
         for update in status_updates {
-            let id = self.state.sessions.iter().find_map(|(id, s)| {
+            let main_id = self.state.sessions.iter().find_map(|(id, s)| {
                 if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
                     if bridge.handle == update.handle {
                         return Some(*id);
@@ -348,10 +433,29 @@ impl ConchApp {
                 }
                 None
             });
-            if let Some(id) = id {
+            if let Some(id) = main_id {
                 if let Some(session) = self.state.sessions.get_mut(&id) {
                     session.status = update.status;
                     session.status_detail = update.detail;
+                }
+            } else {
+                // Search extra windows.
+                for window in &mut self.extra_windows {
+                    let ew_id = window.sessions.iter().find_map(|(id, s)| {
+                        if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
+                            if bridge.handle == update.handle {
+                                return Some(*id);
+                            }
+                        }
+                        None
+                    });
+                    if let Some(id) = ew_id {
+                        if let Some(session) = window.sessions.get_mut(&id) {
+                            session.status = update.status;
+                            session.status_detail = update.detail;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -388,7 +492,7 @@ impl eframe::App for ConchApp {
         self.drain_pending_sessions();
 
         // Show plugin dialogs (form, confirm, prompt, alert, error).
-        self.dialog_state.show(ctx);
+        self.dialog_state.show(ctx, egui::ViewportId::ROOT);
 
         // Determine whether the main window should hide or close.
         let mut main_visible = !self.state.sessions.is_empty();
@@ -536,10 +640,40 @@ impl eframe::App for ConchApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(bg_color))
             .show(ctx, |ui| {
-                if let Some(session) = self.state.active_tab.and_then(|id| self.state.sessions.get(&id)) {
+                if let Some(session) = self.state.active_tab.and_then(|id| self.state.sessions.get_mut(&id)) {
                     match session.status {
                         conch_plugin_sdk::SessionStatus::Connecting => {
-                            show_connecting_screen(ui, &session.title, session.status_detail.as_deref(), session.connect_started);
+                            let action = show_connecting_screen(
+                                ui,
+                                &session.title,
+                                session.status_detail.as_deref(),
+                                session.connect_started,
+                                session.prompt.as_mut(),
+                            );
+                            match action {
+                                ConnectingAction::Accept => {
+                                    if let Some(prompt) = session.prompt.take() {
+                                        if let Some(reply) = prompt.reply {
+                                            let _ = reply.send(Some("true".to_string()));
+                                        }
+                                    }
+                                }
+                                ConnectingAction::Reject => {
+                                    if let Some(prompt) = session.prompt.take() {
+                                        if let Some(reply) = prompt.reply {
+                                            let _ = reply.send(None);
+                                        }
+                                    }
+                                }
+                                ConnectingAction::SubmitPassword(pw) => {
+                                    if let Some(prompt) = session.prompt.take() {
+                                        if let Some(reply) = prompt.reply {
+                                            let _ = reply.send(Some(pw));
+                                        }
+                                    }
+                                }
+                                ConnectingAction::None => {}
+                            }
                         }
                         conch_plugin_sdk::SessionStatus::Error => {
                             let detail = session.status_detail.clone().unwrap_or_default();
@@ -613,7 +747,7 @@ impl eframe::App for ConchApp {
         }
 
         // Keyboard handling — forward to PTY unless a dialog is consuming input.
-        let forward_to_pty = !self.dialog_state.is_active();
+        let forward_to_pty = !self.dialog_state.is_active_for(egui::ViewportId::ROOT);
         self.handle_keyboard(ctx, forward_to_pty);
 
         // Quit handling.
@@ -646,13 +780,28 @@ impl eframe::App for ConchApp {
 // Connecting / Error screens for plugin sessions
 // ---------------------------------------------------------------------------
 
-/// Render a "Connecting to..." screen with a bouncing progress indicator.
-fn show_connecting_screen(
+/// Action from the connecting screen (prompt response or close).
+pub(crate) enum ConnectingAction {
+    None,
+    /// User accepted a confirm prompt (e.g., host key fingerprint).
+    Accept,
+    /// User rejected a confirm prompt.
+    Reject,
+    /// User submitted a password.
+    SubmitPassword(String),
+}
+
+/// Render a "Connecting to..." screen with optional inline prompts.
+///
+/// When `prompt` is `Some`, renders the prompt UI (fingerprint accept or
+/// password input) instead of the progress bar.
+pub(crate) fn show_connecting_screen(
     ui: &mut egui::Ui,
     title: &str,
     detail: Option<&str>,
     started: Option<std::time::Instant>,
-) {
+    prompt: Option<&mut crate::state::SessionPrompt>,
+) -> ConnectingAction {
     let rect = ui.available_rect_before_wrap();
     let bg = if ui.visuals().dark_mode {
         egui::Color32::from_gray(30)
@@ -663,6 +812,130 @@ fn show_connecting_screen(
 
     let center = rect.center();
 
+    // --- Inline prompt (fingerprint / password) ---
+    if let Some(prompt) = prompt {
+        let content_width = (rect.width() * 0.7).min(560.0);
+        let content_rect = egui::Rect::from_center_size(
+            center,
+            egui::Vec2::new(content_width, rect.height() * 0.7),
+        );
+        let mut action = ConnectingAction::None;
+
+        if prompt.prompt_type == 0 {
+            // Confirm prompt (host key fingerprint).
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+
+                    let is_changed = prompt.message.contains("HAS CHANGED");
+                    if is_changed {
+                        ui.label(
+                            egui::RichText::new("WARNING: HOST KEY HAS CHANGED!")
+                                .size(22.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(220, 50, 50)),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(&prompt.message)
+                                .size(13.0)
+                                .color(if ui.visuals().dark_mode {
+                                    egui::Color32::from_gray(180)
+                                } else {
+                                    egui::Color32::from_gray(60)
+                                }),
+                        );
+                    } else {
+                        ui.label(egui::RichText::new(&prompt.message).size(18.0));
+                    }
+
+                    if !prompt.detail.is_empty() {
+                        ui.add_space(16.0);
+                        ui.label(
+                            egui::RichText::new(&prompt.detail)
+                                .size(15.0)
+                                .family(egui::FontFamily::Monospace)
+                                .strong(),
+                        );
+                    }
+
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new("Are you sure you want to continue connecting?")
+                            .size(14.0),
+                    );
+
+                    ui.add_space(12.0);
+                    let btn_size = egui::Vec2::new(95.0, 26.0);
+                    let spacing = ui.spacing().item_spacing.x;
+                    let total_w = btn_size.x * 2.0 + spacing;
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(total_w, btn_size.y),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if ui.add_sized(btn_size, egui::Button::new("Accept")).clicked() {
+                                action = ConnectingAction::Accept;
+                            }
+                            if ui.add_sized(btn_size, egui::Button::new("Reject")).clicked() {
+                                action = ConnectingAction::Reject;
+                            }
+                        },
+                    );
+                });
+            });
+        } else {
+            // Password prompt.
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(egui::RichText::new(&prompt.message).size(22.0));
+                    if !prompt.detail.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(&prompt.detail)
+                                .size(14.0)
+                                .color(if ui.visuals().dark_mode {
+                                    egui::Color32::from_gray(160)
+                                } else {
+                                    egui::Color32::from_gray(80)
+                                }),
+                        );
+                    }
+                    ui.add_space(16.0);
+                    let pw_resp = ui.add(
+                        egui::TextEdit::singleline(&mut prompt.password_buf)
+                            .password(true)
+                            .desired_width(300.0)
+                            .hint_text("Password"),
+                    );
+                    if prompt.focus_password {
+                        pw_resp.request_focus();
+                        prompt.focus_password = false;
+                    }
+                    let enter_pressed = pw_resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let can_submit = !prompt.password_buf.is_empty();
+                        if ui.add_enabled(can_submit, egui::Button::new("Connect")).clicked()
+                            || (enter_pressed && can_submit)
+                        {
+                            action = ConnectingAction::SubmitPassword(
+                                prompt.password_buf.clone(),
+                            );
+                        }
+                        if ui.button("Cancel").clicked() {
+                            action = ConnectingAction::Reject;
+                        }
+                    });
+                });
+            });
+        }
+
+        return action;
+    }
+
+    // --- Normal connecting screen (no prompt) ---
     let heading = format!("Connecting to {title}\u{2026}");
     let heading_galley = ui.painter().layout_no_wrap(
         heading,
@@ -719,10 +992,12 @@ fn show_connecting_screen(
     );
     let accent = egui::Color32::from_rgb(66, 133, 244);
     ui.painter().rect_filled(indicator_rect, bar_h / 2.0, accent);
+
+    ConnectingAction::None
 }
 
 /// Render a connection error screen. Returns `true` if the user clicked "Close Tab".
-fn show_error_screen(ui: &mut egui::Ui, title: &str, error: &str) -> bool {
+pub(crate) fn show_error_screen(ui: &mut egui::Ui, title: &str, error: &str) -> bool {
     let rect = ui.available_rect_before_wrap();
     let bg = if ui.visuals().dark_mode {
         egui::Color32::from_gray(30)

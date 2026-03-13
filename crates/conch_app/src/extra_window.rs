@@ -1,13 +1,20 @@
 //! Extra OS windows with independent terminal sessions.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use conch_core::config;
+use conch_plugin::bus::PluginBus;
+use conch_plugin_sdk::PanelLocation;
 use egui::{ViewportBuilder, ViewportCommand};
+use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::app::ConchApp;
+use crate::host::bridge::PanelRegistry;
+use crate::host::dialogs::DialogState;
+use crate::icons::IconCache;
 use crate::input::{self, ResolvedShortcuts};
 use crate::mouse::Selection;
 use crate::sessions::create_local_session;
@@ -36,6 +43,14 @@ pub(crate) struct SharedState<'a> {
     pub effective_decorations: config::WindowDecorations,
     pub show_in_window_menu: bool,
     pub theme_dirty: bool,
+    // Plugin panel state (shared from main app).
+    pub panel_registry: &'a Arc<Mutex<PanelRegistry>>,
+    pub plugin_bus: &'a Arc<PluginBus>,
+    pub render_cache: &'a HashMap<String, String>,
+    pub icon_cache: Option<&'a IconCache>,
+    pub left_panel_width: f32,
+    pub right_panel_width: f32,
+    pub bottom_panel_height: f32,
 }
 
 /// An extra OS window with its own sessions and tabs.
@@ -61,6 +76,10 @@ pub struct ExtraWindow {
     pub tab_bar_state: TabBarState,
     pub style_applied: bool,
     pub show_plugin_manager: bool,
+    /// Per-window panel visibility (independent from main window).
+    pub left_panel_visible: bool,
+    pub right_panel_visible: bool,
+    pub bottom_panel_visible: bool,
 }
 
 impl ExtraWindow {
@@ -92,6 +111,9 @@ impl ExtraWindow {
             tab_bar_state: TabBarState::default(),
             style_applied: false,
             show_plugin_manager: false,
+            left_panel_visible: true,
+            right_panel_visible: true,
+            bottom_panel_visible: true,
         }
     }
 
@@ -138,6 +160,9 @@ impl ExtraWindow {
         ctx: &egui::Context,
         shared: &SharedState,
         plugin_manager: &mut crate::host::plugin_manager_ui::PluginManagerState,
+        plugin_text_state: &mut HashMap<String, String>,
+        active_panel_tab: &mut HashMap<PanelLocation, u64>,
+        dialog_state: &mut DialogState,
     ) {
         // Clear pending actions from previous frame.
         self.pending_actions.clear();
@@ -272,6 +297,29 @@ impl ExtraWindow {
             }
         }
 
+        // Show plugin dialogs routed to this viewport.
+        dialog_state.show(ctx, self.viewport_id);
+
+        // Render plugin panels (same as main window, using shared state).
+        crate::host::plugin_panels::render_plugin_panels_for_ctx(
+            ctx,
+            shared.panel_registry,
+            shared.plugin_bus,
+            shared.render_cache,
+            plugin_text_state,
+            active_panel_tab,
+            self.left_panel_visible,
+            self.right_panel_visible,
+            self.bottom_panel_visible,
+            shared.theme,
+            shared.icon_cache,
+            shared.left_panel_width,
+            shared.right_panel_width,
+            shared.bottom_panel_height,
+            self.viewport_id,
+        );
+        // Extra windows don't persist panel sizes — only the main window does.
+
         // Tab bar.
         let tabs: Vec<(Uuid, String)> = self.tab_order.iter().map(|&id| {
             let title = self.sessions.get(&id)
@@ -292,39 +340,90 @@ impl ExtraWindow {
 
         // Central panel: terminal rendering + mouse handling.
         let mut pending_resize: Option<(u16, u16)> = None;
+        let mut close_tab_requested = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(bg_color))
             .show(ctx, |ui| {
-                if let Some(session) = self.active_tab.and_then(|id| self.sessions.get(&id)) {
-                    let sel = self.selection.normalized();
-                    let term = session.term();
-                    let (response, size_info) = widget::show_terminal(
-                        ui,
-                        term,
-                        self.cell_width,
-                        self.cell_height,
-                        shared.colors,
-                        shared.user_config.font.size,
-                        self.cursor_visible,
-                        sel,
-                        &mut self.frame_cache,
-                    );
+                if let Some(session) = self.active_tab.and_then(|id| self.sessions.get_mut(&id)) {
+                    match session.status {
+                        conch_plugin_sdk::SessionStatus::Connecting => {
+                            let action = crate::app::show_connecting_screen(
+                                ui,
+                                &session.title,
+                                session.status_detail.as_deref(),
+                                session.connect_started,
+                                session.prompt.as_mut(),
+                            );
+                            match action {
+                                crate::app::ConnectingAction::Accept => {
+                                    if let Some(prompt) = session.prompt.take() {
+                                        if let Some(reply) = prompt.reply {
+                                            let _ = reply.send(Some("true".to_string()));
+                                        }
+                                    }
+                                }
+                                crate::app::ConnectingAction::Reject => {
+                                    if let Some(prompt) = session.prompt.take() {
+                                        if let Some(reply) = prompt.reply {
+                                            let _ = reply.send(None);
+                                        }
+                                    }
+                                }
+                                crate::app::ConnectingAction::SubmitPassword(pw) => {
+                                    if let Some(prompt) = session.prompt.take() {
+                                        if let Some(reply) = prompt.reply {
+                                            let _ = reply.send(Some(pw));
+                                        }
+                                    }
+                                }
+                                crate::app::ConnectingAction::None => {}
+                            }
+                        }
+                        conch_plugin_sdk::SessionStatus::Error => {
+                            let detail = session.status_detail.clone().unwrap_or_default();
+                            if crate::app::show_error_screen(ui, &session.title, &detail) {
+                                close_tab_requested = true;
+                            }
+                        }
+                        conch_plugin_sdk::SessionStatus::Connected => {
+                            let sel = self.selection.normalized();
+                            let term = session.term();
+                            let (response, size_info) = widget::show_terminal(
+                                ui,
+                                term,
+                                self.cell_width,
+                                self.cell_height,
+                                shared.colors,
+                                shared.user_config.font.size,
+                                self.cursor_visible,
+                                sel,
+                                &mut self.frame_cache,
+                            );
 
-                    pending_resize = Some((size_info.columns() as u16, size_info.rows() as u16));
+                            pending_resize = Some((size_info.columns() as u16, size_info.rows() as u16));
 
-                    // Mouse handling.
-                    crate::mouse::handle_terminal_mouse(
-                        ctx,
-                        &response,
-                        &size_info,
-                        &mut self.selection,
-                        term,
-                        &|bytes| session.write(bytes),
-                        self.cell_height,
-                        shared.user_config.terminal.scroll_sensitivity,
-                    );
+                            // Mouse handling.
+                            crate::mouse::handle_terminal_mouse(
+                                ctx,
+                                &response,
+                                &size_info,
+                                &mut self.selection,
+                                term,
+                                &|bytes| session.write(bytes),
+                                self.cell_height,
+                                shared.user_config.terminal.scroll_sensitivity,
+                            );
+                        }
+                    }
                 }
             });
+
+        // Handle close-tab request from error screen.
+        if close_tab_requested {
+            if let Some(id) = self.active_tab {
+                self.remove_session(id);
+            }
+        }
 
         // Resize sessions after releasing the panel borrow.
         if let Some((cols, rows)) = pending_resize {
@@ -465,6 +564,24 @@ impl ExtraWindow {
                             continue;
                         }
                     }
+                    if let Some(ref kb) = shared.shortcuts.toggle_left_panel {
+                        if kb.matches(key, modifiers) {
+                            self.left_panel_visible = !self.left_panel_visible;
+                            continue;
+                        }
+                    }
+                    if let Some(ref kb) = shared.shortcuts.toggle_right_panel {
+                        if kb.matches(key, modifiers) {
+                            self.right_panel_visible = !self.right_panel_visible;
+                            continue;
+                        }
+                    }
+                    if let Some(ref kb) = shared.shortcuts.toggle_bottom_panel {
+                        if kb.matches(key, modifiers) {
+                            self.bottom_panel_visible = !self.bottom_panel_visible;
+                            continue;
+                        }
+                    }
 
                     // Forward to PTY.
                     if let Some(bytes) = input::key_to_bytes(key, modifiers, None, shared.shortcuts, app_cursor) {
@@ -506,6 +623,13 @@ impl ConchApp {
         let effective_decorations = self.platform.effective_decorations(
             self.state.user_config.window.decorations,
         );
+
+        // Compute default panel sizes from persisted layout.
+        let layout = &self.state.persistent.layout;
+        let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width } else { 240.0 };
+        let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width } else { 240.0 };
+        let bottom_h = if layout.bottom_panel_height > 0.0 { layout.bottom_panel_height } else { 180.0 };
+
         let shared = SharedState {
             user_config: &self.state.user_config,
             colors: &self.state.colors,
@@ -514,6 +638,13 @@ impl ConchApp {
             effective_decorations,
             show_in_window_menu: self.menu_bar_state.is_in_window(),
             theme_dirty: self.state.theme_dirty,
+            panel_registry: &self.panel_registry,
+            plugin_bus: &self.plugin_bus,
+            render_cache: &self.render_cache,
+            icon_cache: self.icon_cache.as_ref(),
+            left_panel_width: left_w,
+            right_panel_width: right_w,
+            bottom_panel_height: bottom_h,
         };
 
         for window in &mut windows {
@@ -526,7 +657,14 @@ impl ConchApp {
                 viewport_id,
                 builder,
                 |vp_ctx, _class| {
-                    window.update(vp_ctx, &shared, &mut self.plugin_manager);
+                    window.update(
+                        vp_ctx,
+                        &shared,
+                        &mut self.plugin_manager,
+                        &mut self.plugin_text_state,
+                        &mut self.active_panel_tab,
+                        &mut self.dialog_state,
+                    );
                 },
             );
         }

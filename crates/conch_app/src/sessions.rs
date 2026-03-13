@@ -106,6 +106,7 @@ pub(crate) fn create_local_session(
                 status: conch_plugin_sdk::SessionStatus::Connected,
                 status_detail: None,
                 connect_started: None,
+                prompt: None,
             };
             Some((id, session))
         }

@@ -220,23 +220,8 @@ impl SshPlugin {
             None => return,
         };
 
-        // Password prompt if needed.
-        let password = if server.auth_method == "password" {
-            let msg = CString::new(format!("Password for {}@{}:", server.user, server.host)).unwrap();
-            let default = CString::new("").unwrap();
-            let result = (self.api.show_prompt)(msg.as_ptr(), default.as_ptr());
-            if result.is_null() {
-                return;
-            }
-            let pw = unsafe { CStr::from_ptr(result) }.to_str().unwrap_or("").to_string();
-            (self.api.free_string)(result);
-            Some(pw)
-        } else {
-            None
-        };
-
         let connect_result = do_ssh_connect_sync(
-            &server, password.as_deref(), self.api, &self.rt,
+            &server, self.api, &self.rt,
         );
 
         match connect_result {
@@ -721,11 +706,13 @@ impl SshPlugin {
 // ---------------------------------------------------------------------------
 
 /// The russh client handler — implements host key verification via the host
-/// dialog API, with `~/.ssh/known_hosts` support.
+/// session_prompt API, with `~/.ssh/known_hosts` support.
 pub(crate) struct SshHandler {
     api: &'static HostApi,
     host: String,
     port: u16,
+    /// Session handle for inline prompt rendering.
+    session_handle: SessionHandle,
 }
 
 #[async_trait::async_trait]
@@ -749,12 +736,21 @@ impl client::Handler for SshHandler {
                 let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
                 let msg = CString::new(format!(
                     "WARNING: HOST KEY HAS CHANGED for {}:{}\n\n\
-                     New fingerprint: {fingerprint}\n\n\
                      This could indicate a man-in-the-middle attack.\n\
-                     Do you want to continue connecting?",
+                     It is also possible that the host key has just been changed.",
                     self.host, self.port
                 )).unwrap();
-                let accepted = (self.api.show_confirm)(msg.as_ptr());
+                let detail = CString::new(format!(
+                    "{}\n{fingerprint}",
+                    server_public_key.algorithm().as_str(),
+                )).unwrap();
+                let result = (self.api.session_prompt)(
+                    self.session_handle, 0, msg.as_ptr(), detail.as_ptr(),
+                );
+                let accepted = !result.is_null();
+                if !result.is_null() {
+                    (self.api.free_string)(result);
+                }
                 return Ok(accepted);
             }
             None => {
@@ -764,12 +760,24 @@ impl client::Handler for SshHandler {
 
         let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
         let msg = CString::new(format!(
-            "The authenticity of host '{}:{}' can't be established.\n\n\
-             Fingerprint: {fingerprint}\n\n\
-             Do you want to continue connecting?",
-            self.host, self.port
+            "The authenticity of host '{}' can't be established.",
+            if self.port != 22 {
+                format!("[{}]:{}", self.host, self.port)
+            } else {
+                self.host.clone()
+            }
         )).unwrap();
-        let accepted = (self.api.show_confirm)(msg.as_ptr());
+        let detail = CString::new(format!(
+            "{} key fingerprint is:\n{fingerprint}",
+            server_public_key.algorithm().as_str(),
+        )).unwrap();
+        let result = (self.api.session_prompt)(
+            self.session_handle, 0, msg.as_ptr(), detail.as_ptr(),
+        );
+        let accepted = !result.is_null();
+        if !result.is_null() {
+            (self.api.free_string)(result);
+        }
 
         if accepted {
             if let Err(e) = known_hosts::add_known_host(&self.host, self.port, server_public_key) {
@@ -799,7 +807,6 @@ fn set_session_status(api: &HostApi, handle: SessionHandle, status: conch_plugin
 /// Synchronous — blocks the plugin thread.
 fn do_ssh_connect_sync(
     server: &ServerEntry,
-    password: Option<&str>,
     api: &'static HostApi,
     rt: &Runtime,
 ) -> Result<(SessionHandle, Box<SshBackendState>), String> {
@@ -833,6 +840,23 @@ fn do_ssh_connect_sync(
     let detail = format!("{}@{}:{}", server.user, server.host, server.port);
     set_session_status(api, session_handle, conch_plugin_sdk::SessionStatus::Connecting, Some(&detail));
 
+    // Password prompt (inline in session tab) if needed.
+    let password = if server.auth_method == "password" {
+        let msg = CString::new(format!("Password for {}@{}", server.user, server.host)).unwrap();
+        let detail_c = CString::new(detail.clone()).unwrap();
+        let result = (api.session_prompt)(session_handle, 1, msg.as_ptr(), detail_c.as_ptr());
+        if result.is_null() {
+            // User cancelled — close the session tab.
+            (api.close_session)(session_handle);
+            return Err("Password entry cancelled".to_string());
+        }
+        let pw = unsafe { CStr::from_ptr(result) }.to_str().unwrap_or("").to_string();
+        (api.free_string)(result);
+        Some(pw)
+    } else {
+        None
+    };
+
     // Phase 2: SSH handshake (async).
     host_log(api, 2, &format!("SSH connect: {}@{}:{} auth={} key={:?} proxy_jump={:?} proxy_cmd={:?}",
         server.user, server.host, server.port, server.auth_method,
@@ -844,6 +868,7 @@ fn do_ssh_connect_sync(
             api,
             host: server.host.clone(),
             port: server.port,
+            session_handle,
         };
 
         // Determine effective proxy: proxy_command takes precedence, then
@@ -873,7 +898,7 @@ fn do_ssh_connect_sync(
 
         let authenticated = if server.auth_method == "password" {
             host_log(api, 1, &format!("SSH auth: using password for user '{}'", server.user));
-            let pw = password.unwrap_or("");
+            let pw = password.as_deref().unwrap_or("");
             session.authenticate_password(&server.user, pw)
                 .await
                 .map_err(|e| format!("Auth failed: {e}"))?
