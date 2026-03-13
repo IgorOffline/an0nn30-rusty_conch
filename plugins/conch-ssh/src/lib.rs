@@ -323,17 +323,78 @@ impl SshPlugin {
     // -----------------------------------------------------------------------
 
     fn add_server_dialog(&mut self, existing: Option<&ServerEntry>) {
+        let default_user = std::env::var("USER").unwrap_or_default();
+        let is_editing = existing.is_some();
+
+        // Determine which proxy type is active for the collapsible.
+        let proxy_type = if existing.and_then(|s| s.proxy_jump.as_ref()).is_some() {
+            "ProxyJump"
+        } else if existing.and_then(|s| s.proxy_command.as_ref()).is_some() {
+            "ProxyCommand"
+        } else {
+            "None"
+        };
+        let has_proxy = proxy_type != "None";
+
+        // Build folder options for the "Save to folder" dropdown.
+        let mut folder_options: Vec<String> = vec!["(none)".to_string()];
+        folder_options.extend(self.config.folders.iter().map(|f| f.name.clone()));
+
+        // Default folder: if editing and server is in a folder, select that.
+        // If there's a selected folder in the tree, use that.
+        let default_folder = if is_editing {
+            existing
+                .and_then(|e| self.config.find_server_folder(&e.id))
+                .and_then(|fid| self.config.folders.iter().find(|f| f.id == fid))
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| "(none)".to_string())
+        } else {
+            self.selected_node
+                .as_deref()
+                .and_then(|sel| {
+                    // If a folder is selected, use it; if a server in a folder is selected, use its folder.
+                    self.config.folders.iter().find(|f| f.id == sel)
+                        .or_else(|| {
+                            self.config.find_server_folder(sel)
+                                .and_then(|fid| self.config.folders.iter().find(|f| f.id == fid))
+                        })
+                })
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| "(none)".to_string())
+        };
+
         let form = serde_json::json!({
-            "title": if existing.is_some() { "Edit Server" } else { "Add Server" },
+            "title": if is_editing { "Edit SSH Connection" } else { "New SSH Connection" },
+            "min_width": 460,
+            "label_width": 130,
             "fields": [
-                { "id": "label", "type": "text", "label": "Name", "value": existing.map(|s| &s.label).unwrap_or(&String::new()) },
-                { "id": "host", "type": "text", "label": "Host", "value": existing.map(|s| &s.host).unwrap_or(&String::new()) },
-                { "id": "port", "type": "number", "label": "Port", "value": existing.map(|s| s.port).unwrap_or(22) },
-                { "id": "user", "type": "text", "label": "Username", "value": existing.map(|s| &s.user).unwrap_or(&String::new()) },
-                { "id": "auth_method", "type": "combo", "label": "Auth Method", "options": ["key", "password"], "value": existing.map(|s| s.auth_method.as_str()).unwrap_or("key") },
-                { "id": "key_path", "type": "text", "label": "Key Path (optional)", "value": existing.and_then(|s| s.key_path.as_deref()).unwrap_or("") },
-                { "id": "proxy_jump", "type": "text", "label": "ProxyJump (optional)", "value": existing.and_then(|s| s.proxy_jump.as_deref()).unwrap_or("") },
-                { "id": "proxy_command", "type": "text", "label": "ProxyCommand (optional)", "value": existing.and_then(|s| s.proxy_command.as_deref()).unwrap_or("") },
+                { "type": "text", "id": "label", "label": "Session Name:", "hint": "optional",
+                  "value": existing.map(|s| s.label.as_str()).unwrap_or("") },
+                { "type": "host_port", "host_id": "host", "port_id": "port", "label": "Host / IP:",
+                  "host_value": existing.map(|s| s.host.as_str()).unwrap_or(""),
+                  "port_value": existing.map(|s| s.port.to_string()).unwrap_or_else(|| "22".to_string()) },
+                { "type": "text", "id": "user", "label": "Username:",
+                  "value": existing.map(|s| s.user.as_str()).unwrap_or(default_user.as_str()) },
+                { "type": "password", "id": "password", "label": "Password:", "value": "" },
+                { "type": "file_picker", "id": "key_path", "label": "Private Key:",
+                  "value": existing.and_then(|s| s.key_path.as_deref()).unwrap_or(""),
+                  "start_dir": "~/.ssh" },
+                { "type": "text", "id": "startup_command", "label": "Startup Command:", "hint": "optional",
+                  "value": "" },
+                { "type": "collapsible", "label": "Advanced", "expanded": has_proxy, "fields": [
+                    { "type": "combo", "id": "proxy_type", "label": "Proxy Type:",
+                      "options": ["None", "ProxyJump", "ProxyCommand"], "value": proxy_type },
+                    { "type": "text", "id": "proxy_value", "label": "Proxy Value:", "hint": "user@jumphost or ssh -W %h:%p host",
+                      "value": existing.and_then(|s| s.proxy_jump.as_deref().or(s.proxy_command.as_deref())).unwrap_or("") },
+                ]},
+                { "type": "separator" },
+                { "type": "combo", "id": "folder", "label": "Save to folder:",
+                  "options": folder_options, "value": default_folder },
+            ],
+            "buttons": [
+                { "id": "cancel", "label": "Cancel" },
+                { "id": "save", "label": "Save", "enabled_when": "host" },
+                { "id": "save_connect", "label": "Save & Connect", "enabled_when": "host" },
             ],
         });
 
@@ -348,20 +409,40 @@ impl SshPlugin {
         let form_data: serde_json::Value = serde_json::from_str(result_str).unwrap_or_default();
         (self.api.free_string)(result);
 
+        let action = form_data["_action"].as_str().unwrap_or("");
         let label = form_data["label"].as_str().unwrap_or("").to_string();
         let host = form_data["host"].as_str().unwrap_or("").to_string();
-        let port = form_data["port"].as_f64().unwrap_or(22.0) as u16;
+        let port: u16 = form_data["port"].as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(22);
         let user = form_data["user"].as_str().unwrap_or("").to_string();
-        let auth_method = form_data["auth_method"].as_str().unwrap_or("key").to_string();
+        let password = form_data["password"].as_str().unwrap_or("").to_string();
         let key_path = form_data["key_path"].as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let proxy_jump = form_data["proxy_jump"].as_str()
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        let proxy_command = form_data["proxy_command"].as_str()
-            .filter(|s| !s.is_empty())
-            .map(String::from);
+
+        // Determine auth method from the form data.
+        let auth_method = if !password.is_empty() {
+            "password".to_string()
+        } else if key_path.is_some() {
+            "key".to_string()
+        } else {
+            "key".to_string()
+        };
+
+        // Parse proxy settings.
+        let proxy_type_str = form_data["proxy_type"].as_str().unwrap_or("None");
+        let proxy_val = form_data["proxy_value"].as_str().unwrap_or("").to_string();
+        let proxy_jump = if proxy_type_str == "ProxyJump" && !proxy_val.is_empty() {
+            Some(proxy_val.clone())
+        } else {
+            None
+        };
+        let proxy_command = if proxy_type_str == "ProxyCommand" && !proxy_val.is_empty() {
+            Some(proxy_val)
+        } else {
+            None
+        };
 
         if host.is_empty() {
             return;
@@ -375,7 +456,13 @@ impl SshPlugin {
             self.config.remove_server(&id);
         }
 
-        self.config.add_server(ServerEntry {
+        // Determine target folder.
+        let folder_name = form_data["folder"].as_str().unwrap_or("(none)");
+        let target_folder_id = self.config.folders.iter()
+            .find(|f| f.name == folder_name)
+            .map(|f| f.id.clone());
+
+        let entry = ServerEntry {
             id,
             label: if label.is_empty() { format!("{user}@{host}") } else { label },
             host,
@@ -385,10 +472,21 @@ impl SshPlugin {
             key_path,
             proxy_jump,
             proxy_command,
-        });
+        };
+
+        if let Some(fid) = &target_folder_id {
+            self.config.add_server_to_folder(entry.clone(), fid);
+        } else {
+            self.config.add_server(entry.clone());
+        }
 
         self.save_config();
         self.dirty = true;
+
+        // If "Save & Connect", immediately connect.
+        if action == "save_connect" {
+            self.connect_to_server(&entry.id);
+        }
     }
 
     fn add_folder_dialog(&mut self) {

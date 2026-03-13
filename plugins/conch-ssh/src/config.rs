@@ -61,6 +61,27 @@ impl SshConfig {
         });
     }
 
+    /// Add a server to a specific folder. Falls back to ungrouped if folder not found.
+    pub fn add_server_to_folder(&mut self, entry: ServerEntry, folder_id: &str) {
+        if let Some(f) = self.folders.iter_mut().find(|f| f.id == folder_id) {
+            f.entries.push(entry);
+        } else {
+            self.ungrouped.push(entry);
+        }
+    }
+
+    /// Find which folder (if any) contains a server. Returns the folder ID.
+    pub fn find_server_folder(&self, server_id: &str) -> Option<&str> {
+        self.folders.iter()
+            .find(|f| f.entries.iter().any(|s| s.id == server_id))
+            .map(|f| f.id.as_str())
+    }
+
+    /// Check if a given ID is a folder.
+    pub fn is_folder(&self, id: &str) -> bool {
+        self.folders.iter().any(|f| f.id == id)
+    }
+
     pub fn remove_server(&mut self, id: &str) {
         self.ungrouped.retain(|s| s.id != id);
         for folder in &mut self.folders {

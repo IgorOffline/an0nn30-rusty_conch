@@ -81,6 +81,9 @@ pub struct ConchApp {
     // Plugin session registry (pending open/close from plugins).
     pub(crate) session_registry: Arc<Mutex<SessionRegistry>>,
 
+    // Icons.
+    pub(crate) icon_cache: Option<crate::icons::IconCache>,
+
     // System.
     pub(crate) ipc_listener: Option<IpcListener>,
     pub(crate) file_watcher: Option<FileWatcher>,
@@ -152,6 +155,7 @@ impl ConchApp {
             next_viewport_num: 1,
             dialog_state,
             session_registry,
+            icon_cache: None,
             ipc_listener,
             file_watcher,
             has_ever_had_session: false,
@@ -544,6 +548,11 @@ impl eframe::App for ConchApp {
                     }
                 }
             }
+        }
+
+        // Lazy-init icon cache on first frame (needs egui context for textures).
+        if self.icon_cache.is_none() {
+            self.icon_cache = Some(crate::icons::IconCache::load(ctx));
         }
 
         // Render plugin panels (side panels, bottom panels).
