@@ -429,34 +429,53 @@ impl eframe::App for ConchApp {
         }
 
         // ── Render extra windows ──
-        let mut windows_to_close: Vec<usize> = Vec::new();
+        // Take windows out of self to avoid borrow conflict in the closure.
+        let mut windows = std::mem::take(&mut self.extra_windows);
+        let shared = crate::extra_window::SharedState {
+            user_config: &self.state.user_config,
+            colors: &self.state.colors,
+            shortcuts: &self.shortcuts,
+            theme: &self.state.theme,
+        };
 
-        for (i, window) in self.extra_windows.iter_mut().enumerate() {
-            window.update(&self.state.colors, &self.shortcuts, &self.state.user_config, self.state.user_config.font.size);
-
+        for window in &mut windows {
             if window.should_close {
-                windows_to_close.push(i);
                 continue;
             }
 
             let viewport_id = window.viewport_id;
-            let builder = window.viewport_builder.clone();
-            let title = window.title.clone();
+            let builder = window.viewport_builder.clone().with_title(&window.title);
 
-            // Render the extra window viewport.
-            ctx.show_viewport_deferred(
+            ctx.show_viewport_immediate(
                 viewport_id,
-                builder.with_title(&title),
-                |_ctx, _class| {
-                    // Extra window rendering is handled by its own update() call.
-                    // For now, we just keep the viewport alive.
+                builder,
+                |vp_ctx, _class| {
+                    window.update(vp_ctx, &shared);
                 },
             );
         }
 
-        // Remove closed windows (in reverse to preserve indices).
-        for i in windows_to_close.into_iter().rev() {
-            self.extra_windows.remove(i);
+        // Collect pending actions from extra windows.
+        let mut spawn_new_window = false;
+        for window in &mut windows {
+            for action in window.pending_actions.drain(..) {
+                match action {
+                    crate::extra_window::ExtraWindowAction::SpawnNewWindow => {
+                        spawn_new_window = true;
+                    }
+                    crate::extra_window::ExtraWindowAction::QuitApp => {
+                        self.quit_requested = true;
+                    }
+                }
+            }
+        }
+
+        // Remove closed windows and move back.
+        windows.retain(|w| !w.should_close);
+        self.extra_windows = windows;
+
+        if spawn_new_window {
+            self.spawn_extra_window();
         }
 
         // ── Apply centralized UI theme (only when changed) ──
