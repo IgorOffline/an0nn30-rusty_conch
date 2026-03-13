@@ -4,6 +4,7 @@ mod config;
 mod known_hosts;
 mod server_tree;
 mod session_backend;
+mod sftp;
 mod ssh_config_parser;
 
 use std::collections::HashMap;
@@ -69,7 +70,10 @@ impl SshPlugin {
         let icon = CString::new("server.png").unwrap();
         let panel = (api.register_panel)(PanelLocation::Right, name.as_ptr(), icon.as_ptr());
 
-        for svc in &["connect", "exec", "get_sessions", "get_handle"] {
+        for svc in &[
+            "connect", "exec", "get_sessions", "get_handle",
+            "list_dir", "stat", "read_file", "write_file", "mkdir", "rename", "delete",
+        ] {
             let svc_name = CString::new(*svc).unwrap();
             (api.register_service)(svc_name.as_ptr());
         }
@@ -651,6 +655,60 @@ impl SshPlugin {
                     })
                 } else {
                     serde_json::json!({ "status": "error", "message": "session not found" })
+                }
+            }
+            // SFTP operations — all require session_id and an SSH handle.
+            "list_dir" | "stat" | "read_file" | "write_file" | "mkdir" | "rename" | "delete" => {
+                let session_id = args["session_id"].as_u64().unwrap_or(0);
+                match self.sessions.get(&session_id) {
+                    Some(backend) if backend.connected => {
+                        let ssh_handle = backend.ssh_handle().unwrap();
+                        let result = self.rt.block_on(async {
+                            match method {
+                                "list_dir" => {
+                                    let path = args["path"].as_str().unwrap_or("/");
+                                    sftp::list_dir(ssh_handle, path).await
+                                }
+                                "stat" => {
+                                    let path = args["path"].as_str().unwrap_or("/");
+                                    sftp::stat(ssh_handle, path).await
+                                }
+                                "read_file" => {
+                                    let path = args["path"].as_str().unwrap_or("");
+                                    let offset = args["offset"].as_u64().unwrap_or(0);
+                                    let length = args["length"].as_u64().unwrap_or(4096) as usize;
+                                    sftp::read_file(ssh_handle, path, offset, length).await
+                                }
+                                "write_file" => {
+                                    let path = args["path"].as_str().unwrap_or("");
+                                    let data = args["data"].as_str().unwrap_or("");
+                                    sftp::write_file(ssh_handle, path, data).await
+                                }
+                                "mkdir" => {
+                                    let path = args["path"].as_str().unwrap_or("");
+                                    sftp::mkdir(ssh_handle, path).await
+                                }
+                                "rename" => {
+                                    let from = args["from"].as_str().unwrap_or("");
+                                    let to = args["to"].as_str().unwrap_or("");
+                                    sftp::rename(ssh_handle, from, to).await
+                                }
+                                "delete" => {
+                                    let path = args["path"].as_str().unwrap_or("");
+                                    let is_dir = args["is_dir"].as_bool().unwrap_or(false);
+                                    if is_dir {
+                                        sftp::remove_dir(ssh_handle, path).await
+                                    } else {
+                                        sftp::remove_file(ssh_handle, path).await
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
+                        });
+                        result.unwrap_or_else(|e| serde_json::json!({ "status": "error", "message": e }))
+                    }
+                    Some(_) => serde_json::json!({ "status": "error", "message": "session not connected" }),
+                    None => serde_json::json!({ "status": "error", "message": "session not found" }),
                 }
             }
             _ => serde_json::json!({ "status": "error", "message": "unknown method" }),
