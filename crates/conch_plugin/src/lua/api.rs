@@ -733,12 +733,15 @@ fn register_net_table(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
-    // Stubs for network operations.
     net.set(
         "resolve",
-        lua.create_function(|_lua, _host: String| -> LuaResult<Vec<String>> {
-            // TODO: DNS resolution via host.
-            Ok(vec![])
+        lua.create_function(|_lua, host: String| -> LuaResult<Vec<String>> {
+            use std::net::ToSocketAddrs;
+            let addr = format!("{host}:0");
+            match addr.to_socket_addrs() {
+                Ok(addrs) => Ok(addrs.map(|a| a.ip().to_string()).collect()),
+                Err(_) => Ok(vec![]),
+            }
         })?,
     )?;
 
@@ -746,15 +749,40 @@ fn register_net_table(lua: &Lua) -> LuaResult<()> {
         "scan",
         lua.create_function(
             |_lua,
-             (_host, _ports, _timeout_ms, _concurrency): (
+             (host, ports, timeout_ms, _concurrency): (
                 String,
                 Vec<u16>,
                 Option<u64>,
                 Option<u32>,
             )|
              -> LuaResult<Vec<LuaTable>> {
-                // TODO: Port scanning via host.
-                Ok(vec![])
+                use std::net::{TcpStream, ToSocketAddrs};
+                use std::time::Duration;
+
+                let timeout = Duration::from_millis(timeout_ms.unwrap_or(1000));
+                let mut results = Vec::new();
+
+                for port in ports {
+                    let addr_str = format!("{host}:{port}");
+                    let open = match addr_str.to_socket_addrs() {
+                        Ok(mut addrs) => {
+                            if let Some(addr) = addrs.next() {
+                                TcpStream::connect_timeout(&addr, timeout).is_ok()
+                            } else {
+                                false
+                            }
+                        }
+                        Err(_) => false,
+                    };
+                    if open {
+                        let tbl = _lua.create_table()?;
+                        tbl.set("port", port)?;
+                        tbl.set("open", true)?;
+                        results.push(tbl);
+                    }
+                }
+
+                Ok(results)
             },
         )?,
     )?;
