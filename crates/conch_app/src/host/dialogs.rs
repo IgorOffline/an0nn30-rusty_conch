@@ -158,16 +158,28 @@ fn default_port() -> String {
 // Dialog state (owned by the UI thread)
 // ---------------------------------------------------------------------------
 
+/// A dialog request wrapped with the viewport it should appear in.
+pub struct DialogMessage {
+    pub request: DialogRequest,
+    pub target_viewport: Option<egui::ViewportId>,
+}
+
 /// Manages dialog rendering in the egui update loop.
+///
+/// Supports multiple viewports — each viewport can have its own active dialog.
+/// Incoming requests are routed to the correct viewport's queue based on
+/// `DialogMessage::target_viewport`.
 pub struct DialogState {
     /// Incoming dialog requests from plugin threads.
-    rx: mpsc::UnboundedReceiver<DialogRequest>,
-    /// Currently active dialog.
-    active: Option<ActiveDialog>,
+    rx: mpsc::UnboundedReceiver<DialogMessage>,
+    /// Currently active dialog per viewport.
+    active: HashMap<egui::ViewportId, ActiveDialog>,
+    /// Pending requests queued per viewport (not yet activated).
+    pending: HashMap<egui::ViewportId, Vec<DialogRequest>>,
 }
 
 /// The sender side — given to the HostApi implementation.
-pub type DialogSender = mpsc::UnboundedSender<DialogRequest>;
+pub type DialogSender = mpsc::UnboundedSender<DialogMessage>;
 
 /// Create a dialog channel pair.
 pub fn dialog_channel() -> (DialogSender, DialogState) {
@@ -176,7 +188,8 @@ pub fn dialog_channel() -> (DialogSender, DialogState) {
         tx,
         DialogState {
             rx,
-            active: None,
+            active: HashMap::new(),
+            pending: HashMap::new(),
         },
     )
 }
@@ -238,16 +251,34 @@ enum FormValue {
 }
 
 impl DialogState {
-    /// Call this in the egui update loop. Returns true if a dialog is active.
-    pub fn show(&mut self, ctx: &egui::Context) -> bool {
-        // Check for new requests.
-        if self.active.is_none() {
-            if let Ok(request) = self.rx.try_recv() {
-                self.active = Some(activate_request(request));
+    /// Call this in the egui update loop for a specific viewport.
+    /// Returns true if a dialog is active for this viewport.
+    pub fn show(&mut self, ctx: &egui::Context, viewport_id: egui::ViewportId) -> bool {
+        // Drain all new messages and route to per-viewport pending queues.
+        while let Ok(msg) = self.rx.try_recv() {
+            let vp = msg.target_viewport.unwrap_or(egui::ViewportId::ROOT);
+            log::debug!(
+                "DialogState::show: drained message target_viewport={:?} (raw={:?}), routing to {:?}",
+                vp, msg.target_viewport, vp
+            );
+            self.pending.entry(vp).or_default().push(msg.request);
+        }
+
+        // If no active dialog for this viewport, try to activate one.
+        if !self.active.contains_key(&viewport_id) {
+            if let Some(queue) = self.pending.get_mut(&viewport_id) {
+                if !queue.is_empty() {
+                    let request = queue.remove(0);
+                    log::info!(
+                        "DialogState::show: activating dialog for viewport {:?}",
+                        viewport_id
+                    );
+                    self.active.insert(viewport_id, activate_request(request));
+                }
             }
         }
 
-        let Some(dialog) = &mut self.active else {
+        let Some(dialog) = self.active.get_mut(&viewport_id) else {
             return false;
         };
 
@@ -280,18 +311,17 @@ impl DialogState {
         }
 
         if should_close {
-            // Send the result and close.
-            if let Some(dialog) = self.active.take() {
+            if let Some(dialog) = self.active.remove(&viewport_id) {
                 send_dialog_result(dialog);
             }
         }
 
-        self.active.is_some()
+        self.active.contains_key(&viewport_id)
     }
 
-    /// Whether a dialog is currently displayed.
-    pub fn is_active(&self) -> bool {
-        self.active.is_some()
+    /// Whether a dialog is currently displayed for the given viewport.
+    pub fn is_active_for(&self, viewport_id: egui::ViewportId) -> bool {
+        self.active.contains_key(&viewport_id)
     }
 }
 
@@ -989,13 +1019,16 @@ mod tests {
     #[test]
     fn dialog_channel_creates_pair() {
         let (tx, state) = dialog_channel();
-        assert!(!state.is_active());
+        assert!(!state.is_active_for(egui::ViewportId::ROOT));
         // Sender should be usable.
         let (reply_tx, _reply_rx) = oneshot::channel();
-        tx.send(DialogRequest::Alert {
-            title: "Hi".into(),
-            msg: "Test".into(),
-            reply: reply_tx,
+        tx.send(DialogMessage {
+            request: DialogRequest::Alert {
+                title: "Hi".into(),
+                msg: "Test".into(),
+                reply: reply_tx,
+            },
+            target_viewport: None,
         })
         .unwrap();
     }

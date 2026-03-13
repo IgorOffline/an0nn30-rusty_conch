@@ -364,6 +364,14 @@ mod tests {
         ) -> *mut c_char {
             std::ptr::null_mut()
         }
+        extern "C" fn stub_session_prompt(
+            _: SessionHandle,
+            _: u8,
+            _: *const c_char,
+            _: *const c_char,
+        ) -> *mut c_char {
+            std::ptr::null_mut()
+        }
         extern "C" fn stub_free_string(_: *mut c_char) {}
 
         HostApi {
@@ -390,6 +398,7 @@ mod tests {
             clipboard_get: stub_clipboard_get,
             get_theme: stub_get_theme,
             show_context_menu: stub_show_context_menu,
+            session_prompt: stub_session_prompt,
             free_string: stub_free_string,
         }
     }

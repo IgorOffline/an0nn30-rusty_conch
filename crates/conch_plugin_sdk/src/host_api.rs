@@ -194,6 +194,28 @@ pub struct HostApi {
     /// Caller must free with `free_string`.
     pub get_theme: extern "C" fn() -> *mut c_char,
 
+    // -- Session Prompts (inline in tab) -----------------------------------
+
+    /// Show a prompt inline in the session's connecting screen and block
+    /// until the user responds.
+    ///
+    /// - `handle`: the session to show the prompt in
+    /// - `prompt_type`: 0 = confirm (Accept/Reject), 1 = password input
+    /// - `msg`: main message text (null-terminated UTF-8)
+    /// - `detail`: secondary detail text (null-terminated UTF-8, may be null)
+    ///
+    /// Returns the user's response:
+    /// - Confirm: "true" if accepted, null if rejected/cancelled
+    /// - Password: the entered password string, or null if cancelled
+    ///
+    /// Caller must free non-null results with `free_string`.
+    pub session_prompt: extern "C" fn(
+        handle: SessionHandle,
+        prompt_type: u8,
+        msg: *const c_char,
+        detail: *const c_char,
+    ) -> *mut c_char,
+
     // -- Context Menu ------------------------------------------------------
 
     /// Show a context menu at the current cursor position.

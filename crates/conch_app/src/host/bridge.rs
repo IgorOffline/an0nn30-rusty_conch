@@ -15,7 +15,7 @@ use conch_plugin_sdk::{
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use super::dialogs::{self, DialogRequest, DialogSender};
+use super::dialogs::{self, DialogMessage, DialogRequest, DialogSender};
 use super::session_bridge::PluginSessionBridge;
 
 // ---------------------------------------------------------------------------
@@ -98,11 +98,22 @@ pub struct SessionStatusUpdate {
     pub detail: Option<String>,
 }
 
+/// A prompt request that should be rendered inline in a session tab.
+pub struct SessionPromptRequest {
+    pub handle: SessionHandle,
+    /// 0 = confirm (Accept/Reject), 1 = password input.
+    pub prompt_type: u8,
+    pub message: String,
+    pub detail: String,
+    pub reply: oneshot::Sender<Option<String>>,
+}
+
 /// Registry of pending session open/close requests from plugins.
 pub struct SessionRegistry {
     pub pending_open: Vec<PendingSession>,
     pub pending_close: Vec<SessionHandle>,
     pub pending_status: Vec<SessionStatusUpdate>,
+    pub pending_prompts: Vec<SessionPromptRequest>,
     next_handle: u64,
 }
 
@@ -113,6 +124,9 @@ pub struct PendingSession {
     pub bridge: PluginSessionBridge,
     pub vtable: SessionBackendVtable,
     pub backend_handle: *mut c_void,
+    /// The viewport where the user interaction that triggered this session occurred.
+    /// Used to route the session to the correct window (main vs. extra).
+    pub target_viewport: Option<egui::ViewportId>,
 }
 
 // SAFETY: PendingSession contains raw pointer backend_handle which is only
@@ -125,6 +139,7 @@ impl SessionRegistry {
             pending_open: Vec::new(),
             pending_close: Vec::new(),
             pending_status: Vec::new(),
+            pending_prompts: Vec::new(),
             next_handle: 1,
         }
     }
@@ -140,6 +155,36 @@ static BRIDGE: OnceLock<BridgeInner> = OnceLock::new();
 
 /// Shared theme JSON, updated whenever the app theme changes.
 static THEME_JSON: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+/// Tracks the most recent viewport that dispatched widget events per plugin.
+///
+/// When a plugin panel interaction (button click, tree activate, etc.) occurs
+/// in a specific viewport, we record which viewport it was. When the plugin
+/// later calls `host_open_session`, we attach this viewport as the target so
+/// that `drain_pending_sessions` can route the session to the correct window.
+static LAST_EVENT_VIEWPORT: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, egui::ViewportId>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+/// Record that `plugin_name` most recently received widget events from `viewport_id`.
+pub fn set_event_viewport(plugin_name: &str, viewport_id: egui::ViewportId) {
+    log::debug!(
+        "set_event_viewport: plugin='{}' viewport={:?}",
+        plugin_name, viewport_id
+    );
+    LAST_EVENT_VIEWPORT
+        .lock()
+        .insert(plugin_name.to_string(), viewport_id);
+}
+
+/// Look up the last viewport that sent widget events to `plugin_name`.
+fn get_event_viewport(plugin_name: &str) -> Option<egui::ViewportId> {
+    let result = LAST_EVENT_VIEWPORT.lock().get(plugin_name).copied();
+    log::debug!(
+        "get_event_viewport: plugin='{}' -> {:?}",
+        plugin_name, result
+    );
+    result
+}
 
 // ---------------------------------------------------------------------------
 // Plugin Menu Items
@@ -258,6 +303,7 @@ pub fn build_host_api() -> HostApi {
         clipboard_set: host_clipboard_set,
         clipboard_get: host_clipboard_get,
         get_theme: host_get_theme,
+        session_prompt: host_session_prompt,
         show_context_menu: host_show_context_menu,
         free_string: host_free_string,
     }
@@ -369,6 +415,10 @@ extern "C" fn host_open_session(
     let vtable_val = unsafe { *vtable };
     let title = unsafe { cstr_to_str(meta_ref.title) }.to_string();
 
+    // Look up the viewport that last dispatched widget events for this plugin.
+    let plugin_name = current_plugin_name();
+    let target_viewport = get_event_viewport(&plugin_name);
+
     let mut registry = b.session_registry.lock();
     let handle = registry.next_handle();
 
@@ -383,6 +433,7 @@ extern "C" fn host_open_session(
         bridge,
         vtable: vtable_val,
         backend_handle,
+        target_viewport,
     });
 
     log::info!("host_open_session: queued session {:?}", handle);
@@ -425,6 +476,45 @@ extern "C" fn host_set_session_status(
 }
 
 // ---------------------------------------------------------------------------
+// Session Prompts (inline in tab)
+// ---------------------------------------------------------------------------
+
+extern "C" fn host_session_prompt(
+    handle: SessionHandle,
+    prompt_type: u8,
+    msg: *const c_char,
+    detail: *const c_char,
+) -> *mut c_char {
+    let msg_str = unsafe { cstr_to_str(msg) }.to_string();
+    let detail_str = if detail.is_null() {
+        String::new()
+    } else {
+        unsafe { cstr_to_str(detail) }.to_string()
+    };
+
+    log::info!(
+        "host_session_prompt: handle={:?} type={} msg='{}'",
+        handle, prompt_type, msg_str
+    );
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let b = bridge();
+    b.session_registry.lock().pending_prompts.push(SessionPromptRequest {
+        handle,
+        prompt_type,
+        message: msg_str,
+        detail: detail_str,
+        reply: reply_tx,
+    });
+
+    // Block the plugin thread until the user responds in the UI.
+    match reply_rx.blocking_recv() {
+        Ok(Some(result)) => alloc_cstring(&result),
+        Ok(None) | Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dialogs
 // ---------------------------------------------------------------------------
 
@@ -438,10 +528,16 @@ extern "C" fn host_show_form(json: *const c_char, len: usize) -> *mut c_char {
         }
     };
 
+    let plugin_name = current_plugin_name();
+    let target_viewport = get_event_viewport(&plugin_name);
+
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = bridge().dialog_tx.send(DialogRequest::Form {
-        descriptor,
-        reply: reply_tx,
+    let _ = bridge().dialog_tx.send(DialogMessage {
+        request: DialogRequest::Form {
+            descriptor,
+            reply: reply_tx,
+        },
+        target_viewport,
     });
 
     // Block the plugin thread until the UI thread responds.
@@ -454,10 +550,21 @@ extern "C" fn host_show_form(json: *const c_char, len: usize) -> *mut c_char {
 extern "C" fn host_show_confirm(msg: *const c_char) -> bool {
     let msg_str = unsafe { cstr_to_str(msg) }.to_string();
 
+    let plugin_name = current_plugin_name();
+    let thread_name = std::thread::current().name().unwrap_or("unnamed").to_string();
+    let target_viewport = get_event_viewport(&plugin_name);
+    log::info!(
+        "host_show_confirm: plugin='{}' thread='{}' target_viewport={:?}",
+        plugin_name, thread_name, target_viewport
+    );
+
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = bridge().dialog_tx.send(DialogRequest::Confirm {
-        msg: msg_str,
-        reply: reply_tx,
+    let _ = bridge().dialog_tx.send(DialogMessage {
+        request: DialogRequest::Confirm {
+            msg: msg_str,
+            reply: reply_tx,
+        },
+        target_viewport,
     });
 
     reply_rx.blocking_recv().unwrap_or(false)
@@ -470,11 +577,22 @@ extern "C" fn host_show_prompt(
     let msg_str = unsafe { cstr_to_str(msg) }.to_string();
     let default = unsafe { cstr_to_str(default_value) }.to_string();
 
+    let plugin_name = current_plugin_name();
+    let thread_name = std::thread::current().name().unwrap_or("unnamed").to_string();
+    let target_viewport = get_event_viewport(&plugin_name);
+    log::info!(
+        "host_show_prompt: plugin='{}' thread='{}' target_viewport={:?}",
+        plugin_name, thread_name, target_viewport
+    );
+
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = bridge().dialog_tx.send(DialogRequest::Prompt {
-        msg: msg_str,
-        default_value: default,
-        reply: reply_tx,
+    let _ = bridge().dialog_tx.send(DialogMessage {
+        request: DialogRequest::Prompt {
+            msg: msg_str,
+            default_value: default,
+            reply: reply_tx,
+        },
+        target_viewport,
     });
 
     match reply_rx.blocking_recv() {
@@ -487,11 +605,17 @@ extern "C" fn host_show_alert(title: *const c_char, msg: *const c_char) {
     let title_str = unsafe { cstr_to_str(title) }.to_string();
     let msg_str = unsafe { cstr_to_str(msg) }.to_string();
 
+    let plugin_name = current_plugin_name();
+    let target_viewport = get_event_viewport(&plugin_name);
+
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = bridge().dialog_tx.send(DialogRequest::Alert {
-        title: title_str,
-        msg: msg_str,
-        reply: reply_tx,
+    let _ = bridge().dialog_tx.send(DialogMessage {
+        request: DialogRequest::Alert {
+            title: title_str,
+            msg: msg_str,
+            reply: reply_tx,
+        },
+        target_viewport,
     });
 
     // Block until user dismisses.
@@ -502,11 +626,17 @@ extern "C" fn host_show_error(title: *const c_char, msg: *const c_char) {
     let title_str = unsafe { cstr_to_str(title) }.to_string();
     let msg_str = unsafe { cstr_to_str(msg) }.to_string();
 
+    let plugin_name = current_plugin_name();
+    let target_viewport = get_event_viewport(&plugin_name);
+
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = bridge().dialog_tx.send(DialogRequest::Error {
-        title: title_str,
-        msg: msg_str,
-        reply: reply_tx,
+    let _ = bridge().dialog_tx.send(DialogMessage {
+        request: DialogRequest::Error {
+            title: title_str,
+            msg: msg_str,
+            reply: reply_tx,
+        },
+        target_viewport,
     });
 
     // Block until user dismisses.
@@ -731,10 +861,16 @@ extern "C" fn host_get_theme() -> *mut c_char {
 extern "C" fn host_show_context_menu(json: *const c_char, len: usize) -> *mut c_char {
     let json_str = unsafe { slice_to_str(json, len) };
 
+    let plugin_name = current_plugin_name();
+    let target_viewport = get_event_viewport(&plugin_name);
+
     let (reply_tx, reply_rx) = oneshot::channel();
-    let _ = bridge().dialog_tx.send(DialogRequest::ContextMenu {
-        items_json: json_str.to_string(),
-        reply: reply_tx,
+    let _ = bridge().dialog_tx.send(DialogMessage {
+        request: DialogRequest::ContextMenu {
+            items_json: json_str.to_string(),
+            reply: reply_tx,
+        },
+        target_viewport,
     });
 
     match reply_rx.blocking_recv() {

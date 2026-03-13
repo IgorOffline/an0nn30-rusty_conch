@@ -18,6 +18,22 @@ use crate::host::session_bridge::PluginSessionBridge;
 use crate::terminal::color::ResolvedColors;
 use crate::ui_theme::UiTheme;
 
+/// An inline prompt displayed in the session's connecting screen.
+pub struct SessionPrompt {
+    /// 0 = confirm (Accept/Reject), 1 = password input.
+    pub prompt_type: u8,
+    /// Main message text.
+    pub message: String,
+    /// Secondary detail text (e.g., fingerprint).
+    pub detail: String,
+    /// Password input buffer (for prompt_type == 1).
+    pub password_buf: String,
+    /// Whether to auto-focus the password field on next frame.
+    pub focus_password: bool,
+    /// Channel to send the user's response back to the plugin thread.
+    pub reply: Option<tokio::sync::oneshot::Sender<Option<String>>>,
+}
+
 /// The underlying backend for a terminal session.
 pub enum SessionBackend {
     /// A local PTY process (shell).
@@ -48,6 +64,8 @@ pub struct Session {
     pub status_detail: Option<String>,
     /// When the session started connecting (for progress animation).
     pub connect_started: Option<std::time::Instant>,
+    /// Inline prompt (fingerprint accept, password) shown in the connecting screen.
+    pub prompt: Option<SessionPrompt>,
 }
 
 impl Session {

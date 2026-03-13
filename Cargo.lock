@@ -940,11 +940,13 @@ name = "conch-ssh"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "base64",
  "conch_plugin_sdk",
  "dirs",
  "log",
  "russh",
  "russh-keys",
+ "russh-sftp",
  "serde",
  "serde_json",
  "ssh-key",
@@ -958,6 +960,7 @@ version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "arboard",
  "clap",
  "conch_core",
  "conch_plugin",
