@@ -429,24 +429,39 @@ fn render_widget(
         // -- Complex Widgets (MVP placeholders) -------------------------------
 
         Widget::SplitPane {
-            direction, left, right, ..
+            id, direction, ratio, left, right, ..
         } => {
             match direction {
                 SplitDirection::Horizontal => {
+                    let total = ui.available_width();
+                    let left_w = total * ratio;
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
+                        ui.allocate_ui(egui::vec2(left_w, ui.available_height()), |ui| {
                             render_widget(ui, left, theme, text_input_state, events, icon_cache);
                         });
                         ui.separator();
-                        ui.vertical(|ui| {
-                            render_widget(ui, right, theme, text_input_state, events, icon_cache);
-                        });
+                        render_widget(ui, right, theme, text_input_state, events, icon_cache);
                     });
                 }
                 SplitDirection::Vertical => {
-                    render_widget(ui, left, theme, text_input_state, events, icon_cache);
+                    let total = ui.available_height();
+                    let half = (total * ratio).max(40.0);
+                    // Top half in a scroll area.
+                    egui::ScrollArea::vertical()
+                        .id_salt(format!("{id}_top"))
+                        .max_height(half)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            render_widget(ui, left, theme, text_input_state, events, icon_cache);
+                        });
                     ui.separator();
-                    render_widget(ui, right, theme, text_input_state, events, icon_cache);
+                    // Bottom half in a scroll area.
+                    egui::ScrollArea::vertical()
+                        .id_salt(format!("{id}_bottom"))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            render_widget(ui, right, theme, text_input_state, events, icon_cache);
+                        });
                 }
             }
         }

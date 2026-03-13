@@ -939,6 +939,7 @@ dependencies = [
 name = "conch-files"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "conch_plugin_sdk",
  "dirs",
  "hostname",
