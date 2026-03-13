@@ -23,6 +23,7 @@ const CURSOR_BLINK_MS: u128 = 500;
 pub enum ExtraWindowAction {
     SpawnNewWindow,
     QuitApp,
+    TogglePluginManager,
 }
 
 /// Read-only state borrowed from the main app for extra window rendering.
@@ -365,8 +366,11 @@ impl ExtraWindow {
             MenuAction::ZoomReset => {
                 ctx.set_pixels_per_point(1.0);
             }
-            // Actions not applicable to extra windows.
-            MenuAction::SelectAll | MenuAction::ZenMode | MenuAction::PluginManager => {}
+            MenuAction::PluginManager => {
+                self.pending_actions.push(ExtraWindowAction::TogglePluginManager);
+            }
+            // Actions not yet implemented.
+            MenuAction::SelectAll | MenuAction::ZenMode => {}
         }
     }
 

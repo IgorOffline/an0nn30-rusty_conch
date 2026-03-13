@@ -390,10 +390,30 @@ impl eframe::App for ConchApp {
         // Show plugin dialogs (form, confirm, prompt, alert, error).
         self.dialog_state.show(ctx);
 
+        // If the user closes the main window while extra windows exist,
+        // hide the main window instead of quitting the whole app.
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested && !self.extra_windows.is_empty() {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            // Shut down main-window sessions but keep the app alive.
+            let ids: Vec<_> = self.state.tab_order.clone();
+            for id in ids {
+                self.remove_session(id);
+            }
+            self.has_ever_had_session = true;
+            return;
+        }
+
         // Close the app when the last tab is closed. On first launch (no
         // session yet), open an initial local shell tab instead.
         if self.state.sessions.is_empty() {
             if self.has_ever_had_session {
+                // If extra windows still exist, just hide the main window.
+                if !self.extra_windows.is_empty() {
+                    ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                    return;
+                }
                 ctx.send_viewport_cmd(ViewportCommand::Close);
                 return;
             }
@@ -472,6 +492,9 @@ impl eframe::App for ConchApp {
                     crate::extra_window::ExtraWindowAction::QuitApp => {
                         self.quit_requested = true;
                     }
+                    crate::extra_window::ExtraWindowAction::TogglePluginManager => {
+                        self.show_plugin_manager = !self.show_plugin_manager;
+                    }
                 }
             }
         }
@@ -482,6 +505,12 @@ impl eframe::App for ConchApp {
 
         if spawn_new_window {
             self.spawn_extra_window();
+        }
+
+        // If the main window is hidden and all extra windows are now closed, quit.
+        if self.extra_windows.is_empty() && self.state.sessions.is_empty() && self.has_ever_had_session {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
         }
 
         // ── Apply centralized UI theme (only when changed) ──
