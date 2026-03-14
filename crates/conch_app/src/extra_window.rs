@@ -17,6 +17,7 @@ use crate::host::dialogs::DialogState;
 use crate::icons::IconCache;
 use crate::input::{self, ResolvedShortcuts};
 use crate::mouse::Selection;
+use crate::notifications::NotificationManager;
 use crate::sessions::create_local_session;
 use crate::state::Session;
 use crate::tab_bar::{self, TabBarAction, TabBarState};
@@ -85,6 +86,8 @@ pub struct ExtraWindow {
     pub left_panel_visible: bool,
     pub right_panel_visible: bool,
     pub bottom_panel_visible: bool,
+    pub show_status_bar: bool,
+    pub context_menu_state: crate::context_menu::ContextMenuState,
 }
 
 impl ExtraWindow {
@@ -121,6 +124,8 @@ impl ExtraWindow {
             left_panel_visible: true,
             right_panel_visible: true,
             bottom_panel_visible: true,
+            show_status_bar: true,
+            context_menu_state: crate::context_menu::ContextMenuState::default(),
         }
     }
 
@@ -161,6 +166,19 @@ impl ExtraWindow {
         self.active_tab.and_then(|id| self.sessions.get(&id))
     }
 
+    /// Toggle zen mode: hide/show panels and status bar.
+    fn toggle_zen_mode(&mut self) {
+        if self.left_panel_visible || self.right_panel_visible || self.show_status_bar {
+            self.left_panel_visible = false;
+            self.right_panel_visible = false;
+            self.show_status_bar = false;
+        } else {
+            self.left_panel_visible = true;
+            self.right_panel_visible = true;
+            self.show_status_bar = true;
+        }
+    }
+
     /// Render the extra window's UI inside a viewport closure.
     pub fn update(
         &mut self,
@@ -170,6 +188,7 @@ impl ExtraWindow {
         plugin_text_state: &mut HashMap<String, String>,
         active_panel_tab: &mut HashMap<PanelLocation, u64>,
         dialog_state: &mut DialogState,
+        notifications: &mut NotificationManager,
     ) {
         // Clear pending actions from previous frame.
         self.pending_actions.clear();
@@ -179,7 +198,7 @@ impl ExtraWindow {
 
         // Process any menu actions routed from the main window.
         for action in std::mem::take(&mut self.pending_menu_actions) {
-            self.handle_menu_action(action, ctx, shared.user_config);
+            self.handle_menu_action(action, ctx, shared);
         }
 
         // Apply theme on first frame and when it changes.
@@ -295,7 +314,7 @@ impl ExtraWindow {
         if shared.show_in_window_menu {
             let menu_id = egui::Id::new("menu_bar").with(self.viewport_id);
             if let Some(action) = crate::menu_bar::egui_menu::show_with_id(ctx, menu_id) {
-                self.handle_menu_action(action, ctx, shared.user_config);
+                self.handle_menu_action(action, ctx, shared);
             }
         }
 
@@ -314,6 +333,11 @@ impl ExtraWindow {
 
         // Show plugin dialogs routed to this viewport.
         dialog_state.show(ctx, self.viewport_id);
+
+        // Status bar at the very bottom edge.
+        if self.show_status_bar {
+            crate::host::plugin_panels::render_status_bar(ctx, shared.theme);
+        }
 
         // Render plugin panels (same as main window, using shared state).
         crate::host::plugin_panels::render_plugin_panels_for_ctx(
@@ -356,6 +380,7 @@ impl ExtraWindow {
         // Central panel: terminal rendering + mouse handling.
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut close_tab_requested = false;
+        let mut context_action: Option<crate::menu_bar::MenuAction> = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(bg_color))
             .show(ctx, |ui| {
@@ -418,6 +443,12 @@ impl ExtraWindow {
 
                             pending_resize = Some((size_info.columns() as u16, size_info.rows() as u16));
 
+                            // Check mouse mode for context menu suppression.
+                            let mouse_mode = term
+                                .try_lock_unfair()
+                                .map(|t| t.mode().intersects(alacritty_terminal::term::TermMode::MOUSE_MODE))
+                                .unwrap_or(false);
+
                             // Mouse handling.
                             crate::mouse::handle_terminal_mouse(
                                 ctx,
@@ -429,10 +460,24 @@ impl ExtraWindow {
                                 self.cell_height,
                                 shared.user_config.terminal.scroll_sensitivity,
                             );
+
+                            // Context menu (suppressed in mouse mode for tmux compatibility).
+                            let has_selection = self.selection.normalized().is_some();
+                            context_action = crate::context_menu::show(
+                                &response,
+                                &mut self.context_menu_state,
+                                mouse_mode,
+                                has_selection,
+                            );
                         }
                     }
                 }
             });
+
+        // Handle context menu action (deferred to avoid borrow conflicts).
+        if let Some(action) = context_action {
+            self.handle_menu_action(action, ctx, shared);
+        }
 
         // Handle close-tab request from error screen.
         if close_tab_requested {
@@ -462,15 +507,18 @@ impl ExtraWindow {
             ctx.send_viewport_cmd(ViewportCommand::Title(title));
         }
 
+        // Render toast notifications on top of everything.
+        notifications.show(ctx);
+
         // Request repaint after 500ms for cursor blink.
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
     /// Handle a menu bar action locally within this extra window.
-    fn handle_menu_action(&mut self, action: crate::menu_bar::MenuAction, ctx: &egui::Context, user_config: &config::UserConfig) {
+    fn handle_menu_action(&mut self, action: crate::menu_bar::MenuAction, ctx: &egui::Context, shared: &SharedState) {
         use crate::menu_bar::MenuAction;
         match action {
-            MenuAction::NewTab => self.open_local_tab(user_config),
+            MenuAction::NewTab => self.open_local_tab(shared.user_config),
             MenuAction::NewWindow => self.pending_actions.push(ExtraWindowAction::SpawnNewWindow),
             MenuAction::CloseTab => {
                 if let Some(id) = self.active_tab {
@@ -505,8 +553,22 @@ impl ExtraWindow {
             MenuAction::PluginManager => {
                 self.show_plugin_manager = !self.show_plugin_manager;
             }
+            MenuAction::ZenMode => {
+                self.toggle_zen_mode();
+            }
+            MenuAction::PluginAction { plugin_name, action } => {
+                // Record viewport so subsequent dialogs open in this window.
+                crate::host::bridge::set_event_viewport(&plugin_name, self.viewport_id);
+                // Forward to plugin bus as a MenuAction event.
+                let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
+                if let Ok(json) = serde_json::to_string(&event) {
+                    if let Some(sender) = shared.plugin_bus.sender_for(&plugin_name) {
+                        let _ = sender.try_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
+                    }
+                }
+            }
             // Actions not yet implemented.
-            MenuAction::SelectAll | MenuAction::ZenMode | MenuAction::PluginAction { .. } => {}
+            MenuAction::SelectAll => {}
         }
     }
 
@@ -598,11 +660,22 @@ impl ExtraWindow {
                             continue;
                         }
                     }
+                    if let Some(ref kb) = shared.shortcuts.zen_mode {
+                        if kb.matches(key, modifiers) {
+                            self.toggle_zen_mode();
+                            continue;
+                        }
+                    }
 
                     // Plugin-registered global keybindings.
                     let mut plugin_handled = false;
                     for pkb in shared.plugin_keybindings {
                         if pkb.binding.matches(key, modifiers) {
+                            // Record viewport so subsequent dialogs open in this window.
+                            crate::host::bridge::set_event_viewport(
+                                &pkb.plugin_name,
+                                self.viewport_id,
+                            );
                             let event = conch_plugin_sdk::PluginEvent::MenuAction {
                                 action: pkb.action.clone(),
                             };
@@ -640,6 +713,97 @@ impl ExtraWindow {
                 _ => {}
             }
         }
+    }
+}
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a minimal ExtraWindow for testing state logic.
+    /// We can't call `ExtraWindow::new()` without a real Session, so we
+    /// build the struct directly with default/dummy values.
+    fn make_test_window() -> ExtraWindow {
+        ExtraWindow {
+            viewport_id: egui::ViewportId::from_hash_of("test"),
+            viewport_builder: ViewportBuilder::default(),
+            sessions: HashMap::new(),
+            tab_order: Vec::new(),
+            active_tab: None,
+            cell_width: 0.0,
+            cell_height: 0.0,
+            cell_size_measured: false,
+            last_pixels_per_point: 0.0,
+            last_cols: 0,
+            last_rows: 0,
+            selection: Selection::default(),
+            cursor_visible: true,
+            last_blink: Instant::now(),
+            frame_cache: TerminalFrameCache::default(),
+            should_close: false,
+            title: String::new(),
+            pending_actions: Vec::new(),
+            tab_bar_state: TabBarState::default(),
+            style_applied: false,
+            show_plugin_manager: false,
+            has_focus: false,
+            pending_menu_actions: Vec::new(),
+            left_panel_visible: true,
+            right_panel_visible: true,
+            bottom_panel_visible: true,
+            show_status_bar: true,
+            context_menu_state: crate::context_menu::ContextMenuState::default(),
+        }
+    }
+
+    #[test]
+    fn toggle_zen_mode_hides_panels_and_status_bar() {
+        let mut win = make_test_window();
+        assert!(win.left_panel_visible);
+        assert!(win.right_panel_visible);
+        assert!(win.show_status_bar);
+
+        win.toggle_zen_mode();
+        assert!(!win.left_panel_visible);
+        assert!(!win.right_panel_visible);
+        assert!(!win.show_status_bar);
+    }
+
+    #[test]
+    fn toggle_zen_mode_restores_panels_and_status_bar() {
+        let mut win = make_test_window();
+        win.toggle_zen_mode(); // hide
+        win.toggle_zen_mode(); // restore
+
+        assert!(win.left_panel_visible);
+        assert!(win.right_panel_visible);
+        assert!(win.show_status_bar);
+    }
+
+    #[test]
+    fn toggle_zen_mode_partial_visibility_hides_all() {
+        let mut win = make_test_window();
+        // Simulate partial state: only status bar visible.
+        win.left_panel_visible = false;
+        win.right_panel_visible = false;
+        win.show_status_bar = true;
+
+        win.toggle_zen_mode();
+        // Should hide all since at least one was visible.
+        assert!(!win.left_panel_visible);
+        assert!(!win.right_panel_visible);
+        assert!(!win.show_status_bar);
+    }
+
+    #[test]
+    fn new_window_defaults() {
+        let win = make_test_window();
+        assert!(win.left_panel_visible);
+        assert!(win.right_panel_visible);
+        assert!(win.bottom_panel_visible);
+        assert!(win.show_status_bar);
     }
 }
 
@@ -701,6 +865,7 @@ impl ConchApp {
                         &mut self.plugin_text_state,
                         &mut self.active_panel_tab,
                         &mut self.dialog_state,
+                        &mut self.notifications,
                     );
                 },
             );
