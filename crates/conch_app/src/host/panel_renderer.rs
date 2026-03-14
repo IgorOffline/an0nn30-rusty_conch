@@ -96,16 +96,13 @@ pub fn render_panel_header<'a>(
     };
 
     // Check for a Toolbar widget following the title.
-    let toolbar_items: Option<Vec<_>> = if let Some(Widget::Toolbar { items, .. }) = rest.first() {
-        let filtered: Vec<_> = items
-            .iter()
-            .filter(|i| !matches!(i, conch_plugin_sdk::widgets::ToolbarItem::Spacer))
-            .collect();
-        rest = &rest[1..];
-        if filtered.is_empty() { None } else { Some(filtered) }
-    } else {
-        None
-    };
+    let toolbar_items: Option<&[conch_plugin_sdk::widgets::ToolbarItem]> =
+        if let Some(Widget::Toolbar { items, .. }) = rest.first() {
+            rest = &rest[1..];
+            if items.is_empty() { None } else { Some(items) }
+        } else {
+            None
+        };
 
     // Title row with toolbar buttons right-aligned on the same line.
     if !title.is_empty() || toolbar_items.is_some() {
@@ -118,41 +115,54 @@ pub fn render_panel_header<'a>(
                         .color(theme.text),
                 );
             }
-            if let Some(ref items) = toolbar_items {
+            if let Some(items) = toolbar_items {
                 use conch_plugin_sdk::widgets::ToolbarItem;
 
                 let text_idx = items.iter().position(|i| matches!(i, ToolbarItem::TextInput { .. }));
 
                 if let Some(idx) = text_idx {
+                    // Toolbar has a text input — split into before/input/after.
                     let before = &items[..idx];
-                    let text_item = &items[idx];
                     let after = &items[idx + 1..];
 
                     // Render items before the text input (e.g. back/forward).
                     for item in before {
+                        if matches!(item, ToolbarItem::Spacer) { continue; }
                         render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
                     }
 
-                    // Measure right-side items by rendering them invisibly.
-                    let after_id = ui.id().with("toolbar_after_width");
-                    let prev_right_width = ui.data(|d| d.get_temp::<f32>(after_id)).unwrap_or(100.0);
-
-                    // Text input gets remaining space minus the right-side width.
-                    let spacing = ui.spacing().item_spacing.x;
-                    let text_width = (ui.available_width() - prev_right_width - spacing).max(60.0);
-                    render_toolbar_text_input(ui, text_item, theme, text_input_state, events, text_width);
-
-                    // Render right-side items and measure their actual width.
-                    let before_right = ui.cursor().min.x;
-                    for item in after {
-                        render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
-                    }
-                    let actual_right_width = ui.min_rect().max.x - before_right + spacing;
-                    ui.data_mut(|d| d.insert_temp(after_id, actual_right_width));
+                    // RTL sub-layout: right-side buttons render first (from right
+                    // edge inward), then the text input fills remaining space.
+                    let available = ui.available_width();
+                    let height = ui.spacing().interact_size.y;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(available, height),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            for item in after.iter().rev() {
+                                if matches!(item, ToolbarItem::Spacer) { continue; }
+                                render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
+                            }
+                            let text_width = ui.available_width();
+                            render_toolbar_text_input(
+                                ui, &items[idx], theme, text_input_state, events, text_width,
+                            );
+                        },
+                    );
                 } else {
-                    for item in items.iter() {
-                        render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
-                    }
+                    // No text input — right-align all buttons (original behavior).
+                    let available = ui.available_width();
+                    let height = ui.spacing().interact_size.y;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(available, height),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            for item in items.iter().rev() {
+                                if matches!(item, ToolbarItem::Spacer) { continue; }
+                                render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
+                            }
+                        },
+                    );
                 }
             }
         });
@@ -569,12 +579,43 @@ fn render_widget(
         }
 
         Widget::Toolbar { items, .. } => {
-            // Check if items start with a Spacer — if so, render remaining items right-aligned.
-            let has_leading_spacer = matches!(items.first(), Some(conch_plugin_sdk::widgets::ToolbarItem::Spacer));
-            let items_to_render = if has_leading_spacer { &items[1..] } else { &items[..] };
+            use conch_plugin_sdk::widgets::ToolbarItem;
 
-            if has_leading_spacer {
-                // Use horizontal wrapping to constrain height, then right-align inside.
+            let has_leading_spacer = matches!(items.first(), Some(ToolbarItem::Spacer));
+            let items_to_render = if has_leading_spacer { &items[1..] } else { &items[..] };
+            let text_idx = items_to_render.iter().position(|i| matches!(i, ToolbarItem::TextInput { .. }));
+
+            if let Some(idx) = text_idx {
+                // Toolbar with a text input: left items, then RTL sub-layout
+                // where right buttons render first and text input fills the rest.
+                let before = &items_to_render[..idx];
+                let after = &items_to_render[idx + 1..];
+
+                ui.horizontal(|ui| {
+                    for item in before {
+                        if matches!(item, ToolbarItem::Spacer) { continue; }
+                        render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
+                    }
+
+                    let available = ui.available_width();
+                    let height = ui.spacing().interact_size.y;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(available, height),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            for item in after.iter().rev() {
+                                if matches!(item, ToolbarItem::Spacer) { continue; }
+                                render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
+                            }
+                            let text_width = ui.available_width();
+                            render_toolbar_text_input(
+                                ui, &items_to_render[idx], theme, text_input_state, events, text_width,
+                            );
+                        },
+                    );
+                });
+            } else if has_leading_spacer {
+                // Right-aligned buttons (e.g. SSH plugin's new folder button).
                 ui.horizontal(|ui| {
                     let available = ui.available_width();
                     ui.allocate_ui_with_layout(
@@ -588,6 +629,7 @@ fn render_widget(
                     );
                 });
             } else {
+                // Simple left-to-right toolbar.
                 ui.horizontal(|ui| {
                     for item in items_to_render {
                         render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
