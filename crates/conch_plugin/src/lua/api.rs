@@ -375,6 +375,7 @@ fn register_ui_table(lua: &Lua) -> LuaResult<()> {
                     id: None,
                     children,
                     spacing,
+                    centered: None,
                 })
             });
             Ok(())
@@ -939,6 +940,7 @@ fn build_table_widget(columns: LuaValue, rows: LuaValue) -> LuaResult<Widget> {
                     label,
                     sortable: None,
                     width: None,
+                    visible: None,
                 })
                 .collect();
 
@@ -985,6 +987,7 @@ fn build_table_advanced(tbl: &LuaTable) -> LuaResult<Widget> {
                 label: t.get("label")?,
                 sortable: t.get("sortable").ok(),
                 width: t.get("width").ok(),
+                visible: t.get("visible").ok(),
             })
         })
         .collect::<LuaResult<_>>()?;

@@ -50,7 +50,7 @@ fn seed_bottom_panel(ctx: &egui::Context, id: egui::Id, height: f32) {
     ctx.data_mut(|d| d.insert_persisted(id, PanelState { rect }));
 }
 
-const DEFAULT_SIDE_WIDTH: f32 = 240.0;
+const DEFAULT_SIDE_WIDTH: f32 = 300.0;
 const DEFAULT_BOTTOM_HEIGHT: f32 = 180.0;
 
 /// Width of the vertical tab strip panel.
@@ -183,10 +183,10 @@ pub(crate) fn render_plugin_panels_for_ctx(
                 // Content panel.
                 let resp = egui::SidePanel::left(eid)
                     .default_width(left_w)
+                    .width_range(150.0..=600.0)
                     .resizable(true)
                     .frame(egui::Frame::NONE.fill(theme.surface).inner_margin(8.0))
                     .show(ctx, |ui| {
-                        ui.set_min_width(ui.available_width());
                         let remaining = if !multi {
                             let mut hdr_events = Vec::new();
                             let rest = crate::host::panel_renderer::render_panel_header(
@@ -236,10 +236,10 @@ pub(crate) fn render_plugin_panels_for_ctx(
                 // Content panel.
                 let resp = egui::SidePanel::right(eid)
                     .default_width(right_w)
+                    .width_range(150.0..=600.0)
                     .resizable(true)
                     .frame(egui::Frame::NONE.fill(theme.surface).inner_margin(8.0))
                     .show(ctx, |ui| {
-                        ui.set_min_width(ui.available_width());
                         let remaining = if !multi {
                             let mut hdr_events = Vec::new();
                             let rest = crate::host::panel_renderer::render_panel_header(
@@ -365,8 +365,8 @@ impl ConchApp {
     pub(crate) fn render_plugin_panels(&mut self, ctx: &egui::Context) {
         let theme = self.state.theme.clone();
         let layout = &self.state.persistent.layout;
-        let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width } else { DEFAULT_SIDE_WIDTH };
-        let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width } else { DEFAULT_SIDE_WIDTH };
+        let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width.min(600.0) } else { DEFAULT_SIDE_WIDTH };
+        let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width.min(600.0) } else { DEFAULT_SIDE_WIDTH };
         let bottom_h = if layout.bottom_panel_height > 0.0 { layout.bottom_panel_height } else { DEFAULT_BOTTOM_HEIGHT };
 
         let sizes = render_plugin_panels_for_ctx(
@@ -397,6 +397,57 @@ impl ConchApp {
         if let Some(h) = sizes.bottom_height {
             self.state.persistent.layout.bottom_panel_height = h;
         }
+    }
+
+    /// Render the global status bar at the very bottom of the window.
+    pub(crate) fn render_status_bar(&self, ctx: &egui::Context) {
+        use super::bridge;
+
+        let mut entry = bridge::get_status_bar();
+
+        // Auto-clear info/success messages after 10 seconds.
+        if let Some(ref e) = entry {
+            if (e.level == 0 || e.level == 3)
+                && e.progress < 0.0
+                && e.timestamp.elapsed().as_secs() > 10
+            {
+                bridge::set_status_bar(None);
+                entry = None;
+            }
+        }
+
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(18.0)
+            .frame(egui::Frame::NONE.fill(self.state.theme.surface))
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add_space(6.0);
+                    if let Some(entry) = &entry {
+                        let color = match entry.level {
+                            1 => self.state.theme.warn,
+                            2 => self.state.theme.error,
+                            3 => self.state.theme.accent,
+                            _ => self.state.theme.text_secondary,
+                        };
+
+                        if entry.progress >= 0.0 {
+                            // Label on the left, then a small progress bar.
+                            ui.colored_label(color, &entry.text);
+                            ui.add_space(8.0);
+                            let progress = entry.progress.clamp(0.0, 1.0);
+                            let bar = egui::ProgressBar::new(progress)
+                                .desired_width(100.0)
+                                .desired_height(10.0);
+                            ui.add(bar);
+                        } else {
+                            ui.colored_label(color, &entry.text);
+                        }
+                    } else {
+                        ui.colored_label(self.state.theme.text_muted, "Ready");
+                    }
+                });
+            });
     }
 }
 

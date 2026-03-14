@@ -67,6 +67,7 @@ pub struct ConchApp {
     /// Panel visibility toggles.
     pub(crate) left_panel_visible: bool,
     pub(crate) right_panel_visible: bool,
+    pub(crate) show_status_bar: bool,
     pub(crate) bottom_panel_visible: bool,
     /// Active panel tab per location (handle of the selected panel).
     pub(crate) active_panel_tab: HashMap<PanelLocation, u64>,
@@ -83,6 +84,9 @@ pub struct ConchApp {
 
     // Icons.
     pub(crate) icon_cache: Option<crate::icons::IconCache>,
+
+    // Tab change tracking (for plugin bus events).
+    pub(crate) prev_active_tab: Option<uuid::Uuid>,
 
     // System.
     pub(crate) ipc_listener: Option<IpcListener>,
@@ -149,6 +153,7 @@ impl ConchApp {
             plugin_text_state: HashMap::new(),
             left_panel_visible: true,
             right_panel_visible: true,
+            show_status_bar: true,
             bottom_panel_visible: true,
             active_panel_tab: HashMap::new(),
             extra_windows: Vec::new(),
@@ -156,6 +161,7 @@ impl ConchApp {
             dialog_state,
             session_registry,
             icon_cache: None,
+            prev_active_tab: None,
             ipc_listener,
             file_watcher,
             has_ever_had_session: false,
@@ -461,9 +467,77 @@ impl ConchApp {
             }
         }
     }
+
+    /// Publish an `app.tab_changed` bus event so plugins (e.g. conch-files)
+    /// can react to the active session changing.
+    fn publish_tab_changed(&self) {
+        let (is_ssh, session_id) = if let Some(session) = self.state.active_session() {
+            match &session.backend {
+                crate::state::SessionBackend::Plugin { bridge, .. } => {
+                    (true, Some(bridge.handle.0))
+                }
+                crate::state::SessionBackend::Local(_) => (false, None),
+            }
+        } else {
+            (false, None)
+        };
+
+        let mut data = serde_json::json!({ "is_ssh": is_ssh });
+        if let Some(sid) = session_id {
+            data["session_id"] = serde_json::json!(sid);
+        }
+
+        self.plugin_bus.publish("app", "app.tab_changed", data);
+    }
+
+    pub(crate) fn toggle_zen_mode(&mut self) {
+        if self.left_panel_visible || self.right_panel_visible || self.show_status_bar {
+            self.left_panel_visible = false;
+            self.right_panel_visible = false;
+            self.show_status_bar = false;
+        } else {
+            self.left_panel_visible = true;
+            self.right_panel_visible = true;
+            self.show_status_bar = true;
+        }
+    }
 }
 
 impl eframe::App for ConchApp {
+    /// Runs *before* egui's `begin_pass()` — strip Tab key events from raw
+    /// input so egui never uses them for focus navigation. The Tab bytes are
+    /// written directly to the active PTY session here.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // If a dialog is open, let egui handle Tab normally.
+        if self.dialog_state.is_active_for(egui::ViewportId::ROOT) {
+            return;
+        }
+
+        let mut tab_bytes: Option<Vec<u8>> = None;
+        raw_input.events.retain(|e| match e {
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed: true,
+                modifiers,
+                ..
+            } => {
+                tab_bytes = Some(if modifiers.shift {
+                    b"\x1b[Z".to_vec()
+                } else {
+                    b"\t".to_vec()
+                });
+                false
+            }
+            _ => true,
+        });
+
+        if let Some(bytes) = tab_bytes {
+            if let Some(session) = self.state.active_session() {
+                session.write(&bytes);
+            }
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request continuous repainting for terminal output and cursor blink.
         ctx.request_repaint();
@@ -483,6 +557,12 @@ impl eframe::App for ConchApp {
         if self.last_blink.elapsed().as_millis() > CURSOR_BLINK_MS {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = Instant::now();
+        }
+
+        // Detect tab changes and notify plugins via the bus.
+        if self.state.active_tab != self.prev_active_tab {
+            self.prev_active_tab = self.state.active_tab;
+            self.publish_tab_changed();
         }
 
         // Poll events.
@@ -599,7 +679,7 @@ impl eframe::App for ConchApp {
         if effective_decorations == config::WindowDecorations::Full
             && cfg!(target_os = "macos")
         {
-            let title_bar_h = 28.0; // macOS native title bar height
+            let title_bar_h = 34.0; // macOS native title bar height + safe margin
             egui::TopBottomPanel::top("titlebar_spacer")
                 .exact_height(title_bar_h)
                 .frame(egui::Frame::NONE.fill(self.state.theme.surface))
@@ -640,6 +720,11 @@ impl eframe::App for ConchApp {
         // Lazy-init icon cache on first frame (needs egui context for textures).
         if self.icon_cache.is_none() {
             self.icon_cache = Some(crate::icons::IconCache::load(ctx));
+        }
+
+        // Status bar at the very bottom edge.
+        if self.show_status_bar {
+            self.render_status_bar(ctx);
         }
 
         // Render plugin panels (side panels, bottom panels).
@@ -760,8 +845,11 @@ impl eframe::App for ConchApp {
             self.resize_sessions(cols, rows);
         }
 
-        // Keyboard handling — forward to PTY unless a dialog is consuming input.
-        let forward_to_pty = !self.dialog_state.is_active_for(egui::ViewportId::ROOT);
+        // Keyboard handling — forward to PTY unless a dialog or text input is consuming input.
+        let text_edit_focused = ctx.memory(|m| m.focused()).is_some()
+            && ctx.wants_keyboard_input();
+        let forward_to_pty = !self.dialog_state.is_active_for(egui::ViewportId::ROOT)
+            && !text_edit_focused;
         self.handle_keyboard(ctx, forward_to_pty);
 
         // Quit handling.

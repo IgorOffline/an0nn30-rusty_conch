@@ -89,6 +89,12 @@ impl ConchApp {
                                 return;
                             }
                         }
+                        if let Some(ref kb) = self.shortcuts.zen_mode {
+                            if kb.matches(key, modifiers) {
+                                self.toggle_zen_mode();
+                                return;
+                            }
+                        }
 
                         // Ctrl+Shift+C for copy on non-macOS.
                         #[cfg(not(target_os = "macos"))]

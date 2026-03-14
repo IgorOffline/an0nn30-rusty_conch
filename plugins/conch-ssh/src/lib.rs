@@ -5,6 +5,7 @@ mod known_hosts;
 mod server_tree;
 mod session_backend;
 mod sftp;
+pub(crate) mod sftp_vtable;
 mod ssh_config_parser;
 
 use std::collections::HashMap;
@@ -38,7 +39,7 @@ use tokio::process::Command;
 use tokio::runtime::Runtime;
 
 use crate::config::{ServerEntry, SshConfig};
-use crate::server_tree::build_server_tree;
+use crate::server_tree::{build_server_tree, first_matching_server_id};
 use crate::session_backend::{SshBackendState, ssh_vtable};
 
 /// The SSH plugin's runtime state.
@@ -159,7 +160,14 @@ impl SshPlugin {
                 self.quick_connect_value = value;
             }
             WidgetEvent::TextInputSubmit { id, value } if id == "quick_connect" => {
-                self.quick_connect(&value);
+                // If the filter matches an existing server, connect to it.
+                // Otherwise, treat the input as a user@host:port connection string.
+                if let Some(server_id) = first_matching_server_id(&self.config, &self.ssh_config_entries, &value) {
+                    self.connect_to_server(&server_id);
+                } else {
+                    self.quick_connect(&value);
+                }
+                self.quick_connect_value.clear();
             }
             WidgetEvent::TreeSelect { id: _, node_id } => {
                 self.selected_node = Some(node_id);
@@ -537,7 +545,7 @@ impl SshPlugin {
     // -----------------------------------------------------------------------
 
     fn render(&self) -> Vec<Widget> {
-        build_server_tree(&self.config, &self.ssh_config_entries, &self.sessions, self.selected_node.as_deref())
+        build_server_tree(&self.config, &self.ssh_config_entries, &self.sessions, self.selected_node.as_deref(), &self.quick_connect_value)
     }
 
     // -----------------------------------------------------------------------
@@ -643,7 +651,7 @@ impl SshPlugin {
                 }
             }
             // SFTP operations — all require session_id and an SSH handle.
-            "list_dir" | "stat" | "read_file" | "write_file" | "mkdir" | "rename" | "delete" => {
+            "list_dir" | "stat" | "read_file" | "write_file" | "mkdir" | "rename" | "delete" | "realpath" => {
                 let session_id = args["session_id"].as_u64().unwrap_or(0);
                 match self.sessions.get(&session_id) {
                     Some(backend) if backend.connected => {
@@ -686,6 +694,10 @@ impl SshPlugin {
                                     } else {
                                         sftp::remove_file(ssh_handle, path).await
                                     }
+                                }
+                                "realpath" => {
+                                    let path = args["path"].as_str().unwrap_or(".");
+                                    sftp::realpath(ssh_handle, path).await
                                 }
                                 _ => unreachable!(),
                             }
@@ -944,6 +956,20 @@ fn do_ssh_connect_sync(
                 rt.handle(),
                 session_handle,
                 api.close_session,
+            );
+
+            // Register SFTP vtable so other plugins can do direct SFTP.
+            // SAFETY: backend_state is Box-heap-allocated and will live in
+            // self.sessions for the entire session lifetime. The vtable
+            // registration is removed when the session disconnects.
+            let backend_ptr: *const SshBackendState = &*backend_state as *const SshBackendState;
+            let sftp_ctx = unsafe {
+                sftp_vtable::SftpContext::new(backend_ptr, rt.handle().clone())
+            };
+            (api.register_sftp)(
+                session_handle.0,
+                &sftp_vtable::SFTP_VTABLE as *const _,
+                sftp_ctx as *mut std::ffi::c_void,
             );
 
             // Transition to Connected — host now renders the terminal.
