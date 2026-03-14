@@ -7,6 +7,13 @@
 use russh_sftp::client::SftpSession;
 use serde_json::{json, Value};
 
+/// Open an SFTP session on the given SSH handle (public for vtable use).
+pub async fn open_sftp_pub(
+    ssh: &russh::client::Handle<crate::SshHandler>,
+) -> Result<SftpSession, String> {
+    open_sftp(ssh).await
+}
+
 /// Open an SFTP session on the given SSH handle.
 async fn open_sftp(
     ssh: &russh::client::Handle<crate::SshHandler>,
@@ -168,6 +175,19 @@ pub async fn remove_file(
         .await
         .map_err(|e| format!("remove failed: {e}"))?;
     Ok(json!({ "status": "ok" }))
+}
+
+/// Resolve a path to its canonical absolute form.
+pub async fn realpath(
+    ssh: &russh::client::Handle<crate::SshHandler>,
+    path: &str,
+) -> Result<Value, String> {
+    let sftp = open_sftp(ssh).await?;
+    let resolved = sftp
+        .canonicalize(path)
+        .await
+        .map_err(|e| format!("realpath failed: {e}"))?;
+    Ok(json!({ "status": "ok", "path": resolved }))
 }
 
 /// Remove a directory.

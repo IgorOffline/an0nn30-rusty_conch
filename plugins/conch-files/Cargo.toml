@@ -14,3 +14,4 @@ serde_json = { workspace = true }
 log = { workspace = true }
 dirs = { workspace = true }
 hostname = { workspace = true }
+base64 = { workspace = true }

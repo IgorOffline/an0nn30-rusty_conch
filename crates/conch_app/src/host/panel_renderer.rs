@@ -95,13 +95,15 @@ pub fn render_panel_header<'a>(
         panel_name
     };
 
-    // Title row.
-    ui.label(
-        egui::RichText::new(title)
-            .size(theme.font_normal + 1.0)
-            .strong()
-            .color(theme.text),
-    );
+    // Title row (skip if empty — plugin opted out of the header title).
+    if !title.is_empty() {
+        ui.label(
+            egui::RichText::new(title)
+                .size(theme.font_normal + 1.0)
+                .strong()
+                .color(theme.text),
+        );
+    }
 
     // Check for a Toolbar widget → render on its own row.
     if let Some(Widget::Toolbar { items, .. }) = rest.first() {
@@ -143,16 +145,50 @@ fn render_widget(
         // -- Layout Containers ------------------------------------------------
 
         Widget::Horizontal {
-            children, spacing, ..
+            children, spacing, centered, ..
         } => {
-            ui.horizontal(|ui| {
-                if let Some(sp) = spacing {
-                    ui.spacing_mut().item_spacing.x = *sp;
-                }
-                for child in children {
-                    render_widget(ui, child, theme, text_input_state, events, icon_cache);
-                }
-            });
+            if centered.unwrap_or(false) {
+                // Get the full clip rect width (the actual panel content area).
+                let panel_width = ui.clip_rect().width();
+                let panel_left = ui.clip_rect().left();
+                let cache_id = ui.id().with("_hcw");
+                let cached_w: f32 = ui.ctx().data_mut(|d| {
+                    *d.get_temp_mut_or(cache_id, 0.0_f32)
+                });
+                ui.horizontal(|ui| {
+                    if let Some(sp) = spacing {
+                        ui.spacing_mut().item_spacing.x = *sp;
+                    }
+                    // Calculate the offset needed from the current cursor to
+                    // center content within the full panel width.
+                    if cached_w > 0.0 {
+                        let cursor_x = ui.cursor().left();
+                        let desired_x = panel_left + (panel_width - cached_w) / 2.0;
+                        let offset = (desired_x - cursor_x).max(0.0);
+                        if offset > 0.0 {
+                            let saved = ui.spacing().item_spacing.x;
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.add_space(offset);
+                            ui.spacing_mut().item_spacing.x = saved;
+                        }
+                    }
+                    let inner = ui.scope(|ui| {
+                        for child in children {
+                            render_widget(ui, child, theme, text_input_state, events, icon_cache);
+                        }
+                    });
+                    ui.ctx().data_mut(|d| d.insert_temp(cache_id, inner.response.rect.width()));
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    if let Some(sp) = spacing {
+                        ui.spacing_mut().item_spacing.x = *sp;
+                    }
+                    for child in children {
+                        render_widget(ui, child, theme, text_input_state, events, icon_cache);
+                    }
+                });
+            }
         }
 
         Widget::Vertical {
@@ -273,7 +309,8 @@ fn render_widget(
         Widget::Progress {
             fraction, label, ..
         } => {
-            let mut bar = egui::ProgressBar::new(*fraction);
+            let mut bar = egui::ProgressBar::new(*fraction)
+                .desired_height(6.0);
             if let Some(lbl) = label {
                 bar = bar.text(lbl.as_str());
             }
@@ -299,25 +336,38 @@ fn render_widget(
             let is_enabled = enabled.unwrap_or(true);
             let text_color = if is_enabled { theme.text } else { theme.text_muted };
             ui.add_enabled_ui(is_enabled, |ui| {
-                ui.horizontal(|ui| {
-                    // Render icon if provided.
+                // Icon-only button: use ImageButton when label is empty.
+                if label.is_empty() {
                     if let Some(icon_name) = icon {
                         let dark_mode = ui.visuals().dark_mode;
                         if let Some(ic) = icon_cache {
                             if let Some(img) = ic.image_by_name(icon_name, dark_mode) {
-                                ui.add(img);
+                                if ui.add(egui::ImageButton::new(img)).clicked() {
+                                    events.push(WidgetEvent::ButtonClick { id: id.clone() });
+                                }
                             }
                         }
                     }
-                    let button = egui::Button::new(
-                        RichText::new(label)
-                            .size(theme.font_normal)
-                            .color(text_color),
-                    );
-                    if ui.add(button).clicked() {
-                        events.push(WidgetEvent::ButtonClick { id: id.clone() });
-                    }
-                });
+                } else {
+                    ui.horizontal(|ui| {
+                        if let Some(icon_name) = icon {
+                            let dark_mode = ui.visuals().dark_mode;
+                            if let Some(ic) = icon_cache {
+                                if let Some(img) = ic.image_by_name(icon_name, dark_mode) {
+                                    ui.add(img);
+                                }
+                            }
+                        }
+                        let button = egui::Button::new(
+                            RichText::new(label)
+                                .size(theme.font_normal)
+                                .color(text_color),
+                        );
+                        if ui.add(button).clicked() {
+                            events.push(WidgetEvent::ButtonClick { id: id.clone() });
+                        }
+                    });
+                }
             });
         }
 
@@ -429,24 +479,36 @@ fn render_widget(
         // -- Complex Widgets (MVP placeholders) -------------------------------
 
         Widget::SplitPane {
-            direction, left, right, ..
+            id, direction, ratio, left, right, ..
         } => {
             match direction {
                 SplitDirection::Horizontal => {
+                    let total = ui.available_width();
+                    let left_w = total * ratio;
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
+                        ui.allocate_ui(egui::vec2(left_w, ui.available_height()), |ui| {
                             render_widget(ui, left, theme, text_input_state, events, icon_cache);
                         });
                         ui.separator();
-                        ui.vertical(|ui| {
-                            render_widget(ui, right, theme, text_input_state, events, icon_cache);
-                        });
+                        render_widget(ui, right, theme, text_input_state, events, icon_cache);
                     });
                 }
                 SplitDirection::Vertical => {
-                    render_widget(ui, left, theme, text_input_state, events, icon_cache);
+                    let total = ui.available_height();
+                    let sep_height = ui.spacing().item_spacing.y + 2.0;
+                    let usable = (total - sep_height).max(80.0);
+                    let half = (usable * ratio).max(40.0);
+                    let w = ui.available_width();
+                    // Top half — fixed height.
+                    ui.allocate_ui(egui::vec2(w, half), |ui| {
+                        render_widget(ui, left, theme, text_input_state, events, icon_cache);
+                    });
                     ui.separator();
-                    render_widget(ui, right, theme, text_input_state, events, icon_cache);
+                    // Bottom half — gets all remaining space.
+                    let remaining = ui.available_height();
+                    ui.allocate_ui(egui::vec2(w, remaining), |ui| {
+                        render_widget(ui, right, theme, text_input_state, events, icon_cache);
+                    });
                 }
             }
         }
@@ -507,7 +569,7 @@ fn render_widget(
             render_table(
                 ui, id, columns, rows,
                 sort_column.as_deref(), *sort_ascending,
-                selected_row.as_deref(), theme, events,
+                selected_row.as_deref(), theme, events, icon_cache,
             );
         }
 
@@ -858,7 +920,9 @@ fn render_toolbar_item(
             if buf != value && !ui.memory(|m| m.has_focus(ui.id().with(id))) {
                 *buf = value.clone();
             }
+            let te_id = ui.id().with(id);
             let mut te = egui::TextEdit::singleline(buf)
+                .id(te_id)
                 .font(egui::TextStyle::Body)
                 .margin(theme.text_edit_margin())
                 .desired_width(120.0);
@@ -897,6 +961,7 @@ fn render_table(
     selected_row: Option<&str>,
     theme: &UiTheme,
     events: &mut Vec<WidgetEvent>,
+    icon_cache: Option<&IconCache>,
 ) {
     // Build list of visible column indices.
     let visible_cols: Vec<usize> = columns
@@ -972,27 +1037,41 @@ fn render_table(
                 });
             }
 
-            // Right-click on header -> TableHeaderContextMenu event.
+            // Right-click on any header -> show column visibility context menu.
             response.context_menu(|ui| {
-                events.push(WidgetEvent::TableHeaderContextMenu {
-                    id: table_id.to_string(),
-                    column: col.id.clone(),
-                });
-                ui.close_menu();
+                ui.label(RichText::new("Columns").strong().size(theme.font_small));
+                ui.separator();
+                for toggle_col in columns.iter() {
+                    let mut visible = toggle_col.visible.unwrap_or(true);
+                    if ui.checkbox(&mut visible, &toggle_col.label).clicked() {
+                        events.push(WidgetEvent::TableHeaderContextMenu {
+                            id: table_id.to_string(),
+                            column: toggle_col.id.clone(),
+                        });
+                        ui.close_menu();
+                    }
+                }
             });
         }
     });
 
     ui.separator();
 
-    // Data rows in a scroll area.
+    // Data rows in a scroll area. Reserve space for a footer below the table.
     let row_height = 22.0;
+    let footer_reserve = row_height + ui.spacing().item_spacing.y;
+    let max_h = (ui.available_height() - footer_reserve).max(row_height * 2.0);
     egui::ScrollArea::vertical()
+        .id_salt(table_id)
+        .max_height(max_h)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
 
-            for row in rows {
+            let row_color_a = egui::Color32::from_rgb(0x1C, 0x1C, 0x1D);
+            let row_color_b = egui::Color32::from_rgb(0x27, 0x26, 0x28);
+
+            for (row_idx, row) in rows.iter().enumerate() {
                 let is_selected = selected_row == Some(row.id.as_str());
                 let row_width = ui.available_width();
 
@@ -1002,7 +1081,10 @@ fn render_table(
                     egui::Sense::click(),
                 );
 
-                // Selection background.
+                // Alternating row background, then selection on top.
+                let bg = if row_idx % 2 == 0 { row_color_a } else { row_color_b };
+                ui.painter().rect_filled(row_rect, 0.0, bg);
+
                 if is_selected {
                     ui.painter().rect_filled(
                         row_rect,
@@ -1013,12 +1095,14 @@ fn render_table(
 
                 // Draw cells within the row rect.
                 let mut x = row_rect.left();
+                let dark_mode = ui.visuals().dark_mode;
+                let icon_size = row_height - 4.0;
                 for (vi, &col_idx) in visible_cols.iter().enumerate() {
                     let width = col_widths[vi];
                     if let Some(cell) = row.cells.get(col_idx) {
-                        let text = match cell {
-                            TableCell::Text(t) => t.as_str(),
-                            TableCell::Rich { text, .. } => text.as_str(),
+                        let (text, icon_name) = match cell {
+                            TableCell::Text(t) => (t.as_str(), None),
+                            TableCell::Rich { text, icon, .. } => (text.as_str(), icon.as_deref()),
                         };
 
                         let cell_rect = egui::Rect::from_min_size(
@@ -1026,7 +1110,23 @@ fn render_table(
                             egui::vec2(width, row_height),
                         );
 
-                        let text_pos = cell_rect.left_center() + egui::vec2(4.0, 0.0);
+                        let mut text_x = cell_rect.left() + 4.0;
+
+                        // Draw icon if present.
+                        if let Some(name) = icon_name {
+                            if let Some(ic) = icon_cache {
+                                if let Some(img) = ic.image_by_name(name, dark_mode) {
+                                    let icon_rect = egui::Rect::from_min_size(
+                                        egui::pos2(text_x, cell_rect.center().y - icon_size / 2.0),
+                                        egui::vec2(icon_size, icon_size),
+                                    );
+                                    img.paint_at(ui, icon_rect);
+                                    text_x += icon_size + 4.0;
+                                }
+                            }
+                        }
+
+                        let text_pos = egui::pos2(text_x, cell_rect.center().y);
                         ui.painter().with_clip_rect(cell_rect).text(
                             text_pos,
                             egui::Align2::LEFT_CENTER,
