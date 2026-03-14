@@ -121,9 +121,6 @@ pub fn render_panel_header<'a>(
             if let Some(ref items) = toolbar_items {
                 use conch_plugin_sdk::widgets::ToolbarItem;
 
-                // Split items into: before text input, text input, after text input.
-                // Buttons after the text input are rendered first (right-aligned)
-                // so the text input can fill the remaining space.
                 let text_idx = items.iter().position(|i| matches!(i, ToolbarItem::TextInput { .. }));
 
                 if let Some(idx) = text_idx {
@@ -131,29 +128,28 @@ pub fn render_panel_header<'a>(
                     let text_item = &items[idx];
                     let after = &items[idx + 1..];
 
-                    // Render items before the text input (e.g. back/forward arrows).
+                    // Render items before the text input (e.g. back/forward).
                     for item in before {
                         render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
                     }
 
-                    // Render buttons after text input on the right side first,
-                    // then give text input the remaining space.
-                    let right_width = {
-                        let btn_count = after.iter().filter(|i| matches!(i, ToolbarItem::Button { .. })).count();
-                        let sep_count = after.iter().filter(|i| matches!(i, ToolbarItem::Separator)).count();
-                        let icon_size = ui.spacing().icon_width + ui.spacing().button_padding.x * 2.0;
-                        let spacing = ui.spacing().item_spacing.x;
-                        (btn_count as f32) * (icon_size + spacing) + (sep_count as f32) * (8.0 + spacing)
-                    };
+                    // Measure right-side items by rendering them invisibly.
+                    let after_id = ui.id().with("toolbar_after_width");
+                    let prev_right_width = ui.data(|d| d.get_temp::<f32>(after_id)).unwrap_or(100.0);
 
-                    let text_width = (ui.available_width() - right_width - ui.spacing().item_spacing.x).max(60.0);
+                    // Text input gets remaining space minus the right-side width.
+                    let spacing = ui.spacing().item_spacing.x;
+                    let text_width = (ui.available_width() - prev_right_width - spacing).max(60.0);
                     render_toolbar_text_input(ui, text_item, theme, text_input_state, events, text_width);
 
+                    // Render right-side items and measure their actual width.
+                    let before_right = ui.cursor().min.x;
                     for item in after {
                         render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
                     }
+                    let actual_right_width = ui.min_rect().max.x - before_right + spacing;
+                    ui.data_mut(|d| d.insert_temp(after_id, actual_right_width));
                 } else {
-                    // No text input — render everything normally.
                     for item in items.iter() {
                         render_toolbar_item(ui, item, theme, text_input_state, events, icon_cache);
                     }
