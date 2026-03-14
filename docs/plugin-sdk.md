@@ -264,6 +264,47 @@ void set_widgets(
 );
 ```
 
+### Session Management
+
+```c
+// Open a terminal tab backed by the plugin's byte-stream session.
+OpenSessionResult open_session(
+    const SessionMeta* meta,        // Title, type, icon
+    const SessionBackendVtable* vtable,  // write/resize/shutdown/drop
+    void* backend_handle            // Opaque pointer passed to vtable calls
+);
+
+// Close a session tab.
+void close_session(SessionHandle handle);
+
+// Update the session status. Affects what the host shows in the tab.
+//   0 = Connecting (loading screen, default after open_session)
+//   1 = Connected  (show terminal)
+//   2 = Error      (show error screen with detail message)
+void set_session_status(
+    SessionHandle handle,
+    uint8_t status,
+    const char* detail               // Status/error message (NULL for Connected)
+);
+```
+
+### Session Prompts
+
+```c
+// Show a prompt inline in the session's connecting screen. Blocks until response.
+//   prompt_type: 0 = confirm (Accept/Reject), 1 = password input
+//   msg: main message text
+//   detail: secondary detail (may be NULL)
+// Returns: "true" if accepted (confirm), password text (password), or NULL if cancelled.
+// Caller must free with free_string().
+char* session_prompt(
+    SessionHandle handle,
+    uint8_t prompt_type,
+    const char* msg,
+    const char* detail
+);
+```
+
 ### Dialogs
 
 All dialog functions **block** the plugin thread until the user responds.
@@ -368,6 +409,49 @@ char* get_theme();
 // Caller must free with free_string().
 char* show_context_menu(const char* json, size_t len);
 ```
+
+### Status Bar
+
+```c
+// Set the global status bar text and optional progress bar.
+// Pass NULL for text to clear the status bar.
+//   level: 0=info, 1=warn, 2=error, 3=success
+//   progress: 0.0–1.0 to show a progress bar, or negative to hide it
+void set_status(const char* text, uint8_t level, float progress);
+```
+
+### SFTP Vtable Registry
+
+Plugins can register and acquire direct SFTP access across plugin boundaries. This allows zero-overhead file transfers without JSON/base64 serialization.
+
+```c
+// Register an SFTP vtable for a session. Called by the SSH plugin after connect.
+void register_sftp(
+    uint64_t session_id,
+    const SftpVtable* vtable,
+    void* ctx                     // Opaque context passed to all vtable calls
+);
+
+// Acquire an SFTP handle for a session. Returns a zeroed handle if not found.
+// Caller must call vtable->release(ctx) when done.
+SftpHandle acquire_sftp(uint64_t session_id);
+```
+
+The `SftpVtable` provides direct function pointers for SFTP operations:
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `list_dir` | `(ctx, path, path_len) -> SftpListResult` | List directory entries |
+| `read_chunk` | `(ctx, path, path_len, offset, length) -> SftpReadResult` | Read file chunk at offset |
+| `write_file` | `(ctx, path, path_len, data, data_len) -> SftpSimpleResult` | Write entire file |
+| `write_at` | `(ctx, path, path_len, data, data_len, offset, truncate) -> SftpSimpleResult` | Write chunk at offset |
+| `mkdir` | `(ctx, path, path_len) -> SftpSimpleResult` | Create directory |
+| `rename` | `(ctx, from, from_len, to, to_len) -> SftpSimpleResult` | Rename file/directory |
+| `delete` | `(ctx, path, path_len, is_dir) -> SftpSimpleResult` | Delete file or directory |
+| `free_buf` | `(ptr, len)` | Free a buffer returned by read/list operations |
+| `free_list` | `(result)` | Free a list result and its contained strings |
+| `retain` | `(ctx)` | Increment reference count |
+| `release` | `(ctx)` | Decrement reference count (frees when zero) |
 
 ### Memory
 
@@ -489,6 +573,7 @@ When a user interacts with a widget, the host sends a `PluginEvent::Widget(event
 | `TableActivate` | `id`, `row_id` | Table row double-clicked |
 | `TableSort` | `id`, `column`, `ascending` | Column header clicked |
 | `TableContextMenu` | `id`, `row_id`, `action` | Table context menu action |
+| `TableHeaderContextMenu` | `id`, `column` | Column header right-clicked (for show/hide) |
 | `TabChanged` | `id`, `active` | Tab switched |
 | `PathBarNavigate` | `id`, `segment_index` | Path segment clicked |
 | `Drop` | `id`, `source?`, `items` | Items dropped |
@@ -690,8 +775,8 @@ typedef uint64_t PanelHandle;
 typedef struct {
     PanelHandle (*register_panel)(PanelLocation location, const char* name, const char* icon);
     void        (*set_widgets)(PanelHandle handle, const char* json, size_t len);
-    // ... (remaining 20 function pointers omitted for brevity — must still be present as void*)
-    void* _pad[20];
+    // ... (remaining 25 function pointers omitted for brevity — must still be present as void*)
+    void* _pad[25];
 } HostApi;
 */
 import "C"
@@ -921,11 +1006,21 @@ typedef struct {
     /* Theme */
     char* (*get_theme)(void);
 
+    /* Session prompts */
+    char* (*session_prompt)(uint64_t, uint8_t, const char*, const char*);
+
     /* Context menu */
     char* (*show_context_menu)(const char*, size_t);
 
     /* Memory */
     void (*free_string)(char*);
+
+    /* Status bar */
+    void (*set_status)(const char*, uint8_t, float);
+
+    /* SFTP registry */
+    void (*register_sftp)(uint64_t, const void*, void*);
+    void* (*acquire_sftp)(uint64_t);  /* Returns SftpHandle */
 } HostApi;
 
 /* ------------------------------------------------------------------ */
@@ -1027,7 +1122,7 @@ cc -shared -fPIC -o libmy_plugin.so my_plugin.c
 
 ## Tips for Non-Rust Plugins
 
-1. **Match the struct layout exactly.** The `HostApi` has 22 function pointers in a specific order. Missing or misordered entries will cause crashes. Use the C example as a reference for the complete layout.
+1. **Match the struct layout exactly.** The `HostApi` has 27 function pointers in a specific order. Missing or misordered entries will cause crashes. Use the C example as a reference for the complete layout.
 
 2. **Return stable pointers from `conch_plugin_render`.** The returned string must remain valid until the next render or teardown call. Use a static buffer or module-level allocation.
 
