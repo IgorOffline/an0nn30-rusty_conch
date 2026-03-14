@@ -67,6 +67,7 @@ pub struct ConchApp {
     /// Panel visibility toggles.
     pub(crate) left_panel_visible: bool,
     pub(crate) right_panel_visible: bool,
+    pub(crate) show_status_bar: bool,
     pub(crate) bottom_panel_visible: bool,
     /// Active panel tab per location (handle of the selected panel).
     pub(crate) active_panel_tab: HashMap<PanelLocation, u64>,
@@ -152,6 +153,7 @@ impl ConchApp {
             plugin_text_state: HashMap::new(),
             left_panel_visible: true,
             right_panel_visible: true,
+            show_status_bar: true,
             bottom_panel_visible: true,
             active_panel_tab: HashMap::new(),
             extra_windows: Vec::new(),
@@ -487,6 +489,18 @@ impl ConchApp {
 
         self.plugin_bus.publish("app", "app.tab_changed", data);
     }
+
+    pub(crate) fn toggle_zen_mode(&mut self) {
+        if self.left_panel_visible || self.right_panel_visible || self.show_status_bar {
+            self.left_panel_visible = false;
+            self.right_panel_visible = false;
+            self.show_status_bar = false;
+        } else {
+            self.left_panel_visible = true;
+            self.right_panel_visible = true;
+            self.show_status_bar = true;
+        }
+    }
 }
 
 impl eframe::App for ConchApp {
@@ -709,7 +723,9 @@ impl eframe::App for ConchApp {
         }
 
         // Status bar at the very bottom edge.
-        self.render_status_bar(ctx);
+        if self.show_status_bar {
+            self.render_status_bar(ctx);
+        }
 
         // Render plugin panels (side panels, bottom panels).
         self.render_plugin_panels(ctx);
