@@ -15,6 +15,16 @@ const COL_EXT: &str = "ext";
 const COL_SIZE: &str = "size";
 const COL_MODIFIED: &str = "modified";
 
+/// Serializable column visibility and display settings for persistence.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ColumnVisibility {
+    pub ext: bool,
+    pub size: bool,
+    pub modified: bool,
+    #[serde(default)]
+    pub show_hidden: bool,
+}
+
 /// Whether this pane browses locally or via SFTP.
 #[derive(Clone)]
 pub enum PaneMode {
@@ -45,6 +55,9 @@ pub struct Pane {
     pub col_size_visible: bool,
     pub col_modified_visible: bool,
 
+    // Filtering.
+    pub show_hidden: bool,
+
     // State.
     pub error: Option<String>,
     pub dirty: bool,
@@ -72,6 +85,7 @@ impl Pane {
             col_ext_visible: false,
             col_size_visible: true,
             col_modified_visible: false,
+            show_hidden: false,
             error: None,
             dirty: true,
             home_path: home.clone(),
@@ -184,6 +198,25 @@ impl Pane {
         });
     }
 
+    /// Get current column visibility and display settings.
+    pub fn column_visibility(&self) -> ColumnVisibility {
+        ColumnVisibility {
+            ext: self.col_ext_visible,
+            size: self.col_size_visible,
+            modified: self.col_modified_visible,
+            show_hidden: self.show_hidden,
+        }
+    }
+
+    /// Apply column visibility and display settings.
+    pub fn set_column_visibility(&mut self, vis: &ColumnVisibility) {
+        self.col_ext_visible = vis.ext;
+        self.col_size_visible = vis.size;
+        self.col_modified_visible = vis.modified;
+        self.show_hidden = vis.show_hidden;
+        self.dirty = true;
+    }
+
     // -------------------------------------------------------------------
     // Mode switching
     // -------------------------------------------------------------------
@@ -235,6 +268,10 @@ impl Pane {
                     "forward" => self.go_forward(api),
                     "home" => self.go_home(api),
                     "refresh" => self.refresh(api),
+                    "toggle_hidden" => {
+                        self.show_hidden = !self.show_hidden;
+                        self.dirty = true;
+                    }
                     _ => return false,
                 }
                 true
@@ -516,6 +553,17 @@ impl Pane {
                     tooltip: Some("Refresh".into()),
                     enabled: None,
                 },
+                ToolbarItem::Button {
+                    id: format!("{p}_toggle_hidden"),
+                    icon: None,
+                    label: Some(if self.show_hidden { ".*" } else { ".*" }.into()),
+                    tooltip: Some(if self.show_hidden {
+                        "Hide hidden files".into()
+                    } else {
+                        "Show hidden files".into()
+                    }),
+                    enabled: None,
+                },
             ],
         });
 
@@ -560,6 +608,7 @@ impl Pane {
         let rows: Vec<TableRow> = self
             .entries
             .iter()
+            .filter(|entry| self.show_hidden || !entry.name.starts_with('.'))
             .map(|entry| {
                 let icon = if entry.is_dir { "folder" } else { "file" };
                 let ext_label = format::extension_label(&entry.name, entry.is_dir);
@@ -629,9 +678,19 @@ impl Pane {
         });
 
         // Footer.
-        let count = self.entries.len();
+        let visible_count = if self.show_hidden {
+            self.entries.len()
+        } else {
+            self.entries.iter().filter(|e| !e.name.starts_with('.')).count()
+        };
+        let total_count = self.entries.len();
+        let footer = if visible_count == total_count {
+            format!("{visible_count} items")
+        } else {
+            format!("{visible_count} items ({} hidden)", total_count - visible_count)
+        };
         widgets.push(Widget::Label {
-            text: format!("{count} items"),
+            text: footer,
             style: Some(TextStyle::Secondary),
         });
 

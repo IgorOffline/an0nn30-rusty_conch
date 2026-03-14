@@ -631,7 +631,7 @@ impl eframe::App for ConchApp {
         if effective_decorations == config::WindowDecorations::Full
             && cfg!(target_os = "macos")
         {
-            let title_bar_h = 28.0; // macOS native title bar height
+            let title_bar_h = 34.0; // macOS native title bar height + safe margin
             egui::TopBottomPanel::top("titlebar_spacer")
                 .exact_height(title_bar_h)
                 .frame(egui::Frame::NONE.fill(self.state.theme.surface))

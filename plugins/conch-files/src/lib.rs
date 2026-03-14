@@ -17,7 +17,30 @@ use conch_plugin_sdk::{
     HostApi, PanelHandle, PanelLocation, PluginInfo, PluginType,
 };
 
-use pane::{Pane, PaneMode};
+use pane::{ColumnVisibility, Pane, PaneMode};
+
+/// Load persisted column visibility from plugin config.
+fn load_column_visibility(api: &HostApi) -> Option<pane::ColumnVisibility> {
+    let key = CString::new("columns").ok()?;
+    let ptr = (api.get_config)(key.as_ptr());
+    if ptr.is_null() {
+        return None;
+    }
+    let json_str = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().to_string();
+    (api.free_string)(ptr);
+    serde_json::from_str(&json_str).ok()
+}
+
+/// Save column visibility to plugin config.
+fn save_column_visibility(api: &HostApi, vis: &pane::ColumnVisibility) {
+    if let Ok(json) = serde_json::to_string(vis) {
+        if let Ok(key) = CString::new("columns") {
+            if let Ok(val) = CString::new(json) {
+                (api.set_config)(key.as_ptr(), val.as_ptr());
+            }
+        }
+    }
+}
 
 /// Log a message through the HostApi.
 fn host_log(api: &HostApi, level: u8, msg: &str) {
@@ -151,11 +174,20 @@ impl FilesPlugin {
             (api.subscribe)(ev.as_ptr());
         }
 
+        let mut local_pane = Pane::new_local("local");
+        let mut remote_pane = Pane::new_local("remote");
+
+        // Restore persisted column visibility.
+        if let Some(vis) = load_column_visibility(api) {
+            local_pane.set_column_visibility(&vis);
+            remote_pane.set_column_visibility(&vis);
+        }
+
         FilesPlugin {
             api,
             _panel: panel,
-            local_pane: Pane::new_local("local"),
-            remote_pane: Pane::new_local("remote"),
+            local_pane,
+            remote_pane,
             ssh_sessions: HashMap::new(),
             active_session_id: None,
             transfer: SharedTransferState::new(),
@@ -221,8 +253,23 @@ impl FilesPlugin {
 
         // Route to the correct pane.
         let api = Some(self.api as &HostApi);
-        if !self.local_pane.handle_widget_event(&event, api) {
+        let handled_local = self.local_pane.handle_widget_event(&event, api);
+        if !handled_local {
             self.remote_pane.handle_widget_event(&event, api);
+        }
+
+        // Sync display settings between panes and persist on change.
+        let needs_sync = matches!(event, WidgetEvent::TableHeaderContextMenu { .. })
+            || matches!(event, WidgetEvent::ButtonClick { ref id } if id.ends_with("_toggle_hidden"));
+        if needs_sync {
+            let vis = if handled_local {
+                self.local_pane.column_visibility()
+            } else {
+                self.remote_pane.column_visibility()
+            };
+            self.local_pane.set_column_visibility(&vis);
+            self.remote_pane.set_column_visibility(&vis);
+            save_column_visibility(self.api, &vis);
         }
     }
 

@@ -569,7 +569,7 @@ fn render_widget(
             render_table(
                 ui, id, columns, rows,
                 sort_column.as_deref(), *sort_ascending,
-                selected_row.as_deref(), theme, events,
+                selected_row.as_deref(), theme, events, icon_cache,
             );
         }
 
@@ -961,6 +961,7 @@ fn render_table(
     selected_row: Option<&str>,
     theme: &UiTheme,
     events: &mut Vec<WidgetEvent>,
+    icon_cache: Option<&IconCache>,
 ) {
     // Build list of visible column indices.
     let visible_cols: Vec<usize> = columns
@@ -1036,13 +1037,20 @@ fn render_table(
                 });
             }
 
-            // Right-click on header -> TableHeaderContextMenu event.
+            // Right-click on any header -> show column visibility context menu.
             response.context_menu(|ui| {
-                events.push(WidgetEvent::TableHeaderContextMenu {
-                    id: table_id.to_string(),
-                    column: col.id.clone(),
-                });
-                ui.close_menu();
+                ui.label(RichText::new("Columns").strong().size(theme.font_small));
+                ui.separator();
+                for toggle_col in columns.iter() {
+                    let mut visible = toggle_col.visible.unwrap_or(true);
+                    if ui.checkbox(&mut visible, &toggle_col.label).clicked() {
+                        events.push(WidgetEvent::TableHeaderContextMenu {
+                            id: table_id.to_string(),
+                            column: toggle_col.id.clone(),
+                        });
+                        ui.close_menu();
+                    }
+                }
             });
         }
     });
@@ -1060,7 +1068,10 @@ fn render_table(
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
 
-            for row in rows {
+            let row_color_a = egui::Color32::from_rgb(0x1C, 0x1C, 0x1D);
+            let row_color_b = egui::Color32::from_rgb(0x27, 0x26, 0x28);
+
+            for (row_idx, row) in rows.iter().enumerate() {
                 let is_selected = selected_row == Some(row.id.as_str());
                 let row_width = ui.available_width();
 
@@ -1070,7 +1081,10 @@ fn render_table(
                     egui::Sense::click(),
                 );
 
-                // Selection background.
+                // Alternating row background, then selection on top.
+                let bg = if row_idx % 2 == 0 { row_color_a } else { row_color_b };
+                ui.painter().rect_filled(row_rect, 0.0, bg);
+
                 if is_selected {
                     ui.painter().rect_filled(
                         row_rect,
@@ -1081,12 +1095,14 @@ fn render_table(
 
                 // Draw cells within the row rect.
                 let mut x = row_rect.left();
+                let dark_mode = ui.visuals().dark_mode;
+                let icon_size = row_height - 4.0;
                 for (vi, &col_idx) in visible_cols.iter().enumerate() {
                     let width = col_widths[vi];
                     if let Some(cell) = row.cells.get(col_idx) {
-                        let text = match cell {
-                            TableCell::Text(t) => t.as_str(),
-                            TableCell::Rich { text, .. } => text.as_str(),
+                        let (text, icon_name) = match cell {
+                            TableCell::Text(t) => (t.as_str(), None),
+                            TableCell::Rich { text, icon, .. } => (text.as_str(), icon.as_deref()),
                         };
 
                         let cell_rect = egui::Rect::from_min_size(
@@ -1094,7 +1110,23 @@ fn render_table(
                             egui::vec2(width, row_height),
                         );
 
-                        let text_pos = cell_rect.left_center() + egui::vec2(4.0, 0.0);
+                        let mut text_x = cell_rect.left() + 4.0;
+
+                        // Draw icon if present.
+                        if let Some(name) = icon_name {
+                            if let Some(ic) = icon_cache {
+                                if let Some(img) = ic.image_by_name(name, dark_mode) {
+                                    let icon_rect = egui::Rect::from_min_size(
+                                        egui::pos2(text_x, cell_rect.center().y - icon_size / 2.0),
+                                        egui::vec2(icon_size, icon_size),
+                                    );
+                                    img.paint_at(ui, icon_rect);
+                                    text_x += icon_size + 4.0;
+                                }
+                            }
+                        }
+
+                        let text_pos = egui::pos2(text_x, cell_rect.center().y);
                         ui.painter().with_clip_rect(cell_rect).text(
                             text_pos,
                             egui::Align2::LEFT_CENTER,
