@@ -17,7 +17,7 @@ mod macos;
 mod linux;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 
 /// Perform platform-specific environment setup.
 ///

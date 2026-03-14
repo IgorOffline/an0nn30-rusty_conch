@@ -142,6 +142,20 @@ pub(crate) fn apply_appearance_mode(ctx: &egui::Context, mode: config::Appearanc
     };
     ctx.set_theme(theme_pref);
     ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(sys_theme));
+
+    // On Windows, eframe's SetTheme viewport command does not reliably set the
+    // dark title bar.  Call the DWM API directly to apply the immersive dark
+    // mode attribute to the window chrome.
+    #[cfg(target_os = "windows")]
+    {
+        let dark = match mode {
+            config::AppearanceMode::Dark => true,
+            config::AppearanceMode::Light => false,
+            // For System mode, check what egui resolved to.
+            config::AppearanceMode::System => ctx.style().visuals.dark_mode,
+        };
+        platform::windows::set_dark_title_bar(dark);
+    }
 }
 
 #[derive(Parser)]
