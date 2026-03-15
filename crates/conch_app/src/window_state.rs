@@ -885,11 +885,17 @@ pub(crate) fn handle_keyboard(
 ) {
     use alacritty_terminal::term::TermMode;
 
-    let app_cursor = win.active_session().map_or(false, |s| {
-        s.term()
-            .try_lock_unfair()
-            .map_or(false, |term| term.mode().contains(TermMode::APP_CURSOR))
-    });
+    // If a text input widget (e.g. plugin quick-connect search box) has focus,
+    // don't forward key/text events to the PTY.  App shortcuts still work.
+    let text_widget_focused = ctx.memory(|m| m.focused()).is_some()
+        && ctx.wants_keyboard_input();
+
+    let app_cursor = !text_widget_focused
+        && win.active_session().map_or(false, |s| {
+            s.term()
+                .try_lock_unfair()
+                .map_or(false, |term| term.mode().contains(TermMode::APP_CURSOR))
+        });
 
     let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
 
@@ -1014,22 +1020,27 @@ pub(crate) fn handle_keyboard(
                     continue;
                 }
 
-                // Forward to active terminal via key_to_bytes.
-                if let Some(bytes) = input::key_to_bytes(key, modifiers, None, shortcuts, app_cursor, plugin_keybindings) {
-                    if let Some(session) = win.active_session() {
-                        if let Some(mut term) = session.term().try_lock_unfair() {
-                            term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                // Forward to active terminal via key_to_bytes — but not when
+                // a text input widget has focus (e.g. plugin search boxes).
+                if !text_widget_focused {
+                    if let Some(bytes) = input::key_to_bytes(key, modifiers, None, shortcuts, app_cursor, plugin_keybindings) {
+                        if let Some(session) = win.active_session() {
+                            if let Some(mut term) = session.term().try_lock_unfair() {
+                                term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                            }
+                            session.write(&bytes);
                         }
-                        session.write(&bytes);
                     }
                 }
             }
             egui::Event::Text(text) => {
-                if let Some(session) = win.active_session() {
-                    if let Some(mut term) = session.term().try_lock_unfair() {
-                        term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                if !text_widget_focused {
+                    if let Some(session) = win.active_session() {
+                        if let Some(mut term) = session.term().try_lock_unfair() {
+                            term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                        }
+                        session.write(text.as_bytes());
                     }
-                    session.write(text.as_bytes());
                 }
             }
             _ => {}
