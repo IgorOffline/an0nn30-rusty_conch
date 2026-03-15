@@ -135,3 +135,30 @@ font_size = 13.0
 # Use the native macOS global menu bar instead of the in-window menu bar.
 # Only applies on macOS; ignored on other platforms. Default: true.
 native_menu_bar = true
+
+# ---------------------------------------------------------------------------
+# Conch — Plugin System
+# ---------------------------------------------------------------------------
+#
+# Control which plugin types are loaded. Disabling plugins you don't use
+# reduces startup time and resource usage (e.g. java = false avoids
+# starting a JVM entirely).
+#
+# Set enabled = false to disable the entire plugin engine for a lean
+# terminal with no plugin overhead.
+
+[conch.plugins]
+
+# Master switch: false disables all plugin discovery, loading, and the
+# plugin bus. The app runs as a pure terminal emulator.
+enabled = false
+
+# Per-type toggles (only relevant when enabled = true):
+native = false    # Native shared-library plugins (.dylib / .so / .dll)
+lua = false       # Lua script plugins (.lua)
+java = false      # Java JAR plugins (.jar) — disabling skips JVM startup
+
+# Extra directories to scan for plugins. The app always checks built-in
+# paths (~/.config/conch/plugins/, exe directory, etc.). Paths here are
+# appended to those defaults.
+# search_paths = ["~/my-conch-plugins"]
