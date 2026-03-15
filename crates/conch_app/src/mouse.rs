@@ -138,9 +138,10 @@ pub fn handle_terminal_mouse(
     // and then moves the pointer over the terminal while momentum is still active.
     let scroll_delta = ctx.input(|i| i.smooth_scroll_delta);
     let raw_scroll = ctx.input(|i| i.raw_scroll_delta);
-    let pointer_over_terminal = ctx
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|pos| response.rect.contains(pos));
+    // Use response.contains_pointer() instead of raw hover_pos — this respects
+    // egui's layer ordering, so dialogs/popups on top of the terminal will
+    // prevent scroll events from bleeding through to the terminal.
+    let pointer_over_terminal = response.contains_pointer();
 
     // raw_scroll_delta is non-zero only on actual physical scroll input (wheel
     // ticks, trackpad touch), not during momentum. Use it to decide whether
