@@ -53,6 +53,14 @@ impl JavaPluginManager {
             return Ok(self.jvm.as_ref().unwrap());
         }
 
+        if !self.sdk_jar_path.exists() {
+            log::error!("jvm: SDK JAR not found at: {}", self.sdk_jar_path.display());
+            return Err(LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("conch-plugin-sdk.jar not found at {}", self.sdk_jar_path.display()),
+            )));
+        }
+
         let classpath = format!("-Djava.class.path={}", self.sdk_jar_path.display());
         log::info!("jvm: starting JVM with classpath: {classpath}");
 
@@ -101,9 +109,13 @@ impl JavaPluginManager {
             if path.extension().and_then(|e| e.to_str()) != Some("jar") {
                 continue;
             }
+            eprintln!("[jvm] probing JAR: {}", path.display());
             match self.probe_jar_metadata(&path) {
-                Ok(meta) => found.push((path, meta)),
-                Err(e) => log::debug!("jvm: skipping {}: {e}", path.display()),
+                Ok(meta) => {
+                    eprintln!("[jvm] found plugin: {} v{}", meta.name, meta.version);
+                    found.push((path, meta));
+                }
+                Err(e) => eprintln!("[jvm] FAILED to probe {}: {e}", path.display()),
             }
         }
         found
@@ -118,16 +130,39 @@ impl JavaPluginManager {
             LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("JNI attach: {e}")))
         })?;
 
+        // Clear any pending exception from a previous probe.
+        let _ = env.exception_clear();
+
         // Load the JAR via URLClassLoader.
-        let loader = create_url_classloader(&mut env, jar_path)?;
-        let plugin_obj = instantiate_plugin(&mut env, &loader, &class_name)?;
+        let loader = match create_url_classloader(&mut env, jar_path) {
+            Ok(l) => l,
+            Err(e) => {
+                describe_java_exception(&mut env);
+                return Err(e);
+            }
+        };
+        let plugin_obj = match instantiate_plugin(&mut env, &loader, &class_name) {
+            Ok(o) => o,
+            Err(e) => {
+                describe_java_exception(&mut env);
+                return Err(e);
+            }
+        };
 
         // Call getInfo().
-        let info_obj = env
-            .call_method(&plugin_obj, "getInfo", "()Lconch/plugin/PluginInfo;", &[])
-            .map_err(|e| LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("getInfo: {e}"))))?
-            .l()
-            .map_err(|e| LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("getInfo obj: {e}"))))?;
+        let info_obj = match env.call_method(&plugin_obj, "getInfo", "()Lconch/plugin/PluginInfo;", &[]) {
+            Ok(v) => match v.l() {
+                Ok(o) => o,
+                Err(e) => {
+                    describe_java_exception(&mut env);
+                    return Err(jni_err(format!("getInfo obj: {e}")));
+                }
+            },
+            Err(e) => {
+                describe_java_exception(&mut env);
+                return Err(jni_err(format!("getInfo: {e}")));
+            }
+        };
 
         let meta = read_plugin_info(&mut env, &info_obj)?;
         Ok(meta)
@@ -163,14 +198,17 @@ impl JavaPluginManager {
         let sender = self.bus.sender_for(&name).unwrap();
 
         let jvm_ptr = jvm as *const JavaVM as usize;
+        let host_api_addr = HOST_API_PTR.load(std::sync::atomic::Ordering::Acquire) as usize;
         let thread_name = name.clone();
         let thread_plugin_name = name.clone();
+        let thread_meta = meta.clone();
 
         let handle = std::thread::Builder::new()
             .name(format!("plugin:{thread_name}"))
             .spawn(move || {
                 let jvm = unsafe { &*(jvm_ptr as *const JavaVM) };
-                java_plugin_thread(jvm, plugin_global, mailbox_rx, thread_plugin_name);
+                let host_api = host_api_addr as *const conch_plugin_sdk::HostApi;
+                java_plugin_thread(jvm, plugin_global, mailbox_rx, thread_plugin_name, host_api, &thread_meta);
             })
             .map_err(LoadError::Io)?;
 
@@ -242,6 +280,8 @@ fn java_plugin_thread(
     plugin: GlobalRef,
     mut mailbox: mpsc::Receiver<PluginMail>,
     plugin_name: String,
+    host_api: *const conch_plugin_sdk::HostApi,
+    meta: &crate::native::PluginMeta,
 ) {
     let mut env = match jvm.attach_current_thread() {
         Ok(e) => e,
@@ -251,9 +291,19 @@ fn java_plugin_thread(
         }
     };
 
+    // Auto-register panel if this is a panel plugin (like Lua plugins do).
+    if meta.plugin_type == conch_plugin_sdk::PluginType::Panel && !host_api.is_null() {
+        let panel_name = CString::new(meta.name.as_str()).unwrap_or_default();
+        unsafe {
+            ((*host_api).register_panel)(meta.panel_location, panel_name.as_ptr(), std::ptr::null());
+        }
+        log::info!("jvm [{plugin_name}]: registered panel at {:?}", meta.panel_location);
+    }
+
     // Call setup().
     if let Err(e) = env.call_method(&plugin, "setup", "()V", &[]) {
         log::error!("jvm [{plugin_name}]: setup failed: {e}");
+        describe_java_exception(&mut env);
         return;
     }
     log::info!("jvm [{plugin_name}]: setup complete");
@@ -561,6 +611,14 @@ extern "system" fn native_host_register_menu_item(
 // ---------------------------------------------------------------------------
 // Error conversion
 // ---------------------------------------------------------------------------
+
+/// Print any pending Java exception to stderr, then clear it.
+fn describe_java_exception(env: &mut JNIEnv) {
+    if env.exception_check().unwrap_or(false) {
+        env.exception_describe().ok();
+        env.exception_clear().ok();
+    }
+}
 
 fn jni_err<E: std::fmt::Display>(e: E) -> LoadError {
     LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))

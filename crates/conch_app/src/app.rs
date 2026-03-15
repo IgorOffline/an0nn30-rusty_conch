@@ -111,32 +111,30 @@ pub struct ConchApp {
 fn find_sdk_jar() -> std::path::PathBuf {
     use std::path::PathBuf;
 
-    // Development: java-sdk/build/conch-plugin-sdk.jar
-    let dev = PathBuf::from("java-sdk/build/conch-plugin-sdk.jar");
-    if dev.exists() {
-        return dev;
-    }
+    let candidates = vec![
+        // Development: relative to CWD.
+        PathBuf::from("java-sdk/build/conch-plugin-sdk.jar"),
+        // Next to the executable.
+        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("conch-plugin-sdk.jar"))).unwrap_or_default(),
+        // macOS app bundle: Conch.app/Contents/Resources/
+        std::env::current_exe().ok().and_then(|exe| exe.parent().and_then(|d| d.parent()).map(|d| d.join("Resources").join("conch-plugin-sdk.jar"))).unwrap_or_default(),
+        // User config directory (macOS: ~/Library/Application Support/conch/).
+        dirs::config_dir().map(|d| d.join("conch").join("conch-plugin-sdk.jar")).unwrap_or_default(),
+        // Linux/Windows: ~/.config/conch/
+        dirs::home_dir().map(|d| d.join(".config").join("conch").join("conch-plugin-sdk.jar")).unwrap_or_default(),
+    ];
 
-    // Next to the executable.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let jar = dir.join("conch-plugin-sdk.jar");
-            if jar.exists() {
-                return jar;
-            }
+    for path in &candidates {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        if path.exists() {
+            log::info!("Found Java SDK JAR: {}", path.display());
+            return path.clone();
         }
     }
 
-    // User config directory.
-    if let Some(config_dir) = dirs::config_dir() {
-        let jar = config_dir.join("conch").join("conch-plugin-sdk.jar");
-        if jar.exists() {
-            return jar;
-        }
-    }
-
-    // Fallback — will fail at JVM creation time if not found.
-    log::warn!("Could not find conch-plugin-sdk.jar — Java plugins will not work");
+    log::warn!("Could not find conch-plugin-sdk.jar — Java plugins will not work. Searched: {:?}", candidates);
     PathBuf::from("conch-plugin-sdk.jar")
 }
 
