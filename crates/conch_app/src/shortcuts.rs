@@ -99,6 +99,12 @@ impl ConchApp {
                         // Plugin-registered global keybindings.
                         for pkb in &self.plugin_keybindings {
                             if pkb.binding.matches(key, modifiers) {
+                                // Record that this keybinding fired from the main window
+                                // so that subsequent dialogs open in the correct viewport.
+                                crate::host::bridge::set_event_viewport(
+                                    &pkb.plugin_name,
+                                    egui::ViewportId::ROOT,
+                                );
                                 let action = crate::menu_bar::MenuAction::PluginAction {
                                     plugin_name: pkb.plugin_name.clone(),
                                     action: pkb.action.clone(),
