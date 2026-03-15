@@ -150,6 +150,9 @@ pub(crate) struct WindowState {
     pub plugin_text_state: HashMap<String, String>,
     /// Active panel tab per location (handle of the selected panel).
     pub active_panel_tab: HashMap<PanelLocation, u64>,
+    /// Panel that was auto-revealed by a plugin shortcut.  Escape hides it
+    /// again and returns focus to the terminal.
+    pub auto_revealed_panel: Option<PanelLocation>,
 
     // ── Viewport info ──
     pub viewport_id: egui::ViewportId,
@@ -193,6 +196,7 @@ impl WindowState {
             show_status_bar: layout.status_bar_visible,
             plugin_text_state: HashMap::new(),
             active_panel_tab: HashMap::new(),
+            auto_revealed_panel: None,
             viewport_id,
             viewport_builder: None,
             title: String::new(),
@@ -853,16 +857,26 @@ pub(crate) fn handle_menu_action(
             win.show_plugin_manager = !win.show_plugin_manager;
         }
         MenuAction::PluginAction { plugin_name, action } => {
-            // Auto-show the panel that this plugin owns.
+            // Auto-show the panel that this plugin owns.  Track auto-reveal
+            // so Escape can hide it again.
             {
                 let reg = shared.panel_registry.lock();
                 for (_, info) in reg.panels() {
                     if info.plugin_name == plugin_name {
+                        let was_hidden = match info.location {
+                            PanelLocation::Left => !win.left_panel_visible,
+                            PanelLocation::Right => !win.right_panel_visible,
+                            PanelLocation::Bottom => !win.bottom_panel_visible,
+                            _ => false,
+                        };
                         match info.location {
                             PanelLocation::Left => win.left_panel_visible = true,
                             PanelLocation::Right => win.right_panel_visible = true,
                             PanelLocation::Bottom => win.bottom_panel_visible = true,
                             _ => {}
+                        }
+                        if was_hidden {
+                            win.auto_revealed_panel = Some(info.location);
                         }
                         break;
                     }
@@ -922,6 +936,23 @@ pub(crate) fn handle_keyboard(
                 modifiers,
                 ..
             } => {
+                // Escape: if a text widget has focus, surrender it and
+                // re-hide any panel that was auto-revealed by a shortcut.
+                if *key == egui::Key::Escape && text_widget_focused {
+                    if let Some(focused_id) = ctx.memory(|m| m.focused()) {
+                        ctx.memory_mut(|m| m.surrender_focus(focused_id));
+                    }
+                    if let Some(loc) = win.auto_revealed_panel.take() {
+                        match loc {
+                            PanelLocation::Left => win.left_panel_visible = false,
+                            PanelLocation::Right => win.right_panel_visible = false,
+                            PanelLocation::Bottom => win.bottom_panel_visible = false,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
                 // Cmd+1-9 -> switch tab.
                 if modifiers.command && !modifiers.alt && !modifiers.shift {
                     let tab_num = match key {
@@ -975,24 +1006,28 @@ pub(crate) fn handle_keyboard(
                 if let Some(ref kb) = shortcuts.toggle_left_panel {
                     if kb.matches(key, modifiers) {
                         win.left_panel_visible = !win.left_panel_visible;
+                        win.auto_revealed_panel = None;
                         continue;
                     }
                 }
                 if let Some(ref kb) = shortcuts.toggle_right_panel {
                     if kb.matches(key, modifiers) {
                         win.right_panel_visible = !win.right_panel_visible;
+                        win.auto_revealed_panel = None;
                         continue;
                     }
                 }
                 if let Some(ref kb) = shortcuts.toggle_bottom_panel {
                     if kb.matches(key, modifiers) {
                         win.bottom_panel_visible = !win.bottom_panel_visible;
+                        win.auto_revealed_panel = None;
                         continue;
                     }
                 }
                 if let Some(ref kb) = shortcuts.zen_mode {
                     if kb.matches(key, modifiers) {
                         win.toggle_zen_mode();
+                        win.auto_revealed_panel = None;
                         continue;
                     }
                 }
@@ -1003,15 +1038,25 @@ pub(crate) fn handle_keyboard(
                     if pkb.binding.matches(key, modifiers) {
                         // Auto-show the panel that this plugin owns so the
                         // shortcut works even when the panel is hidden.
+                        // Track auto-reveal so Escape can hide it again.
                         {
                             let reg = shared.panel_registry.lock();
                             for (_, info) in reg.panels() {
                                 if info.plugin_name == pkb.plugin_name {
+                                    let was_hidden = match info.location {
+                                        PanelLocation::Left => !win.left_panel_visible,
+                                        PanelLocation::Right => !win.right_panel_visible,
+                                        PanelLocation::Bottom => !win.bottom_panel_visible,
+                                        _ => false,
+                                    };
                                     match info.location {
                                         PanelLocation::Left => win.left_panel_visible = true,
                                         PanelLocation::Right => win.right_panel_visible = true,
                                         PanelLocation::Bottom => win.bottom_panel_visible = true,
                                         _ => {}
+                                    }
+                                    if was_hidden {
+                                        win.auto_revealed_panel = Some(info.location);
                                     }
                                     break;
                                 }
