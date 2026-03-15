@@ -39,7 +39,6 @@ pub struct ConchApp {
     pub(crate) main_window: WindowState,
 
     // Plugin managers.
-    pub(crate) plugin_manager: PluginManagerState,
     pub(crate) native_plugin_mgr: NativePluginManager,
     /// Running Lua plugins, keyed by name.
     pub(crate) lua_plugins: HashMap<String, RunningLuaPlugin>,
@@ -50,7 +49,7 @@ pub struct ConchApp {
     pub(crate) render_last_request: HashMap<String, Instant>,
 
     // Multi-window.
-    pub(crate) extra_windows: Vec<ExtraWindow>,
+    pub(crate) extra_windows: Vec<Arc<Mutex<ExtraWindow>>>,
     pub(crate) next_viewport_num: u32,
 
     // Tab change tracking (for plugin bus events).
@@ -123,6 +122,7 @@ impl ConchApp {
             notifications: Mutex::new(notifications),
             icon_cache: Mutex::new(None),
             menu_bar_state: Mutex::new(menu_bar_state),
+            plugin_manager: Mutex::new(PluginManagerState::default()),
             platform,
         });
 
@@ -131,7 +131,6 @@ impl ConchApp {
         let mut app = Self {
             shared,
             main_window,
-            plugin_manager: PluginManagerState::default(),
             native_plugin_mgr,
             lua_plugins: HashMap::new(),
             java_plugin_mgr,
@@ -205,7 +204,7 @@ impl ConchApp {
         self.next_viewport_num += 1;
         let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
         let builder = self.build_extra_viewport();
-        self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
+        self.extra_windows.push(Arc::new(Mutex::new(ExtraWindow::new(viewport_id, builder, session))));
     }
 
     /// Poll terminal events for all main-window sessions.
@@ -310,7 +309,7 @@ impl ConchApp {
                         self.next_viewport_num += 1;
                         let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
                         let builder = self.build_extra_viewport();
-                        self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
+                        self.extra_windows.push(Arc::new(Mutex::new(ExtraWindow::new(viewport_id, builder, session))));
                     }
                 }
                 IpcMessage::CreateTab { working_directory } => {
@@ -360,10 +359,11 @@ impl ConchApp {
                 if vp == egui::ViewportId::ROOT {
                     return None; // main window — fall through
                 }
-                self.extra_windows.iter_mut().find(|w| w.viewport_id == vp)
+                self.extra_windows.iter().find(|w| w.lock().viewport_id == vp)
             });
 
-            if let Some(window) = routed {
+            if let Some(window_arc) = routed {
+                let mut window = window_arc.lock();
                 if window.last_cols > 0 && window.last_rows > 0 {
                     session.resize(
                         window.last_cols, window.last_rows,
@@ -402,7 +402,8 @@ impl ConchApp {
                 self.main_window.remove_session(id);
             } else {
                 // Search extra windows.
-                for window in &mut self.extra_windows {
+                for window_arc in &self.extra_windows {
+                    let mut window = window_arc.lock();
                     let ew_id = window.sessions.iter().find_map(|(id, s)| {
                         if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
                             if bridge.handle == handle {
@@ -450,7 +451,8 @@ impl ConchApp {
                 session.prompt = Some(prompt_state);
             } else {
                 let mut placed = false;
-                for window in &mut self.extra_windows {
+                for window_arc in &self.extra_windows {
+                    let mut window = window_arc.lock();
                     let ew_match = window.sessions.values_mut().find(|s| {
                         matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
                     });
@@ -483,7 +485,8 @@ impl ConchApp {
                 }
             } else {
                 // Search extra windows.
-                for window in &mut self.extra_windows {
+                for window_arc in &self.extra_windows {
+                    let mut window = window_arc.lock();
                     let ew_id = window.sessions.iter().find_map(|(id, s)| {
                         if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
                             if bridge.handle == update.handle {
@@ -749,9 +752,9 @@ impl eframe::App for ConchApp {
         let menu_action = crate::menu_bar::show(ctx, &mut *self.shared.menu_bar_state.lock());
         if let Some(action) = menu_action {
             // If an extra window has focus, route the action there instead.
-            let focused_extra = self.extra_windows.iter_mut().find(|w| w.has_focus);
-            if let Some(window) = focused_extra {
-                window.pending_menu_actions.push(action);
+            let focused_extra = self.extra_windows.iter().find(|w| w.lock().has_focus);
+            if let Some(window_arc) = focused_extra {
+                window_arc.lock().pending_menu_actions.push(action);
             } else {
                 crate::menu_bar::handle_action(action, ctx, self);
             }
@@ -762,7 +765,7 @@ impl eframe::App for ConchApp {
             let pm_actions = crate::host::plugin_manager_ui::show_plugin_manager_window(
                 ctx,
                 &mut self.main_window.show_plugin_manager,
-                &mut self.plugin_manager,
+                &mut *self.shared.plugin_manager.lock(),
                 &theme_clone,
             );
             for pm_action in pm_actions {

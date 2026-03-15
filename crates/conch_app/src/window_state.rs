@@ -71,6 +71,8 @@ pub(crate) struct SharedAppState {
     pub icon_cache: Mutex<Option<IconCache>>,
     /// Menu bar rendering state.
     pub menu_bar_state: Mutex<MenuBarState>,
+    /// Plugin manager UI state.
+    pub plugin_manager: Mutex<crate::host::plugin_manager_ui::PluginManagerState>,
     /// Platform capabilities (immutable).
     pub platform: PlatformCapabilities,
 }
