@@ -18,6 +18,7 @@ mod tab_bar;
 mod terminal;
 mod ui_theme;
 mod watcher;
+mod window_state;
 
 use std::sync::Arc;
 
