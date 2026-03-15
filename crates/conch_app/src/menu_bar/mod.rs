@@ -149,19 +149,22 @@ pub fn handle_action(
     app: &mut super::app::ConchApp,
 ) {
     match action {
-        MenuAction::NewTab => app.open_local_tab(),
+        MenuAction::NewTab => {
+            let user_config = app.shared.config.lock().user_config.clone();
+            app.main_window.open_local_tab(&user_config);
+        }
         MenuAction::NewWindow => app.spawn_extra_window(),
         MenuAction::CloseTab => {
-            if let Some(id) = app.state.active_tab {
-                app.remove_session(id);
+            if let Some(id) = app.main_window.active_tab {
+                app.main_window.remove_session(id);
             }
         }
         MenuAction::Quit => {
             app.quit_requested = true;
         }
         MenuAction::Copy => {
-            if let Some((start, end)) = app.selection.normalized() {
-                if let Some(session) = app.state.active_session() {
+            if let Some((start, end)) = app.main_window.selection.normalized() {
+                if let Some(session) = app.main_window.active_session() {
                     let text = crate::terminal::widget::get_selected_text(session.term(), start, end);
                     if !text.is_empty() {
                         ctx.copy_text(text);
@@ -176,7 +179,7 @@ pub fn handle_action(
             // TODO: implement select-all for terminal content
         }
         MenuAction::ZenMode => {
-            // TODO: toggle zen mode (hide chrome)
+            app.main_window.toggle_zen_mode();
         }
         MenuAction::ZoomIn => {
             let current = ctx.pixels_per_point();
@@ -190,13 +193,13 @@ pub fn handle_action(
             ctx.set_pixels_per_point(1.0);
         }
         MenuAction::PluginManager => {
-            app.show_plugin_manager = !app.show_plugin_manager;
+            app.main_window.show_plugin_manager = !app.main_window.show_plugin_manager;
         }
         MenuAction::PluginAction { plugin_name, action } => {
             // Send MenuAction event directly to the target plugin.
             let event = conch_plugin_sdk::PluginEvent::MenuAction { action: action.clone() };
             if let Ok(json) = serde_json::to_string(&event) {
-                if let Some(sender) = app.plugin_bus.sender_for(&plugin_name) {
+                if let Some(sender) = app.shared.plugin_bus.sender_for(&plugin_name) {
                     log::info!("Dispatching menu action '{action}' to plugin '{plugin_name}'");
                     let _ = sender.try_send(conch_plugin::bus::PluginMail::WidgetEvent { json });
                 } else {

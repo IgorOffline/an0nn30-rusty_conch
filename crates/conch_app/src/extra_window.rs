@@ -48,8 +48,8 @@ pub(crate) struct SharedState<'a> {
     // Plugin panel state (shared from main app).
     pub panel_registry: &'a Arc<Mutex<PanelRegistry>>,
     pub plugin_bus: &'a Arc<PluginBus>,
-    pub render_cache: &'a HashMap<String, String>,
-    pub icon_cache: Option<&'a IconCache>,
+    pub render_cache_shared: &'a Mutex<HashMap<String, String>>,
+    pub icon_cache_shared: &'a Mutex<Option<IconCache>>,
     pub left_panel_width: f32,
     pub right_panel_width: f32,
     pub bottom_panel_height: f32,
@@ -88,6 +88,10 @@ pub struct ExtraWindow {
     pub bottom_panel_visible: bool,
     pub show_status_bar: bool,
     pub context_menu_state: crate::context_menu::ContextMenuState,
+    /// Mutable text input state for plugin panels (per-window).
+    pub plugin_text_state: HashMap<String, String>,
+    /// Active panel tab per location (per-window).
+    pub active_panel_tab: HashMap<PanelLocation, u64>,
 }
 
 impl ExtraWindow {
@@ -126,6 +130,8 @@ impl ExtraWindow {
             bottom_panel_visible: true,
             show_status_bar: true,
             context_menu_state: crate::context_menu::ContextMenuState::default(),
+            plugin_text_state: HashMap::new(),
+            active_panel_tab: HashMap::new(),
         }
     }
 
@@ -185,8 +191,6 @@ impl ExtraWindow {
         ctx: &egui::Context,
         shared: &SharedState,
         plugin_manager: &mut crate::host::plugin_manager_ui::PluginManagerState,
-        plugin_text_state: &mut HashMap<String, String>,
-        active_panel_tab: &mut HashMap<PanelLocation, u64>,
         dialog_state: &mut DialogState,
         notifications: &mut NotificationManager,
     ) {
@@ -340,23 +344,27 @@ impl ExtraWindow {
         }
 
         // Render plugin panels (same as main window, using shared state).
-        crate::host::plugin_panels::render_plugin_panels_for_ctx(
-            ctx,
-            shared.panel_registry,
-            shared.plugin_bus,
-            shared.render_cache,
-            plugin_text_state,
-            active_panel_tab,
-            self.left_panel_visible,
-            self.right_panel_visible,
-            self.bottom_panel_visible,
-            shared.theme,
-            shared.icon_cache,
-            shared.left_panel_width,
-            shared.right_panel_width,
-            shared.bottom_panel_height,
-            self.viewport_id,
-        );
+        {
+            let render_cache = shared.render_cache_shared.lock();
+            let icon_cache = shared.icon_cache_shared.lock();
+            crate::host::plugin_panels::render_plugin_panels_for_ctx(
+                ctx,
+                shared.panel_registry,
+                shared.plugin_bus,
+                &render_cache,
+                &mut self.plugin_text_state,
+                &mut self.active_panel_tab,
+                self.left_panel_visible,
+                self.right_panel_visible,
+                self.bottom_panel_visible,
+                shared.theme,
+                icon_cache.as_ref(),
+                shared.left_panel_width,
+                shared.right_panel_width,
+                shared.bottom_panel_height,
+                self.viewport_id,
+            );
+        }
         // Extra windows don't persist panel sizes — only the main window does.
 
         // Tab bar.
@@ -755,6 +763,8 @@ mod tests {
             bottom_panel_visible: true,
             show_status_bar: true,
             context_menu_state: crate::context_menu::ContextMenuState::default(),
+            plugin_text_state: HashMap::new(),
+            active_panel_tab: HashMap::new(),
         }
     }
 
@@ -820,29 +830,32 @@ impl ConchApp {
     ) -> config::WindowDecorations {
         // Take windows out of self to avoid borrow conflict in the closure.
         let mut windows = std::mem::take(&mut self.extra_windows);
-        let effective_decorations = self.platform.effective_decorations(
-            self.state.user_config.window.decorations,
+
+        let cfg = self.shared.config.lock();
+        let effective_decorations = self.shared.platform.effective_decorations(
+            cfg.user_config.window.decorations,
         );
 
         // Compute default panel sizes from persisted layout.
-        let layout = &self.state.persistent.layout;
+        let layout = &cfg.persistent.layout;
         let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width } else { 240.0 };
         let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width } else { 240.0 };
         let bottom_h = if layout.bottom_panel_height > 0.0 { layout.bottom_panel_height } else { 180.0 };
+        let show_in_window_menu = self.shared.menu_bar_state.lock().is_in_window();
 
         let shared = SharedState {
-            user_config: &self.state.user_config,
-            colors: &self.state.colors,
-            shortcuts: &self.shortcuts,
-            plugin_keybindings: &self.plugin_keybindings,
-            theme: &self.state.theme,
+            user_config: &cfg.user_config,
+            colors: &cfg.colors,
+            shortcuts: &cfg.shortcuts,
+            plugin_keybindings: &cfg.plugin_keybindings,
+            theme: &cfg.theme,
             effective_decorations,
-            show_in_window_menu: self.menu_bar_state.is_in_window(),
-            theme_dirty: self.state.theme_dirty,
-            panel_registry: &self.panel_registry,
-            plugin_bus: &self.plugin_bus,
-            render_cache: &self.render_cache,
-            icon_cache: self.icon_cache.as_ref(),
+            show_in_window_menu,
+            theme_dirty: cfg.theme_dirty,
+            panel_registry: &self.shared.panel_registry,
+            plugin_bus: &self.shared.plugin_bus,
+            render_cache_shared: &self.shared.render_cache,
+            icon_cache_shared: &self.shared.icon_cache,
             left_panel_width: left_w,
             right_panel_width: right_w,
             bottom_panel_height: bottom_h,
@@ -862,14 +875,13 @@ impl ConchApp {
                         vp_ctx,
                         &shared,
                         &mut self.plugin_manager,
-                        &mut self.plugin_text_state,
-                        &mut self.active_panel_tab,
-                        &mut self.dialog_state,
-                        &mut self.notifications,
+                        &mut self.shared.dialog_state.lock(),
+                        &mut self.shared.notifications.lock(),
                     );
                 },
             );
         }
+        drop(cfg);
 
         // Drain pending actions from extra windows.
         let mut spawn_new_window = false;

@@ -9,61 +9,37 @@ use conch_plugin::bus::PluginBus;
 use conch_plugin::jvm::runtime::JavaPluginManager;
 use conch_plugin::lua::runner::RunningLuaPlugin;
 use conch_plugin::native::manager::NativePluginManager;
-use conch_plugin_sdk::PanelLocation;
 use egui::ViewportCommand;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 use crate::extra_window::ExtraWindow;
 use crate::host::bridge::{self, PanelRegistry, SessionRegistry};
-use crate::host::dialogs::{self, DialogState};
+use crate::host::dialogs;
 use crate::host::plugin_manager_ui::PluginManagerState;
 use crate::input::ResolvedShortcuts;
 use crate::ipc::{IpcListener, IpcMessage};
 use crate::menu_bar::MenuBarState;
-use crate::mouse::Selection;
 use crate::notifications::NotificationManager;
 use crate::platform::PlatformCapabilities;
 use crate::sessions::create_local_session;
-use crate::state::AppState;
 use crate::terminal::color::ResolvedColors;
 use crate::terminal::widget::{self, TerminalFrameCache};
 use crate::watcher::{FileChangeKind, FileWatcher};
+use crate::window_state::{SharedAppState, SharedConfig, WindowState};
 
 /// Cursor blink interval in milliseconds.
 const CURSOR_BLINK_MS: u128 = 500;
 
 pub struct ConchApp {
-    pub(crate) state: AppState,
-    pub(crate) shortcuts: ResolvedShortcuts,
-    /// Plugin-registered global keybindings (resolved from menu items).
-    pub(crate) plugin_keybindings: Vec<crate::input::ResolvedPluginKeybind>,
-    /// Tracks which version of plugin menu items we last resolved keybindings from.
-    pub(crate) plugin_keybindings_version: u64,
-    pub(crate) selection: Selection,
+    /// Shared global state (config, theme, plugin infra, etc.).
+    pub(crate) shared: Arc<SharedAppState>,
 
-    // Terminal rendering state.
-    pub(crate) cell_width: f32,
-    pub(crate) cell_height: f32,
-    pub(crate) cell_size_measured: bool,
-    pub(crate) last_pixels_per_point: f32,
-    pub(crate) last_cols: u16,
-    pub(crate) last_rows: u16,
-    pub(crate) cursor_visible: bool,
-    pub(crate) last_blink: Instant,
-    pub(crate) terminal_frame_cache: TerminalFrameCache,
+    /// Primary window state (sessions, tabs, terminal rendering, UI chrome).
+    pub(crate) main_window: WindowState,
 
-    // UI chrome.
-    pub(crate) tab_bar_state: crate::tab_bar::TabBarState,
-    pub(crate) menu_bar_state: MenuBarState,
-    pub(crate) context_menu_state: crate::context_menu::ContextMenuState,
-    pub(crate) platform: PlatformCapabilities,
-
-    // Plugin system.
-    pub(crate) show_plugin_manager: bool,
+    // Plugin managers.
     pub(crate) plugin_manager: PluginManagerState,
-    pub(crate) plugin_bus: Arc<PluginBus>,
-    pub(crate) panel_registry: Arc<Mutex<PanelRegistry>>,
     pub(crate) native_plugin_mgr: NativePluginManager,
     /// Running Lua plugins, keyed by name.
     pub(crate) lua_plugins: HashMap<String, RunningLuaPlugin>,
@@ -72,30 +48,10 @@ pub struct ConchApp {
     pub(crate) render_pending: HashMap<String, oneshot::Receiver<String>>,
     /// Last time a render request was sent to each plugin (for throttling).
     pub(crate) render_last_request: HashMap<String, Instant>,
-    /// Cached widget JSON per plugin name (for rendering between polls).
-    pub(crate) render_cache: HashMap<String, String>,
-    /// Mutable text input state for plugin panels (keyed by widget id).
-    pub(crate) plugin_text_state: HashMap<String, String>,
-    /// Panel visibility toggles.
-    pub(crate) left_panel_visible: bool,
-    pub(crate) right_panel_visible: bool,
-    pub(crate) show_status_bar: bool,
-    pub(crate) bottom_panel_visible: bool,
-    /// Active panel tab per location (handle of the selected panel).
-    pub(crate) active_panel_tab: HashMap<PanelLocation, u64>,
 
     // Multi-window.
     pub(crate) extra_windows: Vec<ExtraWindow>,
     pub(crate) next_viewport_num: u32,
-
-    // Host dialogs (plugin → UI thread).
-    pub(crate) dialog_state: DialogState,
-
-    // Plugin session registry (pending open/close from plugins).
-    pub(crate) session_registry: Arc<Mutex<SessionRegistry>>,
-
-    // Icons.
-    pub(crate) icon_cache: Option<crate::icons::IconCache>,
 
     // Tab change tracking (for plugin bus events).
     pub(crate) prev_active_tab: Option<uuid::Uuid>,
@@ -106,7 +62,6 @@ pub struct ConchApp {
     pub(crate) has_ever_had_session: bool,
     pub(crate) quit_requested: bool,
     pub(crate) rt: Arc<tokio::runtime::Runtime>,
-    pub(crate) notifications: NotificationManager,
 }
 
 
@@ -121,7 +76,10 @@ impl ConchApp {
         let shortcuts = ResolvedShortcuts::from_config(&user_config.conch.keyboard);
         let platform = PlatformCapabilities::current();
         let menu_bar_state = MenuBarState::new(user_config.conch.ui.native_menu_bar, &platform);
-        let state = AppState::new(user_config, persistent);
+
+        let scheme = conch_core::color_scheme::resolve_theme(&user_config.colors.theme);
+        let colors = ResolvedColors::from_scheme(&scheme);
+        let theme = crate::ui_theme::UiTheme::from_colors(&colors, user_config.colors.appearance_mode);
 
         let ipc_listener = IpcListener::start();
         let file_watcher = FileWatcher::start();
@@ -144,53 +102,49 @@ impl ConchApp {
         let native_plugin_mgr = NativePluginManager::new(Arc::clone(&plugin_bus), host_api);
         let java_plugin_mgr = JavaPluginManager::new(Arc::clone(&plugin_bus), java_host_api);
 
-        let mut app = Self {
-            state,
+        let shared_config = SharedConfig {
+            user_config,
+            persistent,
+            colors,
+            theme,
+            theme_dirty: true,
             shortcuts,
             plugin_keybindings: Vec::new(),
             plugin_keybindings_version: 0,
-            selection: Selection::default(),
-            cell_width: 0.0,
-            cell_height: 0.0,
-            cell_size_measured: false,
-            last_pixels_per_point: 0.0,
-            last_cols: 0,
-            last_rows: 0,
-            cursor_visible: true,
-            last_blink: Instant::now(),
-            terminal_frame_cache: TerminalFrameCache::default(),
-            tab_bar_state: crate::tab_bar::TabBarState::default(),
-            menu_bar_state,
-            context_menu_state: crate::context_menu::ContextMenuState::default(),
-            platform,
-            show_plugin_manager: false,
-            plugin_manager: PluginManagerState::default(),
+        };
+
+        let shared = Arc::new(SharedAppState {
+            config: Mutex::new(shared_config),
             plugin_bus,
             panel_registry,
+            session_registry,
+            render_cache: Mutex::new(HashMap::new()),
+            dialog_state: Mutex::new(dialog_state),
+            notifications: Mutex::new(notifications),
+            icon_cache: Mutex::new(None),
+            menu_bar_state: Mutex::new(menu_bar_state),
+            platform,
+        });
+
+        let main_window = WindowState::new(egui::ViewportId::ROOT);
+
+        let mut app = Self {
+            shared,
+            main_window,
+            plugin_manager: PluginManagerState::default(),
             native_plugin_mgr,
             lua_plugins: HashMap::new(),
             java_plugin_mgr,
             render_pending: HashMap::new(),
             render_last_request: HashMap::new(),
-            render_cache: HashMap::new(),
-            plugin_text_state: HashMap::new(),
-            left_panel_visible: true,
-            right_panel_visible: true,
-            show_status_bar: true,
-            bottom_panel_visible: true,
-            active_panel_tab: HashMap::new(),
             extra_windows: Vec::new(),
             next_viewport_num: 1,
-            dialog_state,
-            session_registry,
-            icon_cache: None,
             prev_active_tab: None,
             ipc_listener,
             file_watcher,
             has_ever_had_session: false,
             quit_requested: false,
             rt,
-            notifications,
         };
 
         // Discover plugins and auto-load previously enabled ones.
@@ -202,16 +156,16 @@ impl ConchApp {
 
     /// Re-resolve plugin keybindings when menu items change.
     fn refresh_plugin_keybindings(&mut self) {
-        use crate::host::bridge;
         use crate::input::{KeyBinding, ResolvedPluginKeybind};
 
         let version = bridge::plugin_menu_items_version();
-        if version == self.plugin_keybindings_version {
+        let mut cfg = self.shared.config.lock();
+        if version == cfg.plugin_keybindings_version {
             return;
         }
-        self.plugin_keybindings_version = version;
+        cfg.plugin_keybindings_version = version;
 
-        self.plugin_keybindings = bridge::plugin_menu_items()
+        cfg.plugin_keybindings = bridge::plugin_menu_items()
             .into_iter()
             .filter_map(|item| {
                 let kb_str = item.keybind.as_deref()?;
@@ -227,23 +181,24 @@ impl ConchApp {
 
     /// Build a `ViewportBuilder` for extra windows matching main window decorations.
     pub(crate) fn build_extra_viewport(&self) -> egui::ViewportBuilder {
-        let decorations = self.platform.effective_decorations(
-            self.state.user_config.window.decorations,
+        let cfg = self.shared.config.lock();
+        let decorations = self.shared.platform.effective_decorations(
+            cfg.user_config.window.decorations,
         );
         crate::build_viewport(
             egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
             decorations,
-            &self.platform,
+            &self.shared.platform,
         )
     }
 
     /// Open a new OS window with a fresh local terminal tab.
     pub(crate) fn spawn_extra_window(&mut self) {
-        let cwd = self.state
-            .active_session()
+        let cwd = self.main_window.active_session()
             .and_then(|s| s.child_pid())
             .and_then(conch_pty::get_cwd_of_pid);
-        let Some((_, session)) = create_local_session(&self.state.user_config, cwd) else {
+        let user_config = self.shared.config.lock().user_config.clone();
+        let Some((_, session)) = create_local_session(&user_config, cwd) else {
             return;
         };
         let num = self.next_viewport_num;
@@ -257,7 +212,7 @@ impl ConchApp {
     fn poll_events(&mut self, ctx: &egui::Context) {
         let mut exited_sessions = Vec::new();
 
-        for (id, session) in &mut self.state.sessions {
+        for (id, session) in &mut self.main_window.sessions {
             while let Ok(event) = session.event_rx.try_recv() {
                 match event {
                     alacritty_terminal::event::Event::Wakeup => ctx.request_repaint(),
@@ -275,7 +230,7 @@ impl ConchApp {
         }
 
         for id in exited_sessions {
-            self.remove_session(id);
+            self.main_window.remove_session(id);
         }
     }
 
@@ -289,14 +244,23 @@ impl ConchApp {
                     log::info!("Config file changed, reloading...");
                     match config::load_user_config() {
                         Ok(new_config) => {
-                            self.shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
                             let scheme = conch_core::color_scheme::resolve_theme(&new_config.colors.theme);
-                            self.state.colors = ResolvedColors::from_scheme(&scheme);
-                            self.state.theme = crate::ui_theme::UiTheme::from_colors(&self.state.colors, new_config.colors.appearance_mode);
-                            self.state.theme_dirty = true;
+                            let colors = ResolvedColors::from_scheme(&scheme);
+                            let theme = crate::ui_theme::UiTheme::from_colors(&colors, new_config.colors.appearance_mode);
+                            let shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
                             crate::apply_appearance_mode(ctx, new_config.colors.appearance_mode);
-                            self.menu_bar_state.update_mode(new_config.conch.ui.native_menu_bar, &self.platform);
-                            self.state.user_config = new_config;
+                            self.shared.menu_bar_state.lock().update_mode(
+                                new_config.conch.ui.native_menu_bar,
+                                &self.shared.platform,
+                            );
+                            {
+                                let mut cfg = self.shared.config.lock();
+                                cfg.shortcuts = shortcuts;
+                                cfg.colors = colors;
+                                cfg.theme = theme;
+                                cfg.theme_dirty = true;
+                                cfg.user_config = new_config;
+                            }
                             crate::notifications::push(crate::notifications::Notification::new(
                                 Some("Config Reloaded".into()),
                                 "Configuration updated successfully.".into(),
@@ -316,10 +280,12 @@ impl ConchApp {
                 }
                 FileChangeKind::Themes => {
                     log::info!("Themes changed, reloading...");
-                    let scheme = conch_core::color_scheme::resolve_theme(&self.state.user_config.colors.theme);
-                    self.state.colors = ResolvedColors::from_scheme(&scheme);
-                    self.state.theme = crate::ui_theme::UiTheme::from_colors(&self.state.colors, self.state.user_config.colors.appearance_mode);
-                    self.state.theme_dirty = true;
+                    let mut cfg = self.shared.config.lock();
+                    let scheme = conch_core::color_scheme::resolve_theme(&cfg.user_config.colors.theme);
+                    cfg.colors = ResolvedColors::from_scheme(&scheme);
+                    cfg.theme = crate::ui_theme::UiTheme::from_colors(&cfg.colors, cfg.user_config.colors.appearance_mode);
+                    cfg.theme_dirty = true;
+                    drop(cfg);
                     crate::notifications::push(crate::notifications::Notification::new(
                         Some("Theme Reloaded".into()),
                         "Theme updated successfully.".into(),
@@ -331,10 +297,6 @@ impl ConchApp {
         }
     }
 
-    /// Scan for native and Lua plugins and populate the plugin manager UI.
-    ///
-    /// Uses `[conch.plugins].search_paths` from config.toml. When empty, falls
-    /// back to built-in defaults for development and the user plugin directory.
     /// Handle IPC messages from external processes.
     fn handle_ipc(&mut self) {
         let Some(listener) = &self.ipc_listener else { return };
@@ -342,7 +304,8 @@ impl ConchApp {
             match msg {
                 IpcMessage::CreateWindow { working_directory } => {
                     let cwd = working_directory.map(std::path::PathBuf::from);
-                    if let Some((_, session)) = create_local_session(&self.state.user_config, cwd) {
+                    let user_config = self.shared.config.lock().user_config.clone();
+                    if let Some((_, session)) = create_local_session(&user_config, cwd) {
                         let num = self.next_viewport_num;
                         self.next_viewport_num += 1;
                         let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
@@ -352,10 +315,11 @@ impl ConchApp {
                 }
                 IpcMessage::CreateTab { working_directory } => {
                     let cwd = working_directory.map(std::path::PathBuf::from);
-                    if let Some((id, session)) = create_local_session(&self.state.user_config, cwd) {
-                        self.state.sessions.insert(id, session);
-                        self.state.tab_order.push(id);
-                        self.state.active_tab = Some(id);
+                    let user_config = self.shared.config.lock().user_config.clone();
+                    if let Some((id, session)) = create_local_session(&user_config, cwd) {
+                        self.main_window.sessions.insert(id, session);
+                        self.main_window.tab_order.push(id);
+                        self.main_window.active_tab = Some(id);
                     }
                 }
             }
@@ -364,7 +328,7 @@ impl ConchApp {
 
     /// Drain pending session open/close requests from plugins.
     fn drain_pending_sessions(&mut self) {
-        let mut registry = self.session_registry.lock();
+        let mut registry = self.shared.session_registry.lock();
         let pending: Vec<_> = registry.pending_open.drain(..).collect();
         let closing: Vec<_> = registry.pending_close.drain(..).collect();
         let status_updates: Vec<_> = registry.pending_status.drain(..).collect();
@@ -410,15 +374,15 @@ impl ConchApp {
                 window.tab_order.push(id);
                 window.active_tab = Some(id);
             } else {
-                if self.last_cols > 0 && self.last_rows > 0 {
+                if self.main_window.last_cols > 0 && self.main_window.last_rows > 0 {
                     session.resize(
-                        self.last_cols, self.last_rows,
-                        self.cell_width as u16, self.cell_height as u16,
+                        self.main_window.last_cols, self.main_window.last_rows,
+                        self.main_window.cell_width as u16, self.main_window.cell_height as u16,
                     );
                 }
-                self.state.sessions.insert(id, session);
-                self.state.tab_order.push(id);
-                self.state.active_tab = Some(id);
+                self.main_window.sessions.insert(id, session);
+                self.main_window.tab_order.push(id);
+                self.main_window.active_tab = Some(id);
                 self.has_ever_had_session = true;
             }
         }
@@ -426,7 +390,7 @@ impl ConchApp {
         // Process session closes (search main window and extra windows).
         for handle in closing {
             // Try main window first.
-            let main_id = self.state.sessions.iter().find_map(|(id, s)| {
+            let main_id = self.main_window.sessions.iter().find_map(|(id, s)| {
                 if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
                     if bridge.handle == handle {
                         return Some(*id);
@@ -435,7 +399,7 @@ impl ConchApp {
                 None
             });
             if let Some(id) = main_id {
-                self.remove_session(id);
+                self.main_window.remove_session(id);
             } else {
                 // Search extra windows.
                 for window in &mut self.extra_windows {
@@ -463,7 +427,7 @@ impl ConchApp {
 
         // Process session prompts (attach to the correct session).
         let prompts: Vec<_> = {
-            let mut reg = self.session_registry.lock();
+            let mut reg = self.shared.session_registry.lock();
             reg.pending_prompts.drain(..).collect()
         };
         for prompt_req in prompts {
@@ -479,7 +443,7 @@ impl ConchApp {
             };
 
             // Find the session in main window or extra windows.
-            let main_match = self.state.sessions.values_mut().find(|s| {
+            let main_match = self.main_window.sessions.values_mut().find(|s| {
                 matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
             });
             if let Some(session) = main_match {
@@ -504,7 +468,7 @@ impl ConchApp {
 
         // Process status updates (search main window and extra windows).
         for update in status_updates {
-            let main_id = self.state.sessions.iter().find_map(|(id, s)| {
+            let main_id = self.main_window.sessions.iter().find_map(|(id, s)| {
                 if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
                     if bridge.handle == update.handle {
                         return Some(*id);
@@ -513,7 +477,7 @@ impl ConchApp {
                 None
             });
             if let Some(id) = main_id {
-                if let Some(session) = self.state.sessions.get_mut(&id) {
+                if let Some(session) = self.main_window.sessions.get_mut(&id) {
                     session.status = update.status;
                     session.status_detail = update.detail;
                 }
@@ -540,10 +504,10 @@ impl ConchApp {
         }
     }
 
-    /// Publish an `app.tab_changed` bus event so plugins (e.g. conch-files)
-    /// can react to the active session changing.
+    /// Publish an `app.tab_changed` bus event so plugins can react to active
+    /// session changes.
     fn publish_tab_changed(&self) {
-        let (is_ssh, session_id) = if let Some(session) = self.state.active_session() {
+        let (is_ssh, session_id) = if let Some(session) = self.main_window.active_session() {
             match &session.backend {
                 crate::state::SessionBackend::Plugin { bridge, .. } => {
                     (true, Some(bridge.handle.0))
@@ -559,19 +523,7 @@ impl ConchApp {
             data["session_id"] = serde_json::json!(sid);
         }
 
-        self.plugin_bus.publish("app", "app.tab_changed", data);
-    }
-
-    pub(crate) fn toggle_zen_mode(&mut self) {
-        if self.left_panel_visible || self.right_panel_visible || self.show_status_bar {
-            self.left_panel_visible = false;
-            self.right_panel_visible = false;
-            self.show_status_bar = false;
-        } else {
-            self.left_panel_visible = true;
-            self.right_panel_visible = true;
-            self.show_status_bar = true;
-        }
+        self.shared.plugin_bus.publish("app", "app.tab_changed", data);
     }
 }
 
@@ -581,7 +533,7 @@ impl eframe::App for ConchApp {
     /// written directly to the active PTY session here.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // If a dialog is open, let egui handle Tab normally.
-        if self.dialog_state.is_active_for(egui::ViewportId::ROOT) {
+        if self.shared.dialog_state.lock().is_active_for(egui::ViewportId::ROOT) {
             return;
         }
 
@@ -604,7 +556,7 @@ impl eframe::App for ConchApp {
         });
 
         if let Some(bytes) = tab_bytes {
-            if let Some(session) = self.state.active_session() {
+            if let Some(session) = self.main_window.active_session() {
                 session.write(&bytes);
             }
         }
@@ -613,21 +565,21 @@ impl eframe::App for ConchApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Measure font cell size (and re-measure on DPI changes).
         let ppp = ctx.pixels_per_point();
-        if !self.cell_size_measured || (ppp - self.last_pixels_per_point).abs() > 0.001 {
-            let font_size = self.state.user_config.font.size;
+        if !self.main_window.cell_size_measured || (ppp - self.main_window.last_pixels_per_point).abs() > 0.001 {
+            let font_size = self.shared.config.lock().user_config.font.size;
             let (cw, ch) = widget::measure_cell_size(ctx, font_size);
-            self.cell_width = cw;
-            self.cell_height = ch;
-            self.cell_size_measured = true;
-            self.last_pixels_per_point = ppp;
+            self.main_window.cell_width = cw;
+            self.main_window.cell_height = ch;
+            self.main_window.cell_size_measured = true;
+            self.main_window.last_pixels_per_point = ppp;
         }
 
         // Cursor blink.
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_blink).as_millis();
+        let elapsed = now.duration_since(self.main_window.last_blink).as_millis();
         if elapsed >= CURSOR_BLINK_MS {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_blink = now;
+            self.main_window.cursor_visible = !self.main_window.cursor_visible;
+            self.main_window.last_blink = now;
             ctx.request_repaint_after(std::time::Duration::from_millis(CURSOR_BLINK_MS as u64));
         } else {
             let remaining = CURSOR_BLINK_MS - elapsed;
@@ -638,8 +590,8 @@ impl eframe::App for ConchApp {
         self.refresh_plugin_keybindings();
 
         // Detect tab changes and notify plugins via the bus.
-        if self.state.active_tab != self.prev_active_tab {
-            self.prev_active_tab = self.state.active_tab;
+        if self.main_window.active_tab != self.prev_active_tab {
+            self.prev_active_tab = self.main_window.active_tab;
             self.publish_tab_changed();
         }
 
@@ -651,13 +603,13 @@ impl eframe::App for ConchApp {
         self.drain_pending_sessions();
 
         // Show plugin dialogs (form, confirm, prompt, alert, error).
-        self.dialog_state.show(ctx, egui::ViewportId::ROOT);
+        self.shared.dialog_state.lock().show(ctx, egui::ViewportId::ROOT);
 
         // Render toast notifications on top of everything.
-        self.notifications.show(ctx);
+        self.shared.notifications.lock().show(ctx);
 
         // Determine whether the main window should hide or close.
-        let mut main_visible = !self.state.sessions.is_empty();
+        let mut main_visible = !self.main_window.sessions.is_empty();
 
         // If the user clicks close on the main window while extra windows exist,
         // hide it instead of quitting.
@@ -665,18 +617,19 @@ impl eframe::App for ConchApp {
         if close_requested && !self.extra_windows.is_empty() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             // Shut down main-window sessions.
-            let ids: Vec<_> = self.state.tab_order.clone();
+            let ids: Vec<_> = self.main_window.tab_order.clone();
             for id in ids {
-                self.remove_session(id);
+                self.main_window.remove_session(id);
             }
             self.has_ever_had_session = true;
             main_visible = false;
         }
 
         // When the last main-window tab closes, either hide or close.
-        if self.state.sessions.is_empty() {
+        if self.main_window.sessions.is_empty() {
             if !self.has_ever_had_session {
-                self.open_local_tab();
+                let user_config = self.shared.config.lock().user_config.clone();
+                self.main_window.open_local_tab(&user_config);
                 self.has_ever_had_session = true;
                 main_visible = true;
             } else {
@@ -695,8 +648,8 @@ impl eframe::App for ConchApp {
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy))
             });
             if copy_requested {
-                if let Some((start, end)) = self.selection.normalized() {
-                    if let Some(session) = self.state.active_session() {
+                if let Some((start, end)) = self.main_window.selection.normalized() {
+                    if let Some(session) = self.main_window.active_session() {
                         let text = widget::get_selected_text(session.term(), start, end);
                         if !text.is_empty() {
                             ctx.copy_text(text);
@@ -711,7 +664,7 @@ impl eframe::App for ConchApp {
                 })
             });
             if let Some(text) = paste_text {
-                if let Some(session) = self.state.active_session() {
+                if let Some(session) = self.main_window.active_session() {
                     session.write(text.as_bytes());
                 }
             }
@@ -732,20 +685,25 @@ impl eframe::App for ConchApp {
         }
 
         // ── Apply centralized UI theme (only when changed) ──
-        if self.state.theme_dirty {
-            self.state.theme.apply(ctx);
-            crate::host::bridge::update_theme_json(&self.state.theme);
-            self.state.theme_dirty = false;
+        {
+            let mut cfg = self.shared.config.lock();
+            if cfg.theme_dirty {
+                cfg.theme.apply(ctx);
+                bridge::update_theme_json(&cfg.theme);
+                cfg.theme_dirty = false;
+            }
         }
-        let bg_color = self.state.theme.bg;
+        let (bg_color, theme_clone) = {
+            let cfg = self.shared.config.lock();
+            (cfg.theme.bg, cfg.theme.clone())
+        };
 
-        // Buttonless: no native title bar, so add a thin drag region at the top
-        // so the user can still move the window.
+        // Buttonless: no native title bar, so add a thin drag region at the top.
         if effective_decorations == config::WindowDecorations::Buttonless {
-            let drag_h = self.cell_height.max(6.0);
+            let drag_h = self.main_window.cell_height.max(6.0);
             egui::TopBottomPanel::top("drag_region")
                 .exact_height(drag_h)
-                .frame(egui::Frame::NONE.fill(self.state.theme.bg_with_alpha(180)))
+                .frame(egui::Frame::NONE.fill(theme_clone.bg_with_alpha(180)))
                 .show(ctx, |ui| {
                     let rect = ui.available_rect_before_wrap();
                     let response = ui.interact(rect, ui.id().with("drag"), egui::Sense::drag());
@@ -760,27 +718,36 @@ impl eframe::App for ConchApp {
         if effective_decorations == config::WindowDecorations::Full
             && cfg!(target_os = "macos")
         {
-            let title_bar_h = 34.0; // macOS native title bar height + safe margin
+            let title_bar_h = 34.0;
             egui::TopBottomPanel::top("titlebar_spacer")
                 .exact_height(title_bar_h)
-                .frame(egui::Frame::NONE.fill(self.state.theme.surface))
+                .frame(egui::Frame::NONE.fill(theme_clone.surface))
                 .show(ctx, |_ui| {});
         }
 
         // Tab bar at the top (only when more than one tab).
-        for action in crate::tab_bar::show(ctx, &self.state, &mut self.tab_bar_state) {
-            match action {
-                crate::tab_bar::TabBarAction::SwitchTo(id) => {
-                    self.state.active_tab = Some(id);
-                }
-                crate::tab_bar::TabBarAction::Close(id) => {
-                    self.remove_session(id);
+        {
+            let tabs: Vec<(uuid::Uuid, String)> = self.main_window.tab_order.iter().map(|&id| {
+                let title = self.main_window.sessions.get(&id)
+                    .map(|s| s.display_title().to_string())
+                    .unwrap_or_default();
+                (id, title)
+            }).collect();
+            for action in crate::tab_bar::show_for(ctx, &tabs, self.main_window.active_tab, &theme_clone, &mut self.main_window.tab_bar_state) {
+                match action {
+                    crate::tab_bar::TabBarAction::SwitchTo(id) => {
+                        self.main_window.active_tab = Some(id);
+                    }
+                    crate::tab_bar::TabBarAction::Close(id) => {
+                        self.main_window.remove_session(id);
+                    }
                 }
             }
         }
 
         // Menu bar.
-        if let Some(action) = crate::menu_bar::show(ctx, &mut self.menu_bar_state) {
+        let menu_action = crate::menu_bar::show(ctx, &mut *self.shared.menu_bar_state.lock());
+        if let Some(action) = menu_action {
             // If an extra window has focus, route the action there instead.
             let focused_extra = self.extra_windows.iter_mut().find(|w| w.has_focus);
             if let Some(window) = focused_extra {
@@ -791,13 +758,12 @@ impl eframe::App for ConchApp {
         }
 
         // Plugin manager window (floating, toggled via View menu).
-        if self.show_plugin_manager {
-            let theme = self.state.theme.clone();
+        if self.main_window.show_plugin_manager {
             let pm_actions = crate::host::plugin_manager_ui::show_plugin_manager_window(
                 ctx,
-                &mut self.show_plugin_manager,
+                &mut self.main_window.show_plugin_manager,
                 &mut self.plugin_manager,
-                &theme,
+                &theme_clone,
             );
             for pm_action in pm_actions {
                 self.handle_plugin_manager_action(pm_action);
@@ -805,13 +771,16 @@ impl eframe::App for ConchApp {
         }
 
         // Lazy-init icon cache on first frame (needs egui context for textures).
-        if self.icon_cache.is_none() {
-            self.icon_cache = Some(crate::icons::IconCache::load(ctx));
+        {
+            let mut ic = self.shared.icon_cache.lock();
+            if ic.is_none() {
+                *ic = Some(crate::icons::IconCache::load(ctx));
+            }
         }
 
         // Status bar at the very bottom edge.
-        if self.show_status_bar {
-            self.render_status_bar(ctx);
+        if self.main_window.show_status_bar {
+            crate::host::plugin_panels::render_status_bar(ctx, &theme_clone);
         }
 
         // Render plugin panels (side panels, bottom panels).
@@ -825,17 +794,19 @@ impl eframe::App for ConchApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(bg_color))
             .show(ctx, |ui| {
-                if let Some(session) = self.state.active_tab.and_then(|id| self.state.sessions.get_mut(&id)) {
+                if let Some(session) = self.main_window.active_tab.and_then(|id| self.main_window.sessions.get_mut(&id)) {
                     match session.status {
                         conch_plugin_sdk::SessionStatus::Connecting => {
+                            let icon_cache = self.shared.icon_cache.lock();
                             let action = show_connecting_screen(
                                 ui,
                                 &session.title,
                                 session.status_detail.as_deref(),
                                 session.connect_started,
                                 session.prompt.as_mut(),
-                                self.icon_cache.as_ref(),
+                                icon_cache.as_ref(),
                             );
+                            drop(icon_cache);
                             match action {
                                 ConnectingAction::Accept => {
                                     if let Some(prompt) = session.prompt.take() {
@@ -868,19 +839,21 @@ impl eframe::App for ConchApp {
                             }
                         }
                         conch_plugin_sdk::SessionStatus::Connected => {
-                            let sel = self.selection.normalized();
+                            let sel = self.main_window.selection.normalized();
                             let term = session.term();
+                            let cfg = self.shared.config.lock();
                             let (response, size_info) = widget::show_terminal(
                                 ui,
                                 term,
-                                self.cell_width,
-                                self.cell_height,
-                                &self.state.colors,
-                                self.state.user_config.font.size,
-                                self.cursor_visible,
+                                self.main_window.cell_width,
+                                self.main_window.cell_height,
+                                &cfg.colors,
+                                cfg.user_config.font.size,
+                                self.main_window.cursor_visible,
                                 sel,
-                                &mut self.terminal_frame_cache,
+                                &mut self.main_window.frame_cache,
                             );
+                            drop(cfg);
 
                             pending_resize = Some((size_info.columns() as u16, size_info.rows() as u16));
 
@@ -891,22 +864,23 @@ impl eframe::App for ConchApp {
                                 .unwrap_or(false);
 
                             // Mouse handling.
+                            let scroll_sensitivity = self.shared.config.lock().user_config.terminal.scroll_sensitivity;
                             crate::mouse::handle_terminal_mouse(
                                 ctx,
                                 &response,
                                 &size_info,
-                                &mut self.selection,
+                                &mut self.main_window.selection,
                                 term,
                                 &|bytes| session.write(bytes),
-                                self.cell_height,
-                                self.state.user_config.terminal.scroll_sensitivity,
+                                self.main_window.cell_height,
+                                scroll_sensitivity,
                             );
 
-                            // Context menu (suppressed in mouse mode for tmux compatibility).
-                            let has_selection = self.selection.normalized().is_some();
+                            // Context menu.
+                            let has_selection = self.main_window.selection.normalized().is_some();
                             context_action = crate::context_menu::show(
                                 &response,
-                                &mut self.context_menu_state,
+                                &mut self.main_window.context_menu_state,
                                 mouse_mode,
                                 has_selection,
                             );
@@ -917,8 +891,8 @@ impl eframe::App for ConchApp {
 
         // Handle close-tab request from error screen.
         if close_tab_requested {
-            if let Some(id) = self.state.active_tab {
-                self.remove_session(id);
+            if let Some(id) = self.main_window.active_tab {
+                self.main_window.remove_session(id);
             }
         }
 
@@ -929,13 +903,13 @@ impl eframe::App for ConchApp {
 
         // Resize sessions after releasing the panel borrow.
         if let Some((cols, rows)) = pending_resize {
-            self.resize_sessions(cols, rows);
+            self.main_window.resize_sessions(cols, rows);
         }
 
         // Keyboard handling — forward to PTY unless a dialog or text input is consuming input.
         let text_edit_focused = ctx.memory(|m| m.focused()).is_some()
             && ctx.wants_keyboard_input();
-        let forward_to_pty = !self.dialog_state.is_active_for(egui::ViewportId::ROOT)
+        let forward_to_pty = !self.shared.dialog_state.lock().is_active_for(egui::ViewportId::ROOT)
             && !text_edit_focused;
         self.handle_keyboard(ctx, forward_to_pty);
 
@@ -945,7 +919,7 @@ impl eframe::App for ConchApp {
         }
 
         // Update window title from active session.
-        if let Some(session) = self.state.active_session() {
+        if let Some(session) = self.main_window.active_session() {
             let title = format!("{} — Conch", session.display_title());
             ctx.send_viewport_cmd(ViewportCommand::Title(title));
         }
@@ -953,8 +927,9 @@ impl eframe::App for ConchApp {
         // Save window size on each frame (debounced by OS).
         let rect = ctx.input(|i| i.screen_rect());
         if rect.width() > 100.0 && rect.height() > 100.0 {
-            self.state.persistent.layout.window_width = rect.width();
-            self.state.persistent.layout.window_height = rect.height();
+            let mut cfg = self.shared.config.lock();
+            cfg.persistent.layout.window_width = rect.width();
+            cfg.persistent.layout.window_height = rect.height();
         }
     }
 
@@ -968,12 +943,13 @@ impl eframe::App for ConchApp {
                 if let Some(handle) = running.thread.take() {
                     let _ = handle.join();
                 }
-                self.plugin_bus.unregister_plugin(&name);
+                self.shared.plugin_bus.unregister_plugin(&name);
             }
         }
         self.native_plugin_mgr.shutdown_all();
         self.java_plugin_mgr.shutdown_all();
-        let _ = config::save_persistent_state(&self.state.persistent);
+        let cfg = self.shared.config.lock();
+        let _ = config::save_persistent_state(&cfg.persistent);
     }
 }
 
@@ -984,18 +960,12 @@ impl eframe::App for ConchApp {
 /// Action from the connecting screen (prompt response or close).
 pub(crate) enum ConnectingAction {
     None,
-    /// User accepted a confirm prompt (e.g., host key fingerprint).
     Accept,
-    /// User rejected a confirm prompt.
     Reject,
-    /// User submitted a password.
     SubmitPassword(String),
 }
 
 /// Render a "Connecting to..." screen with optional inline prompts.
-///
-/// When `prompt` is `Some`, renders the prompt UI (fingerprint accept or
-/// password input) instead of the progress bar.
 pub(crate) fn show_connecting_screen(
     ui: &mut egui::Ui,
     title: &str,
@@ -1011,10 +981,8 @@ pub(crate) fn show_connecting_screen(
         egui::Color32::from_gray(241)
     };
     ui.painter().rect_filled(rect, 0.0, bg);
-
     let center = rect.center();
 
-    // --- Inline prompt (fingerprint / password) ---
     if let Some(prompt) = prompt {
         let content_width = (rect.width() * 0.7).min(560.0);
         let content_rect = egui::Rect::from_center_size(
@@ -1024,57 +992,35 @@ pub(crate) fn show_connecting_screen(
         let mut action = ConnectingAction::None;
 
         if prompt.prompt_type == 0 {
-            // Confirm prompt (host key fingerprint).
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(20.0);
-
                     let is_changed = prompt.message.contains("HAS CHANGED");
                     if is_changed {
                         ui.label(
                             egui::RichText::new("WARNING: HOST KEY HAS CHANGED!")
-                                .size(22.0)
-                                .strong()
+                                .size(22.0).strong()
                                 .color(egui::Color32::from_rgb(220, 50, 50)),
                         );
                         ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(&prompt.message)
-                                .size(13.0)
-                                .color(if ui.visuals().dark_mode {
-                                    egui::Color32::from_gray(180)
-                                } else {
-                                    egui::Color32::from_gray(60)
-                                }),
-                        );
+                        ui.label(egui::RichText::new(&prompt.message).size(13.0)
+                            .color(if ui.visuals().dark_mode { egui::Color32::from_gray(180) } else { egui::Color32::from_gray(60) }));
                     } else {
                         ui.label(egui::RichText::new(&prompt.message).size(18.0));
                     }
-
                     if !prompt.detail.is_empty() {
                         ui.add_space(16.0);
-                        ui.label(
-                            egui::RichText::new(&prompt.detail)
-                                .size(15.0)
-                                .family(egui::FontFamily::Monospace)
-                                .strong(),
-                        );
+                        ui.label(egui::RichText::new(&prompt.detail).size(15.0)
+                            .family(egui::FontFamily::Monospace).strong());
                     }
-
                     ui.add_space(20.0);
-                    ui.label(
-                        egui::RichText::new("Are you sure you want to continue connecting?")
-                            .size(14.0),
-                    );
-
+                    ui.label(egui::RichText::new("Are you sure you want to continue connecting?").size(14.0));
                     ui.add_space(12.0);
                     let btn_size = egui::Vec2::new(120.0, 34.0);
                     ui.horizontal(|ui| {
                         let total_w = btn_size.x * 2.0 + ui.spacing().item_spacing.x;
                         let avail = ui.available_width();
-                        if avail > total_w {
-                            ui.add_space((avail - total_w) / 2.0);
-                        }
+                        if avail > total_w { ui.add_space((avail - total_w) / 2.0); }
                         if ui.add_sized(btn_size, egui::Button::new("Accept")).clicked() {
                             action = ConnectingAction::Accept;
                         }
@@ -1085,84 +1031,47 @@ pub(crate) fn show_connecting_screen(
                 });
             });
         } else {
-            // Password prompt.
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(20.0);
                     ui.label(egui::RichText::new(&prompt.message).size(22.0));
                     if !prompt.detail.is_empty() {
                         ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(&prompt.detail)
-                                .size(14.0)
-                                .color(if ui.visuals().dark_mode {
-                                    egui::Color32::from_gray(160)
-                                } else {
-                                    egui::Color32::from_gray(80)
-                                }),
-                        );
+                        ui.label(egui::RichText::new(&prompt.detail).size(14.0)
+                            .color(if ui.visuals().dark_mode { egui::Color32::from_gray(160) } else { egui::Color32::from_gray(80) }));
                     }
                     ui.add_space(16.0);
-
-                    // Combined password field with inline eye + lock buttons.
                     let field_width = 340.0;
                     let field_height = 34.0;
-                    let btn_zone = 32.0; // space for the eye icon button
-
+                    let btn_zone = 32.0;
                     let (outer_rect, _) = ui.allocate_exact_size(
-                        egui::Vec2::new(field_width, field_height),
-                        egui::Sense::hover(),
-                    );
-
-                    // Draw the outer frame (rounded rect with focus glow).
+                        egui::Vec2::new(field_width, field_height), egui::Sense::hover());
                     let visuals = ui.visuals();
                     let rounding = egui::CornerRadius::same(6);
                     let stroke = visuals.widgets.active.bg_stroke;
                     ui.painter().rect(outer_rect, rounding, visuals.widgets.inactive.bg_fill, stroke, egui::StrokeKind::Outside);
-
-                    // Text edit area (left portion).
                     let text_rect = egui::Rect::from_min_max(
-                        outer_rect.min,
-                        egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.max.y),
-                    );
+                        outer_rect.min, egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.max.y));
                     let mut text_child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(text_rect.shrink2(egui::vec2(8.0, 0.0))),
-                    );
+                        egui::UiBuilder::new().max_rect(text_rect.shrink2(egui::vec2(8.0, 0.0))));
                     let pw_resp = text_child.add(
                         egui::TextEdit::singleline(&mut prompt.password_buf)
-                            .password(!prompt.show_password)
-                            .frame(false)
+                            .password(!prompt.show_password).frame(false)
                             .margin(egui::Margin { left: 0, right: 0, top: 8, bottom: 4 })
                             .font(egui::TextStyle::Body)
                             .desired_width(text_rect.width() - 16.0)
-                            .hint_text("Password"),
-                    );
-                    if prompt.focus_password {
-                        pw_resp.request_focus();
-                        prompt.focus_password = false;
-                    }
-                    let enter_pressed = pw_resp.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-                    // Icon button area (right portion, inset to avoid overlapping border).
+                            .hint_text("Password"));
+                    if prompt.focus_password { pw_resp.request_focus(); prompt.focus_password = false; }
+                    let enter_pressed = pw_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let btn_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.min.y),
-                        outer_rect.max,
-                    ).shrink(4.0);
+                        egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.min.y), outer_rect.max).shrink(4.0);
                     let dark_mode = ui.visuals().dark_mode;
                     let can_submit = !prompt.password_buf.is_empty();
-
-                    // Eye icon: toggle show/hide password.
                     let tooltip = if prompt.show_password { "Hide password" } else { "Show password" };
                     let icon_size = egui::vec2(16.0, 16.0);
-                    let icon_pos = egui::Pos2::new(
-                        btn_rect.center().x - 8.0,
-                        btn_rect.center().y - 8.0,
-                    );
+                    let icon_pos = egui::Pos2::new(btn_rect.center().x - 8.0, btn_rect.center().y - 8.0);
                     let icon_rect = egui::Rect::from_min_size(icon_pos, icon_size);
                     let eye_resp = ui.allocate_rect(icon_rect, egui::Sense::click());
-
                     if let Some(img) = icon_cache
                         .and_then(|ic| ic.themed_image(crate::icons::Icon::Eye, dark_mode))
                     {
@@ -1171,78 +1080,46 @@ pub(crate) fn show_connecting_screen(
                     if eye_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip).clicked() {
                         prompt.show_password = !prompt.show_password;
                     }
-
-                    // Submit on Enter.
                     if enter_pressed && can_submit {
-                        action = ConnectingAction::SubmitPassword(
-                            prompt.password_buf.clone(),
-                        );
+                        action = ConnectingAction::SubmitPassword(prompt.password_buf.clone());
                     }
-
                     ui.add_space(8.0);
-                    // Cancel link.
-                    let cancel_text = egui::RichText::new("Cancel")
-                        .size(13.0)
-                        .color(if ui.visuals().dark_mode {
-                            egui::Color32::from_gray(140)
-                        } else {
-                            egui::Color32::from_gray(100)
-                        });
+                    let cancel_text = egui::RichText::new("Cancel").size(13.0)
+                        .color(if ui.visuals().dark_mode { egui::Color32::from_gray(140) } else { egui::Color32::from_gray(100) });
                     if ui.add(egui::Label::new(cancel_text).sense(egui::Sense::click())).clicked() {
                         action = ConnectingAction::Reject;
                     }
                 });
             });
         }
-
         return action;
     }
 
-    // --- Normal connecting screen (no prompt) ---
+    // Normal connecting screen (no prompt).
     let heading = format!("Connecting to {title}\u{2026}");
     let heading_galley = ui.painter().layout_no_wrap(
-        heading,
-        egui::FontId::new(28.0, egui::FontFamily::Proportional),
-        if ui.visuals().dark_mode { egui::Color32::WHITE } else { egui::Color32::BLACK },
-    );
-    let heading_pos = egui::Pos2::new(
-        center.x - heading_galley.size().x / 2.0,
-        center.y - 40.0,
-    );
+        heading, egui::FontId::new(28.0, egui::FontFamily::Proportional),
+        if ui.visuals().dark_mode { egui::Color32::WHITE } else { egui::Color32::BLACK });
+    let heading_pos = egui::Pos2::new(center.x - heading_galley.size().x / 2.0, center.y - 40.0);
     ui.painter().galley(heading_pos, heading_galley, egui::Color32::PLACEHOLDER);
 
     if let Some(detail) = detail {
         let detail_galley = ui.painter().layout_no_wrap(
-            detail.to_string(),
-            egui::FontId::new(16.0, egui::FontFamily::Proportional),
-            if ui.visuals().dark_mode { egui::Color32::from_gray(200) } else { egui::Color32::from_gray(40) },
-        );
-        let detail_pos = egui::Pos2::new(
-            center.x - detail_galley.size().x / 2.0,
-            center.y + 5.0,
-        );
+            detail.to_string(), egui::FontId::new(16.0, egui::FontFamily::Proportional),
+            if ui.visuals().dark_mode { egui::Color32::from_gray(200) } else { egui::Color32::from_gray(40) });
+        let detail_pos = egui::Pos2::new(center.x - detail_galley.size().x / 2.0, center.y + 5.0);
         ui.painter().galley(detail_pos, detail_galley, egui::Color32::PLACEHOLDER);
     }
 
-    // Bouncing progress bar.
     let bar_w = 400.0_f32.min(rect.width() * 0.6);
     let bar_h = 6.0;
     let bar_y = center.y + 50.0;
     let bar_rect = egui::Rect::from_min_size(
-        egui::Pos2::new(center.x - bar_w / 2.0, bar_y),
-        egui::Vec2::new(bar_w, bar_h),
-    );
-
-    let track_color = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(60)
-    } else {
-        egui::Color32::from_gray(210)
-    };
+        egui::Pos2::new(center.x - bar_w / 2.0, bar_y), egui::Vec2::new(bar_w, bar_h));
+    let track_color = if ui.visuals().dark_mode { egui::Color32::from_gray(60) } else { egui::Color32::from_gray(210) };
     ui.painter().rect_filled(bar_rect, bar_h / 2.0, track_color);
 
-    let elapsed = started
-        .map(|s| s.elapsed().as_secs_f32())
-        .unwrap_or(0.0);
+    let elapsed = started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
     let cycle = 1.8;
     let t = (elapsed % cycle) / cycle;
     let pos_t = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
@@ -1250,11 +1127,8 @@ pub(crate) fn show_connecting_screen(
     let indicator_w = bar_w * 0.15;
     let indicator_x = bar_rect.min.x + eased * (bar_w - indicator_w);
     let indicator_rect = egui::Rect::from_min_size(
-        egui::Pos2::new(indicator_x, bar_y),
-        egui::Vec2::new(indicator_w, bar_h),
-    );
-    let accent = egui::Color32::from_rgb(66, 133, 244);
-    ui.painter().rect_filled(indicator_rect, bar_h / 2.0, accent);
+        egui::Pos2::new(indicator_x, bar_y), egui::Vec2::new(indicator_w, bar_h));
+    ui.painter().rect_filled(indicator_rect, bar_h / 2.0, egui::Color32::from_rgb(66, 133, 244));
 
     ConnectingAction::None
 }
@@ -1262,54 +1136,26 @@ pub(crate) fn show_connecting_screen(
 /// Render a connection error screen. Returns `true` if the user clicked "Close Tab".
 pub(crate) fn show_error_screen(ui: &mut egui::Ui, title: &str, error: &str) -> bool {
     let rect = ui.available_rect_before_wrap();
-    let bg = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(30)
-    } else {
-        egui::Color32::from_gray(241)
-    };
+    let bg = if ui.visuals().dark_mode { egui::Color32::from_gray(30) } else { egui::Color32::from_gray(241) };
     ui.painter().rect_filled(rect, 0.0, bg);
-
     let center = rect.center();
     let content_width = (rect.width() * 0.7).min(600.0);
-    let content_rect = egui::Rect::from_center_size(
-        center,
-        egui::Vec2::new(content_width, rect.height() * 0.8),
-    );
-
+    let content_rect = egui::Rect::from_center_size(center, egui::Vec2::new(content_width, rect.height() * 0.8));
     let mut close = false;
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
-                ui.label(
-                    egui::RichText::new(format!("Connection to {title} failed"))
-                        .size(24.0)
-                        .color(egui::Color32::from_rgb(220, 50, 50)),
-                );
+                ui.label(egui::RichText::new(format!("Connection to {title} failed"))
+                    .size(24.0).color(egui::Color32::from_rgb(220, 50, 50)));
                 ui.add_space(16.0);
             });
-
-            let error_color = if ui.visuals().dark_mode {
-                egui::Color32::from_gray(180)
-            } else {
-                egui::Color32::from_gray(60)
-            };
-            ui.label(
-                egui::RichText::new(error)
-                    .size(13.0)
-                    .family(egui::FontFamily::Monospace)
-                    .color(error_color),
-            );
-
+            let error_color = if ui.visuals().dark_mode { egui::Color32::from_gray(180) } else { egui::Color32::from_gray(60) };
+            ui.label(egui::RichText::new(error).size(13.0).family(egui::FontFamily::Monospace).color(error_color));
             ui.add_space(16.0);
-            ui.vertical_centered(|ui| {
-                if ui.button("Close Tab").clicked() {
-                    close = true;
-                }
-            });
+            ui.vertical_centered(|ui| { if ui.button("Close Tab").clicked() { close = true; } });
             ui.add_space(12.0);
         });
     });
-
     close
 }

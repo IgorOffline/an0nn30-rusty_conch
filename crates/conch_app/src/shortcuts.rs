@@ -10,11 +10,16 @@ impl ConchApp {
         use alacritty_terminal::term::TermMode;
 
         let app_cursor = forward_to_pty
-            && self.state.active_session().map_or(false, |s| {
+            && self.main_window.active_session().map_or(false, |s| {
                 s.term()
                     .try_lock_unfair()
                     .map_or(false, |term| term.mode().contains(TermMode::APP_CURSOR))
             });
+
+        let cfg = self.shared.config.lock();
+        let shortcuts = cfg.shortcuts.clone();
+        let plugin_keybindings = cfg.plugin_keybindings.clone();
+        drop(cfg);
 
         ctx.input(|input| {
             for event in &input.events {
@@ -40,67 +45,69 @@ impl ConchApp {
                                 _ => None,
                             };
                             if let Some(idx) = tab_num {
-                                if let Some(&id) = self.state.tab_order.get(idx) {
-                                    self.state.active_tab = Some(id);
+                                if let Some(&id) = self.main_window.tab_order.get(idx) {
+                                    self.main_window.active_tab = Some(id);
                                     return;
                                 }
                             }
                         }
 
                         // App-level configurable shortcuts.
-                        if let Some(ref kb) = self.shortcuts.new_window {
+                        if let Some(ref kb) = shortcuts.new_window {
                             if kb.matches(key, modifiers) {
                                 self.spawn_extra_window();
                                 return;
                             }
                         }
-                        if let Some(ref kb) = self.shortcuts.new_tab {
-                            if kb.matches(key, modifiers) { self.open_local_tab(); return; }
-                        }
-                        if let Some(ref kb) = self.shortcuts.close_tab {
+                        if let Some(ref kb) = shortcuts.new_tab {
                             if kb.matches(key, modifiers) {
-                                if let Some(id) = self.state.active_tab {
-                                    self.remove_session(id);
+                                let user_config = self.shared.config.lock().user_config.clone();
+                                self.main_window.open_local_tab(&user_config);
+                                return;
+                            }
+                        }
+                        if let Some(ref kb) = shortcuts.close_tab {
+                            if kb.matches(key, modifiers) {
+                                if let Some(id) = self.main_window.active_tab {
+                                    self.main_window.remove_session(id);
                                 }
                                 return;
                             }
                         }
-                        if let Some(ref kb) = self.shortcuts.quit {
+                        if let Some(ref kb) = shortcuts.quit {
                             if kb.matches(key, modifiers) {
                                 self.quit_requested = true;
                                 return;
                             }
                         }
-                        if let Some(ref kb) = self.shortcuts.toggle_left_panel {
+                        if let Some(ref kb) = shortcuts.toggle_left_panel {
                             if kb.matches(key, modifiers) {
-                                self.left_panel_visible = !self.left_panel_visible;
+                                self.main_window.left_panel_visible = !self.main_window.left_panel_visible;
                                 return;
                             }
                         }
-                        if let Some(ref kb) = self.shortcuts.toggle_right_panel {
+                        if let Some(ref kb) = shortcuts.toggle_right_panel {
                             if kb.matches(key, modifiers) {
-                                self.right_panel_visible = !self.right_panel_visible;
+                                self.main_window.right_panel_visible = !self.main_window.right_panel_visible;
                                 return;
                             }
                         }
-                        if let Some(ref kb) = self.shortcuts.toggle_bottom_panel {
+                        if let Some(ref kb) = shortcuts.toggle_bottom_panel {
                             if kb.matches(key, modifiers) {
-                                self.bottom_panel_visible = !self.bottom_panel_visible;
+                                self.main_window.bottom_panel_visible = !self.main_window.bottom_panel_visible;
                                 return;
                             }
                         }
-                        if let Some(ref kb) = self.shortcuts.zen_mode {
+                        if let Some(ref kb) = shortcuts.zen_mode {
                             if kb.matches(key, modifiers) {
-                                self.toggle_zen_mode();
+                                self.main_window.toggle_zen_mode();
                                 return;
                             }
                         }
 
                         // Plugin-registered global keybindings.
-                        for pkb in &self.plugin_keybindings {
+                        for pkb in &plugin_keybindings {
                             if pkb.binding.matches(key, modifiers) {
-                                // Record that this keybinding fired from the main window
-                                // so that subsequent dialogs open in the correct viewport.
                                 crate::host::bridge::set_event_viewport(
                                     &pkb.plugin_name,
                                     egui::ViewportId::ROOT,
@@ -117,8 +124,8 @@ impl ConchApp {
                         // Ctrl+Shift+C for copy on non-macOS.
                         #[cfg(not(target_os = "macos"))]
                         if forward_to_pty && modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
-                            if let Some((start, end)) = self.selection.normalized() {
-                                if let Some(session) = self.state.active_session() {
+                            if let Some((start, end)) = self.main_window.selection.normalized() {
+                                if let Some(session) = self.main_window.active_session() {
                                     let text = crate::terminal::widget::get_selected_text(session.term(), start, end);
                                     if !text.is_empty() {
                                         ctx.copy_text(text);
@@ -130,8 +137,8 @@ impl ConchApp {
 
                         // Forward to active terminal.
                         if forward_to_pty {
-                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &self.shortcuts, app_cursor, &self.plugin_keybindings) {
-                                if let Some(session) = self.state.active_session() {
+                            if let Some(bytes) = input::key_to_bytes(key, modifiers, None, &shortcuts, app_cursor, &plugin_keybindings) {
+                                if let Some(session) = self.main_window.active_session() {
                                     if let Some(mut term) = session.term().try_lock_unfair() {
                                         term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
                                     }
@@ -142,7 +149,7 @@ impl ConchApp {
                     }
                     egui::Event::Text(text) => {
                         if forward_to_pty {
-                            if let Some(session) = self.state.active_session() {
+                            if let Some(session) = self.main_window.active_session() {
                                 if let Some(mut term) = session.term().try_lock_unfair() {
                                     term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
                                 }

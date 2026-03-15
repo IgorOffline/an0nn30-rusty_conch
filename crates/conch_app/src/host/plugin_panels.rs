@@ -416,45 +416,47 @@ impl ConchApp {
     /// When multiple plugins register at the same location, they share a single
     /// egui panel with a vertical tab strip on the outer edge.
     pub(crate) fn render_plugin_panels(&mut self, ctx: &egui::Context) {
-        let theme = self.state.theme.clone();
-        let layout = &self.state.persistent.layout;
+        let cfg = self.shared.config.lock();
+        let theme = cfg.theme.clone();
+        let layout = &cfg.persistent.layout;
         let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width.min(600.0) } else { DEFAULT_SIDE_WIDTH };
         let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width.min(600.0) } else { DEFAULT_SIDE_WIDTH };
         let bottom_h = if layout.bottom_panel_height > 0.0 { layout.bottom_panel_height } else { DEFAULT_BOTTOM_HEIGHT };
+        drop(cfg);
 
+        let render_cache = self.shared.render_cache.lock();
+        let icon_cache = self.shared.icon_cache.lock();
         let sizes = render_plugin_panels_for_ctx(
             ctx,
-            &self.panel_registry,
-            &self.plugin_bus,
-            &self.render_cache,
-            &mut self.plugin_text_state,
-            &mut self.active_panel_tab,
-            self.left_panel_visible,
-            self.right_panel_visible,
-            self.bottom_panel_visible,
+            &self.shared.panel_registry,
+            &self.shared.plugin_bus,
+            &render_cache,
+            &mut self.main_window.plugin_text_state,
+            &mut self.main_window.active_panel_tab,
+            self.main_window.left_panel_visible,
+            self.main_window.right_panel_visible,
+            self.main_window.bottom_panel_visible,
             &theme,
-            self.icon_cache.as_ref(),
+            icon_cache.as_ref(),
             left_w,
             right_w,
             bottom_h,
             egui::ViewportId::ROOT,
         );
+        drop(render_cache);
+        drop(icon_cache);
 
         // Persist measured sizes for the main window.
+        let mut cfg = self.shared.config.lock();
         if let Some(w) = sizes.left_width {
-            self.state.persistent.layout.left_panel_width = w;
+            cfg.persistent.layout.left_panel_width = w;
         }
         if let Some(w) = sizes.right_width {
-            self.state.persistent.layout.right_panel_width = w;
+            cfg.persistent.layout.right_panel_width = w;
         }
         if let Some(h) = sizes.bottom_height {
-            self.state.persistent.layout.bottom_panel_height = h;
+            cfg.persistent.layout.bottom_panel_height = h;
         }
-    }
-
-    /// Render the global status bar at the very bottom of the window.
-    pub(crate) fn render_status_bar(&self, ctx: &egui::Context) {
-        render_status_bar(ctx, &self.state.theme);
     }
 }
 
