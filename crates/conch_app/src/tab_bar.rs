@@ -6,7 +6,6 @@ use std::time::Instant;
 use egui::{Color32, Rect, Sense, Vec2};
 use uuid::Uuid;
 
-use crate::state::AppState;
 use crate::ui_theme::UiTheme;
 
 /// Duration of tab open/close animations in seconds.
@@ -82,19 +81,7 @@ struct TabEntry {
     live_index: Option<usize>,
 }
 
-/// Show the tab bar. Only renders when there are 2+ visible tabs.
-/// Returns a list of actions for the caller to apply.
-pub fn show(ctx: &egui::Context, state: &AppState, tab_state: &mut TabBarState) -> Vec<TabBarAction> {
-    let tabs: Vec<(Uuid, String)> = state.tab_order.iter().map(|&id| {
-        let title = state.sessions.get(&id)
-            .map(|s| s.display_title().to_string())
-            .unwrap_or_default();
-        (id, title)
-    }).collect();
-    show_for(ctx, &tabs, state.active_tab, &state.theme, tab_state)
-}
-
-/// Show the tab bar for an arbitrary set of tabs (used by extra windows).
+/// Show the tab bar for an arbitrary set of tabs.
 /// `tabs` is an ordered list of `(id, display_title)`.
 pub fn show_for(
     ctx: &egui::Context,

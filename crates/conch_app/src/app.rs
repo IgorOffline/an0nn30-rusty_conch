@@ -1,4 +1,6 @@
-//! Main application struct and egui update loop.
+//! Root coordinator — manages window lifecycle, plugin infrastructure, and
+//! background tasks.  The root eframe viewport is invisible; all visible
+//! windows are deferred viewports rendered by `render_window()`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,109 +11,57 @@ use conch_plugin::bus::PluginBus;
 use conch_plugin::jvm::runtime::JavaPluginManager;
 use conch_plugin::lua::runner::RunningLuaPlugin;
 use conch_plugin::native::manager::NativePluginManager;
-use conch_plugin_sdk::PanelLocation;
 use egui::ViewportCommand;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use crate::extra_window::ExtraWindow;
 use crate::host::bridge::{self, PanelRegistry, SessionRegistry};
-use crate::host::dialogs::{self, DialogState};
+use crate::host::dialogs;
 use crate::host::plugin_manager_ui::PluginManagerState;
-use crate::input::ResolvedShortcuts;
+use crate::input::{KeyBinding, ResolvedPluginKeybind, ResolvedShortcuts};
 use crate::ipc::{IpcListener, IpcMessage};
 use crate::menu_bar::MenuBarState;
-use crate::mouse::Selection;
 use crate::notifications::NotificationManager;
 use crate::platform::PlatformCapabilities;
 use crate::sessions::create_local_session;
-use crate::state::AppState;
 use crate::terminal::color::ResolvedColors;
-use crate::terminal::widget::{self, TerminalFrameCache};
 use crate::watcher::{FileChangeKind, FileWatcher};
-
-/// Cursor blink interval in milliseconds.
-const CURSOR_BLINK_MS: u128 = 500;
+use crate::window_state::{render_window, SharedAppState, SharedConfig, WindowAction, WindowState};
 
 pub struct ConchApp {
-    pub(crate) state: AppState,
-    pub(crate) shortcuts: ResolvedShortcuts,
-    /// Plugin-registered global keybindings (resolved from menu items).
-    pub(crate) plugin_keybindings: Vec<crate::input::ResolvedPluginKeybind>,
-    /// Tracks which version of plugin menu items we last resolved keybindings from.
-    pub(crate) plugin_keybindings_version: u64,
-    pub(crate) selection: Selection,
+    pub(crate) shared: Arc<SharedAppState>,
 
-    // Terminal rendering state.
-    pub(crate) cell_width: f32,
-    pub(crate) cell_height: f32,
-    pub(crate) cell_size_measured: bool,
-    pub(crate) last_pixels_per_point: f32,
-    pub(crate) last_cols: u16,
-    pub(crate) last_rows: u16,
-    pub(crate) cursor_visible: bool,
-    pub(crate) last_blink: Instant,
-    pub(crate) terminal_frame_cache: TerminalFrameCache,
-
-    // UI chrome.
-    pub(crate) tab_bar_state: crate::tab_bar::TabBarState,
-    pub(crate) menu_bar_state: MenuBarState,
-    pub(crate) context_menu_state: crate::context_menu::ContextMenuState,
-    pub(crate) platform: PlatformCapabilities,
-
-    // Plugin system.
-    pub(crate) show_plugin_manager: bool,
-    pub(crate) plugin_manager: PluginManagerState,
-    pub(crate) plugin_bus: Arc<PluginBus>,
-    pub(crate) panel_registry: Arc<Mutex<PanelRegistry>>,
-    pub(crate) native_plugin_mgr: NativePluginManager,
-    /// Running Lua plugins, keyed by name.
-    pub(crate) lua_plugins: HashMap<String, RunningLuaPlugin>,
-    pub(crate) java_plugin_mgr: JavaPluginManager,
-    /// Pending render responses from plugin threads (plugin_name → receiver).
-    pub(crate) render_pending: HashMap<String, oneshot::Receiver<String>>,
-    /// Last time a render request was sent to each plugin (for throttling).
-    pub(crate) render_last_request: HashMap<String, Instant>,
-    /// Cached widget JSON per plugin name (for rendering between polls).
-    pub(crate) render_cache: HashMap<String, String>,
-    /// Mutable text input state for plugin panels (keyed by widget id).
-    pub(crate) plugin_text_state: HashMap<String, String>,
-    /// Panel visibility toggles.
-    pub(crate) left_panel_visible: bool,
-    pub(crate) right_panel_visible: bool,
-    pub(crate) show_status_bar: bool,
-    pub(crate) bottom_panel_visible: bool,
-    /// Active panel tab per location (handle of the selected panel).
-    pub(crate) active_panel_tab: HashMap<PanelLocation, u64>,
-
-    // Multi-window.
-    pub(crate) extra_windows: Vec<ExtraWindow>,
+    /// ALL user-visible windows.  There is no privileged "main" window.
+    pub(crate) windows: Vec<Arc<Mutex<WindowState>>>,
     pub(crate) next_viewport_num: u32,
 
-    // Host dialogs (plugin → UI thread).
-    pub(crate) dialog_state: DialogState,
+    // Plugin managers.
+    pub(crate) native_plugin_mgr: NativePluginManager,
+    pub(crate) lua_plugins: HashMap<String, RunningLuaPlugin>,
+    pub(crate) java_plugin_mgr: JavaPluginManager,
+    pub(crate) render_pending: HashMap<String, oneshot::Receiver<String>>,
+    pub(crate) render_last_request: HashMap<String, Instant>,
 
-    // Plugin session registry (pending open/close from plugins).
-    pub(crate) session_registry: Arc<Mutex<SessionRegistry>>,
-
-    // Icons.
-    pub(crate) icon_cache: Option<crate::icons::IconCache>,
-
-    // Tab change tracking (for plugin bus events).
-    pub(crate) prev_active_tab: Option<uuid::Uuid>,
+    /// Per-window tab-change tracking for plugin bus events.
+    prev_active_tabs: HashMap<egui::ViewportId, Option<uuid::Uuid>>,
 
     // System.
     pub(crate) ipc_listener: Option<IpcListener>,
     pub(crate) file_watcher: Option<FileWatcher>,
-    pub(crate) has_ever_had_session: bool,
     pub(crate) quit_requested: bool,
     pub(crate) rt: Arc<tokio::runtime::Runtime>,
-    pub(crate) notifications: NotificationManager,
+
+    /// Icon + initial window size passed from main().
+    initial_window_icon: Option<Arc<egui::IconData>>,
+    initial_window_size: [f32; 2],
 }
 
-
 impl ConchApp {
-    pub fn new(rt: Arc<tokio::runtime::Runtime>) -> Self {
+    pub fn new(
+        rt: Arc<tokio::runtime::Runtime>,
+        initial_window_size: [f32; 2],
+        icon: Arc<egui::IconData>,
+    ) -> Self {
         let user_config = config::load_user_config().unwrap_or_else(|e| {
             log::error!("Failed to load config: {e:#}");
             config::UserConfig::default()
@@ -121,12 +71,14 @@ impl ConchApp {
         let shortcuts = ResolvedShortcuts::from_config(&user_config.conch.keyboard);
         let platform = PlatformCapabilities::current();
         let menu_bar_state = MenuBarState::new(user_config.conch.ui.native_menu_bar, &platform);
-        let state = AppState::new(user_config, persistent);
+
+        let scheme = conch_core::color_scheme::resolve_theme(&user_config.colors.theme);
+        let colors = ResolvedColors::from_scheme(&scheme);
+        let theme = crate::ui_theme::UiTheme::from_colors(&colors, user_config.colors.appearance_mode);
 
         let ipc_listener = IpcListener::start();
         let file_watcher = FileWatcher::start();
 
-        // Plugin infrastructure.
         let plugin_bus = Arc::new(PluginBus::new());
         let panel_registry = Arc::new(Mutex::new(PanelRegistry::new()));
         let (dialog_tx, dialog_state) = dialogs::dialog_channel();
@@ -144,1172 +96,553 @@ impl ConchApp {
         let native_plugin_mgr = NativePluginManager::new(Arc::clone(&plugin_bus), host_api);
         let java_plugin_mgr = JavaPluginManager::new(Arc::clone(&plugin_bus), java_host_api);
 
-        let mut app = Self {
-            state,
+        let shared_config = SharedConfig {
+            user_config,
+            persistent,
+            colors,
+            theme,
+            theme_dirty: true,
+            theme_version: 1,
             shortcuts,
             plugin_keybindings: Vec::new(),
             plugin_keybindings_version: 0,
-            selection: Selection::default(),
-            cell_width: 0.0,
-            cell_height: 0.0,
-            cell_size_measured: false,
-            last_pixels_per_point: 0.0,
-            last_cols: 0,
-            last_rows: 0,
-            cursor_visible: true,
-            last_blink: Instant::now(),
-            terminal_frame_cache: TerminalFrameCache::default(),
-            tab_bar_state: crate::tab_bar::TabBarState::default(),
-            menu_bar_state,
-            context_menu_state: crate::context_menu::ContextMenuState::default(),
-            platform,
-            show_plugin_manager: false,
-            plugin_manager: PluginManagerState::default(),
+        };
+
+        let shared = Arc::new(SharedAppState {
+            config: Mutex::new(shared_config),
             plugin_bus,
             panel_registry,
+            session_registry,
+            render_cache: Mutex::new(HashMap::new()),
+            dialog_state: Mutex::new(dialog_state),
+            notifications: Mutex::new(notifications),
+            icon_cache: Mutex::new(None),
+            menu_bar_state: Mutex::new(menu_bar_state),
+            plugin_manager: Mutex::new(PluginManagerState::default()),
+            platform,
+        });
+
+        let mut app = Self {
+            shared,
+            windows: Vec::new(),
+            next_viewport_num: 1,
             native_plugin_mgr,
             lua_plugins: HashMap::new(),
             java_plugin_mgr,
             render_pending: HashMap::new(),
             render_last_request: HashMap::new(),
-            render_cache: HashMap::new(),
-            plugin_text_state: HashMap::new(),
-            left_panel_visible: true,
-            right_panel_visible: true,
-            show_status_bar: true,
-            bottom_panel_visible: true,
-            active_panel_tab: HashMap::new(),
-            extra_windows: Vec::new(),
-            next_viewport_num: 1,
-            dialog_state,
-            session_registry,
-            icon_cache: None,
-            prev_active_tab: None,
+            prev_active_tabs: HashMap::new(),
             ipc_listener,
             file_watcher,
-            has_ever_had_session: false,
             quit_requested: false,
             rt,
-            notifications,
+            initial_window_icon: Some(icon),
+            initial_window_size,
         };
 
-        // Discover plugins and auto-load previously enabled ones.
         app.discover_plugins();
         app.auto_load_plugins();
-
         app
     }
 
-    /// Re-resolve plugin keybindings when menu items change.
-    fn refresh_plugin_keybindings(&mut self) {
-        use crate::host::bridge;
-        use crate::input::{KeyBinding, ResolvedPluginKeybind};
-
+    fn refresh_plugin_keybindings(&self) {
         let version = bridge::plugin_menu_items_version();
-        if version == self.plugin_keybindings_version {
-            return;
-        }
-        self.plugin_keybindings_version = version;
-
-        self.plugin_keybindings = bridge::plugin_menu_items()
+        let mut cfg = self.shared.config.lock();
+        if version == cfg.plugin_keybindings_version { return; }
+        cfg.plugin_keybindings_version = version;
+        cfg.plugin_keybindings = bridge::plugin_menu_items()
             .into_iter()
             .filter_map(|item| {
                 let kb_str = item.keybind.as_deref()?;
                 let binding = KeyBinding::parse(kb_str)?;
-                Some(ResolvedPluginKeybind {
-                    binding,
-                    plugin_name: item.plugin_name,
-                    action: item.action,
-                })
+                Some(ResolvedPluginKeybind { binding, plugin_name: item.plugin_name, action: item.action })
             })
             .collect();
     }
 
-    /// Build a `ViewportBuilder` for extra windows matching main window decorations.
-    pub(crate) fn build_extra_viewport(&self) -> egui::ViewportBuilder {
-        let decorations = self.platform.effective_decorations(
-            self.state.user_config.window.decorations,
-        );
-        crate::build_viewport(
-            egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
-            decorations,
-            &self.platform,
-        )
+    fn build_window_viewport(&self, size: [f32; 2]) -> egui::ViewportBuilder {
+        let cfg = self.shared.config.lock();
+        let decorations = self.shared.platform.effective_decorations(cfg.user_config.window.decorations);
+        let mut builder = egui::ViewportBuilder::default().with_inner_size(size);
+        if let Some(icon) = &self.initial_window_icon {
+            builder = builder.with_icon(Arc::clone(icon));
+        }
+        drop(cfg);
+        crate::build_viewport(builder, decorations, &self.shared.platform)
     }
 
-    /// Open a new OS window with a fresh local terminal tab.
-    pub(crate) fn spawn_extra_window(&mut self) {
-        let cwd = self.state
-            .active_session()
-            .and_then(|s| s.child_pid())
-            .and_then(conch_pty::get_cwd_of_pid);
-        let Some((_, session)) = create_local_session(&self.state.user_config, cwd) else {
-            return;
+    pub(crate) fn spawn_window(&mut self, cwd: Option<std::path::PathBuf>) -> Option<egui::ViewportId> {
+        let cwd = cwd.or_else(|| {
+            self.windows.iter()
+                .find(|w| w.lock().has_focus)
+                .and_then(|w| {
+                    let win = w.lock();
+                    win.active_session().and_then(|s| s.child_pid()).and_then(conch_pty::get_cwd_of_pid)
+                })
+        });
+        let user_config = self.shared.config.lock().user_config.clone();
+        let (_, session) = create_local_session(&user_config, cwd)?;
+        // First window uses ROOT viewport (rendered directly by update()).
+        // Extra windows get their own viewport IDs (rendered via show_viewport_immediate).
+        let viewport_id = if self.windows.is_empty() {
+            egui::ViewportId::ROOT
+        } else {
+            let num = self.next_viewport_num;
+            self.next_viewport_num += 1;
+            egui::ViewportId::from_hash_of(format!("conch_window_{num}"))
         };
-        let num = self.next_viewport_num;
-        self.next_viewport_num += 1;
-        let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
-        let builder = self.build_extra_viewport();
-        self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
+        let size = if self.windows.is_empty() { self.initial_window_size } else { [800.0, 600.0] };
+        let builder = self.build_window_viewport(size);
+        let layout = self.shared.config.lock().persistent.layout.clone();
+        let win = WindowState::with_session(viewport_id, builder, session, &layout);
+        self.windows.push(Arc::new(Mutex::new(win)));
+        Some(viewport_id)
     }
 
-    /// Poll terminal events for all main-window sessions.
-    fn poll_events(&mut self, ctx: &egui::Context) {
-        let mut exited_sessions = Vec::new();
-
-        for (id, session) in &mut self.state.sessions {
-            while let Ok(event) = session.event_rx.try_recv() {
-                match event {
-                    alacritty_terminal::event::Event::Wakeup => ctx.request_repaint(),
-                    alacritty_terminal::event::Event::Title(title) => {
-                        if session.custom_title.is_none() {
-                            session.title = title;
-                        }
-                    }
-                    alacritty_terminal::event::Event::Exit => {
-                        exited_sessions.push(*id);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        for id in exited_sessions {
-            self.remove_session(id);
-        }
-    }
-
-    /// Handle file watcher events.
-    fn handle_file_changes(&mut self, ctx: &egui::Context) {
-        let Some(watcher) = &mut self.file_watcher else { return };
-        let changes = watcher.poll();
-        for change in changes {
-            match change.kind {
-                FileChangeKind::Config => {
-                    log::info!("Config file changed, reloading...");
-                    match config::load_user_config() {
-                        Ok(new_config) => {
-                            self.shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
-                            let scheme = conch_core::color_scheme::resolve_theme(&new_config.colors.theme);
-                            self.state.colors = ResolvedColors::from_scheme(&scheme);
-                            self.state.theme = crate::ui_theme::UiTheme::from_colors(&self.state.colors, new_config.colors.appearance_mode);
-                            self.state.theme_dirty = true;
-                            crate::apply_appearance_mode(ctx, new_config.colors.appearance_mode);
-                            self.menu_bar_state.update_mode(new_config.conch.ui.native_menu_bar, &self.platform);
-                            self.state.user_config = new_config;
-                            crate::notifications::push(crate::notifications::Notification::new(
-                                Some("Config Reloaded".into()),
-                                "Configuration updated successfully.".into(),
-                                crate::notifications::NotificationLevel::Success,
-                                None,
-                            ));
-                        }
-                        Err(e) => {
-                            crate::notifications::push(crate::notifications::Notification::new(
-                                Some("Config Error".into()),
-                                format!("Failed to reload config: {e}"),
-                                crate::notifications::NotificationLevel::Error,
-                                None,
-                            ));
-                        }
-                    }
-                }
-                FileChangeKind::Themes => {
-                    log::info!("Themes changed, reloading...");
-                    let scheme = conch_core::color_scheme::resolve_theme(&self.state.user_config.colors.theme);
-                    self.state.colors = ResolvedColors::from_scheme(&scheme);
-                    self.state.theme = crate::ui_theme::UiTheme::from_colors(&self.state.colors, self.state.user_config.colors.appearance_mode);
-                    self.state.theme_dirty = true;
-                    crate::notifications::push(crate::notifications::Notification::new(
-                        Some("Theme Reloaded".into()),
-                        "Theme updated successfully.".into(),
-                        crate::notifications::NotificationLevel::Success,
-                        None,
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Scan for native and Lua plugins and populate the plugin manager UI.
-    ///
-    /// Uses `[conch.plugins].search_paths` from config.toml. When empty, falls
-    /// back to built-in defaults for development and the user plugin directory.
-    /// Handle IPC messages from external processes.
     fn handle_ipc(&mut self) {
         let Some(listener) = &self.ipc_listener else { return };
         for msg in listener.drain() {
             match msg {
                 IpcMessage::CreateWindow { working_directory } => {
-                    let cwd = working_directory.map(std::path::PathBuf::from);
-                    if let Some((_, session)) = create_local_session(&self.state.user_config, cwd) {
-                        let num = self.next_viewport_num;
-                        self.next_viewport_num += 1;
-                        let viewport_id = egui::ViewportId::from_hash_of(format!("conch_window_{num}"));
-                        let builder = self.build_extra_viewport();
-                        self.extra_windows.push(ExtraWindow::new(viewport_id, builder, session));
-                    }
+                    self.spawn_window(working_directory.map(std::path::PathBuf::from));
                 }
                 IpcMessage::CreateTab { working_directory } => {
                     let cwd = working_directory.map(std::path::PathBuf::from);
-                    if let Some((id, session)) = create_local_session(&self.state.user_config, cwd) {
-                        self.state.sessions.insert(id, session);
-                        self.state.tab_order.push(id);
-                        self.state.active_tab = Some(id);
+                    let user_config = self.shared.config.lock().user_config.clone();
+                    if let Some((id, session)) = create_local_session(&user_config, cwd) {
+                        let target = self.windows.iter()
+                            .find(|w| w.lock().has_focus)
+                            .or_else(|| self.windows.first());
+                        if let Some(w) = target {
+                            let mut win = w.lock();
+                            win.sessions.insert(id, session);
+                            win.tab_order.push(id);
+                            win.active_tab = Some(id);
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Drain pending session open/close requests from plugins.
     fn drain_pending_sessions(&mut self) {
-        let mut registry = self.session_registry.lock();
+        let mut registry = self.shared.session_registry.lock();
         let pending: Vec<_> = registry.pending_open.drain(..).collect();
         let closing: Vec<_> = registry.pending_close.drain(..).collect();
         let status_updates: Vec<_> = registry.pending_status.drain(..).collect();
         drop(registry);
 
-        // Process session opens.
         for mut ps in pending {
             let id = uuid::Uuid::new_v4();
             let event_rx = ps.bridge.take_event_rx();
             let session = crate::state::Session {
-                id,
-                title: ps.title,
-                custom_title: None,
-                backend: crate::state::SessionBackend::Plugin {
-                    bridge: ps.bridge,
-                    vtable: ps.vtable,
-                    backend_handle: ps.backend_handle,
-                },
-                event_rx,
-                status: conch_plugin_sdk::SessionStatus::Connecting,
-                status_detail: None,
-                connect_started: Some(std::time::Instant::now()),
-                prompt: None,
+                id, title: ps.title, custom_title: None,
+                backend: crate::state::SessionBackend::Plugin { bridge: ps.bridge, vtable: ps.vtable, backend_handle: ps.backend_handle },
+                event_rx, status: conch_plugin_sdk::SessionStatus::Connecting,
+                status_detail: None, connect_started: Some(Instant::now()), prompt: None,
             };
-
-            // Route session to the window that triggered the interaction.
-            let target = ps.target_viewport;
-            let routed = target.and_then(|vp| {
-                if vp == egui::ViewportId::ROOT {
-                    return None; // main window — fall through
+            let target = ps.target_viewport
+                .and_then(|vp| self.windows.iter().find(|w| w.lock().viewport_id == vp))
+                .or_else(|| self.windows.first());
+            if let Some(window_arc) = target {
+                let mut win = window_arc.lock();
+                if win.last_cols > 0 && win.last_rows > 0 {
+                    session.resize(win.last_cols, win.last_rows, win.cell_width as u16, win.cell_height as u16);
                 }
-                self.extra_windows.iter_mut().find(|w| w.viewport_id == vp)
-            });
-
-            if let Some(window) = routed {
-                if window.last_cols > 0 && window.last_rows > 0 {
-                    session.resize(
-                        window.last_cols, window.last_rows,
-                        window.cell_width as u16, window.cell_height as u16,
-                    );
-                }
-                window.sessions.insert(id, session);
-                window.tab_order.push(id);
-                window.active_tab = Some(id);
-            } else {
-                if self.last_cols > 0 && self.last_rows > 0 {
-                    session.resize(
-                        self.last_cols, self.last_rows,
-                        self.cell_width as u16, self.cell_height as u16,
-                    );
-                }
-                self.state.sessions.insert(id, session);
-                self.state.tab_order.push(id);
-                self.state.active_tab = Some(id);
-                self.has_ever_had_session = true;
+                win.sessions.insert(id, session);
+                win.tab_order.push(id);
+                win.active_tab = Some(id);
             }
         }
 
-        // Process session closes (search main window and extra windows).
         for handle in closing {
-            // Try main window first.
-            let main_id = self.state.sessions.iter().find_map(|(id, s)| {
-                if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
-                    if bridge.handle == handle {
-                        return Some(*id);
+            for window_arc in &self.windows {
+                let mut win = window_arc.lock();
+                let found = win.sessions.iter().find_map(|(sid, s)| {
+                    if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
+                        if bridge.handle == handle { return Some(*sid); }
                     }
-                }
-                None
-            });
-            if let Some(id) = main_id {
-                self.remove_session(id);
-            } else {
-                // Search extra windows.
-                for window in &mut self.extra_windows {
-                    let ew_id = window.sessions.iter().find_map(|(id, s)| {
-                        if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
-                            if bridge.handle == handle {
-                                return Some(*id);
-                            }
-                        }
-                        None
-                    });
-                    if let Some(id) = ew_id {
-                        if let Some(session) = window.sessions.remove(&id) {
-                            session.shutdown();
-                        }
-                        window.tab_order.retain(|&tab_id| tab_id != id);
-                        if window.active_tab == Some(id) {
-                            window.active_tab = window.tab_order.last().copied();
-                        }
-                        break;
-                    }
-                }
+                    None
+                });
+                if let Some(sid) = found { win.remove_session(sid); break; }
             }
         }
 
-        // Process session prompts (attach to the correct session).
         let prompts: Vec<_> = {
-            let mut reg = self.session_registry.lock();
+            let mut reg = self.shared.session_registry.lock();
             reg.pending_prompts.drain(..).collect()
         };
         for prompt_req in prompts {
             let handle = prompt_req.handle;
             let prompt_state = crate::state::SessionPrompt {
-                prompt_type: prompt_req.prompt_type,
-                message: prompt_req.message,
-                detail: prompt_req.detail,
-                password_buf: String::new(),
-                focus_password: true,
-                show_password: false,
-                reply: Some(prompt_req.reply),
+                prompt_type: prompt_req.prompt_type, message: prompt_req.message,
+                detail: prompt_req.detail, password_buf: String::new(),
+                focus_password: true, show_password: false, reply: Some(prompt_req.reply),
             };
-
-            // Find the session in main window or extra windows.
-            let main_match = self.state.sessions.values_mut().find(|s| {
-                matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
-            });
-            if let Some(session) = main_match {
-                session.prompt = Some(prompt_state);
-            } else {
-                let mut placed = false;
-                for window in &mut self.extra_windows {
-                    let ew_match = window.sessions.values_mut().find(|s| {
-                        matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
-                    });
-                    if let Some(session) = ew_match {
-                        session.prompt = Some(prompt_state);
-                        placed = true;
-                        break;
-                    }
-                }
-                if !placed {
-                    log::warn!("session_prompt: no session found for handle {:?}", handle);
-                }
+            for window_arc in &self.windows {
+                let mut win = window_arc.lock();
+                let found = win.sessions.values_mut().find(|s| {
+                    matches!(&s.backend, crate::state::SessionBackend::Plugin { bridge, .. } if bridge.handle == handle)
+                });
+                if let Some(session) = found { session.prompt = Some(prompt_state); break; }
             }
         }
 
-        // Process status updates (search main window and extra windows).
         for update in status_updates {
-            let main_id = self.state.sessions.iter().find_map(|(id, s)| {
-                if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
-                    if bridge.handle == update.handle {
-                        return Some(*id);
+            for window_arc in &self.windows {
+                let mut win = window_arc.lock();
+                let found = win.sessions.iter().find_map(|(sid, s)| {
+                    if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
+                        if bridge.handle == update.handle { return Some(*sid); }
                     }
-                }
-                None
-            });
-            if let Some(id) = main_id {
-                if let Some(session) = self.state.sessions.get_mut(&id) {
-                    session.status = update.status;
-                    session.status_detail = update.detail;
-                }
-            } else {
-                // Search extra windows.
-                for window in &mut self.extra_windows {
-                    let ew_id = window.sessions.iter().find_map(|(id, s)| {
-                        if let crate::state::SessionBackend::Plugin { bridge, .. } = &s.backend {
-                            if bridge.handle == update.handle {
-                                return Some(*id);
-                            }
-                        }
-                        None
-                    });
-                    if let Some(id) = ew_id {
-                        if let Some(session) = window.sessions.get_mut(&id) {
-                            session.status = update.status;
-                            session.status_detail = update.detail;
-                        }
-                        break;
+                    None
+                });
+                if let Some(sid) = found {
+                    if let Some(session) = win.sessions.get_mut(&sid) {
+                        session.status = update.status;
+                        session.status_detail = update.detail;
                     }
+                    break;
                 }
             }
         }
     }
 
-    /// Publish an `app.tab_changed` bus event so plugins (e.g. conch-files)
-    /// can react to the active session changing.
-    fn publish_tab_changed(&self) {
-        let (is_ssh, session_id) = if let Some(session) = self.state.active_session() {
-            match &session.backend {
-                crate::state::SessionBackend::Plugin { bridge, .. } => {
-                    (true, Some(bridge.handle.0))
-                }
-                crate::state::SessionBackend::Local(_) => (false, None),
+    fn check_tab_changes(&mut self) {
+        for window_arc in &self.windows {
+            let win = window_arc.lock();
+            let prev = self.prev_active_tabs.get(&win.viewport_id).copied().flatten();
+            if win.active_tab != prev {
+                self.prev_active_tabs.insert(win.viewport_id, win.active_tab);
+                let (is_ssh, session_id) = if let Some(session) = win.active_session() {
+                    match &session.backend {
+                        crate::state::SessionBackend::Plugin { bridge, .. } => (true, Some(bridge.handle.0)),
+                        crate::state::SessionBackend::Local(_) => (false, None),
+                    }
+                } else { (false, None) };
+                let mut data = serde_json::json!({ "is_ssh": is_ssh });
+                if let Some(sid) = session_id { data["session_id"] = serde_json::json!(sid); }
+                self.shared.plugin_bus.publish("app", "app.tab_changed", data);
             }
-        } else {
-            (false, None)
-        };
-
-        let mut data = serde_json::json!({ "is_ssh": is_ssh });
-        if let Some(sid) = session_id {
-            data["session_id"] = serde_json::json!(sid);
-        }
-
-        self.plugin_bus.publish("app", "app.tab_changed", data);
-    }
-
-    pub(crate) fn toggle_zen_mode(&mut self) {
-        if self.left_panel_visible || self.right_panel_visible || self.show_status_bar {
-            self.left_panel_visible = false;
-            self.right_panel_visible = false;
-            self.show_status_bar = false;
-        } else {
-            self.left_panel_visible = true;
-            self.right_panel_visible = true;
-            self.show_status_bar = true;
         }
     }
 }
 
 impl eframe::App for ConchApp {
-    /// Runs *before* egui's `begin_pass()` — strip Tab key events from raw
-    /// input so egui never uses them for focus navigation. The Tab bytes are
-    /// written directly to the active PTY session here.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        // If a dialog is open, let egui handle Tab normally.
-        if self.dialog_state.is_active_for(egui::ViewportId::ROOT) {
-            return;
-        }
-
-        let mut tab_bytes: Option<Vec<u8>> = None;
-        raw_input.events.retain(|e| match e {
-            egui::Event::Key {
-                key: egui::Key::Tab,
-                pressed: true,
-                modifiers,
-                ..
-            } => {
-                tab_bytes = Some(if modifiers.shift {
-                    b"\x1b[Z".to_vec()
-                } else {
-                    b"\t".to_vec()
-                });
-                false
+        // Strip Tab key from the root viewport (windows[0]).  render_window()
+        // also strips via ctx.input_mut(), but raw_input_hook catches it
+        // earlier before egui's focus system ever sees it.
+        if let Some(win_arc) = self.windows.first() {
+            let win = win_arc.lock();
+            if self.shared.dialog_state.lock().is_active_for(win.viewport_id) {
+                return;
             }
-            _ => true,
-        });
-
-        if let Some(bytes) = tab_bytes {
-            if let Some(session) = self.state.active_session() {
-                session.write(&bytes);
+            let mut tab_bytes: Option<Vec<u8>> = None;
+            raw_input.events.retain(|e| match e {
+                egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } => {
+                    tab_bytes = Some(if modifiers.shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() });
+                    false
+                }
+                _ => true,
+            });
+            if let Some(bytes) = tab_bytes {
+                if let Some(session) = win.active_session() {
+                    session.write(&bytes);
+                }
             }
         }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Measure font cell size (and re-measure on DPI changes).
-        let ppp = ctx.pixels_per_point();
-        if !self.cell_size_measured || (ppp - self.last_pixels_per_point).abs() > 0.001 {
-            let font_size = self.state.user_config.font.size;
-            let (cw, ch) = widget::measure_cell_size(ctx, font_size);
-            self.cell_width = cw;
-            self.cell_height = ch;
-            self.cell_size_measured = true;
-            self.last_pixels_per_point = ppp;
-        }
-
-        // Cursor blink.
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_blink).as_millis();
-        if elapsed >= CURSOR_BLINK_MS {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_blink = now;
-            ctx.request_repaint_after(std::time::Duration::from_millis(CURSOR_BLINK_MS as u64));
-        } else {
-            let remaining = CURSOR_BLINK_MS - elapsed;
-            ctx.request_repaint_after(std::time::Duration::from_millis(remaining as u64));
-        }
-
-        // Refresh plugin keybindings when menu items change.
+        // ── Coordinator background work ──
         self.refresh_plugin_keybindings();
-
-        // Detect tab changes and notify plugins via the bus.
-        if self.state.active_tab != self.prev_active_tab {
-            self.prev_active_tab = self.state.active_tab;
-            self.publish_tab_changed();
+        if let Some(watcher) = &mut self.file_watcher {
+            for change in watcher.poll() {
+                match change.kind {
+                    FileChangeKind::Config => {
+                        log::info!("Config file changed, reloading...");
+                        match config::load_user_config() {
+                            Ok(new_config) => {
+                                let scheme = conch_core::color_scheme::resolve_theme(&new_config.colors.theme);
+                                let colors = ResolvedColors::from_scheme(&scheme);
+                                let theme = crate::ui_theme::UiTheme::from_colors(&colors, new_config.colors.appearance_mode);
+                                let shortcuts = ResolvedShortcuts::from_config(&new_config.conch.keyboard);
+                                self.shared.menu_bar_state.lock().update_mode(new_config.conch.ui.native_menu_bar, &self.shared.platform);
+                                let mut cfg = self.shared.config.lock();
+                                cfg.shortcuts = shortcuts; cfg.colors = colors; cfg.theme = theme;
+                                cfg.theme_dirty = true; cfg.theme_version += 1; cfg.user_config = new_config;
+                                drop(cfg);
+                                crate::notifications::push(crate::notifications::Notification::new(
+                                    Some("Config Reloaded".into()), "Configuration updated successfully.".into(),
+                                    crate::notifications::NotificationLevel::Success, None));
+                            }
+                            Err(e) => {
+                                crate::notifications::push(crate::notifications::Notification::new(
+                                    Some("Config Error".into()), format!("Failed to reload config: {e}"),
+                                    crate::notifications::NotificationLevel::Error, None));
+                            }
+                        }
+                    }
+                    FileChangeKind::Themes => {
+                        log::info!("Themes changed, reloading...");
+                        let mut cfg = self.shared.config.lock();
+                        let scheme = conch_core::color_scheme::resolve_theme(&cfg.user_config.colors.theme);
+                        cfg.colors = ResolvedColors::from_scheme(&scheme);
+                        cfg.theme = crate::ui_theme::UiTheme::from_colors(&cfg.colors, cfg.user_config.colors.appearance_mode);
+                        cfg.theme_dirty = true; cfg.theme_version += 1;
+                        drop(cfg);
+                        crate::notifications::push(crate::notifications::Notification::new(
+                            Some("Theme Reloaded".into()), "Theme updated successfully.".into(),
+                            crate::notifications::NotificationLevel::Success, None));
+                    }
+                }
+            }
         }
-
-        // Poll events.
-        self.poll_events(ctx);
-        self.handle_file_changes(ctx);
         self.handle_ipc();
         self.poll_plugin_renders();
         self.drain_pending_sessions();
+        self.check_tab_changes();
 
-        // Show plugin dialogs (form, confirm, prompt, alert, error).
-        self.dialog_state.show(ctx, egui::ViewportId::ROOT);
-
-        // Render toast notifications on top of everything.
-        self.notifications.show(ctx);
-
-        // Determine whether the main window should hide or close.
-        let mut main_visible = !self.state.sessions.is_empty();
-
-        // If the user clicks close on the main window while extra windows exist,
-        // hide it instead of quitting.
-        let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if close_requested && !self.extra_windows.is_empty() {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            // Shut down main-window sessions.
-            let ids: Vec<_> = self.state.tab_order.clone();
-            for id in ids {
-                self.remove_session(id);
-            }
-            self.has_ever_had_session = true;
-            main_visible = false;
+        // ── Ensure at least one window exists ──
+        if self.windows.is_empty() {
+            self.spawn_window(None);
         }
 
-        // When the last main-window tab closes, either hide or close.
-        if self.state.sessions.is_empty() {
-            if !self.has_ever_had_session {
-                self.open_local_tab();
-                self.has_ever_had_session = true;
-                main_visible = true;
-            } else {
-                main_visible = false;
-            }
-        }
-
-        // Show/hide the main viewport (extra windows are independent).
-        if !main_visible {
+        // ── Render windows ──
+        // windows[0] maps to the ROOT viewport and is rendered directly.
+        // windows[1..] use show_viewport_immediate.  All call render_window().
+        let root_visible = {
+            let win = self.windows[0].lock();
+            !win.should_close
+        };
+        if root_visible {
+            let mut win = self.windows[0].lock();
+            render_window(ctx, &mut win, &self.shared);
+        } else {
+            // Root has no sessions — hide it but keep it alive so
+            // show_viewport_immediate windows can still render.
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
-        // Main-window copy/paste handling.
-        if main_visible {
-            let copy_requested = ctx.input(|i| {
-                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+        for i in 1..self.windows.len() {
+            let win = self.windows[i].lock();
+            if win.should_close { continue; }
+            let viewport_id = win.viewport_id;
+            let builder = win.viewport_builder.clone()
+                .unwrap_or_default()
+                .with_title(&win.title);
+            drop(win);
+
+            let w = Arc::clone(&self.windows[i]);
+            let s = Arc::clone(&self.shared);
+            ctx.show_viewport_immediate(viewport_id, builder, move |vp_ctx, _class| {
+                let mut win = w.lock();
+                render_window(vp_ctx, &mut win, &s);
             });
-            if copy_requested {
-                if let Some((start, end)) = self.selection.normalized() {
-                    if let Some(session) = self.state.active_session() {
-                        let text = widget::get_selected_text(session.term(), start, end);
-                        if !text.is_empty() {
-                            ctx.copy_text(text);
+        }
+
+        // ── Drain actions from all windows ──
+        let mut spawn_new = false;
+        let mut pm_actions = Vec::new();
+        for window_arc in &self.windows {
+            let mut win = window_arc.lock();
+            for action in win.pending_actions.drain(..) {
+                match action {
+                    WindowAction::SpawnNewWindow => spawn_new = true,
+                    WindowAction::Quit => self.quit_requested = true,
+                    WindowAction::PluginAction(a) => pm_actions.push(a),
+                    WindowAction::WindowClosed(_) => {}
+                    WindowAction::SaveLayoutState {
+                        window_width, window_height, zoom_factor,
+                        left_panel_width, right_panel_width, bottom_panel_height,
+                        left_panel_visible, right_panel_visible,
+                        bottom_panel_visible, status_bar_visible,
+                    } => {
+                        let mut cfg = self.shared.config.lock();
+                        let layout = &mut cfg.persistent.layout;
+                        if window_width > 100.0 && window_height > 100.0 {
+                            layout.window_width = window_width;
+                            layout.window_height = window_height;
                         }
+                        layout.zoom_factor = zoom_factor;
+                        if let Some(w) = left_panel_width { layout.left_panel_width = w; }
+                        if let Some(w) = right_panel_width { layout.right_panel_width = w; }
+                        if let Some(h) = bottom_panel_height { layout.bottom_panel_height = h; }
+                        layout.left_panel_visible = left_panel_visible;
+                        layout.right_panel_visible = right_panel_visible;
+                        layout.bottom_panel_visible = bottom_panel_visible;
+                        layout.status_bar_visible = status_bar_visible;
+                    }
+                    WindowAction::PublishTabChanged { is_ssh, session_id } => {
+                        let mut data = serde_json::json!({ "is_ssh": is_ssh });
+                        if let Some(sid) = session_id { data["session_id"] = serde_json::json!(sid); }
+                        self.shared.plugin_bus.publish("app", "app.tab_changed", data);
                     }
                 }
             }
+        }
+        for a in pm_actions { self.handle_plugin_manager_action(a); }
 
-            let paste_text: Option<String> = ctx.input(|i| {
-                i.events.iter().find_map(|e| {
-                    if let egui::Event::Paste(text) = e { Some(text.clone()) } else { None }
-                })
+        // ── Window lifecycle ──
+        // Remove closed non-root windows.  The root viewport can't be
+        // destroyed (eframe owns it), so it stays in the list but hidden.
+        if self.windows.len() > 1 {
+            let root_vp = self.windows[0].lock().viewport_id;
+            self.windows.retain(|w| {
+                let win = w.lock();
+                win.viewport_id == root_vp || !win.should_close
             });
-            if let Some(text) = paste_text {
-                if let Some(session) = self.state.active_session() {
-                    session.write(text.as_bytes());
-                }
-            }
         }
 
-        // ── Render extra windows ──
-        let effective_decorations = self.render_extra_windows(ctx);
+        if spawn_new { self.spawn_window(None); }
 
-        // If the main window is hidden and all extra windows are closed, quit.
-        if !main_visible && self.extra_windows.is_empty() {
+        // ── Exit when ALL windows are closed ──
+        let all_closed = self.windows.iter().all(|w| w.lock().should_close);
+        if all_closed || self.quit_requested {
+            if self.quit_requested {
+                for w in &self.windows {
+                    let mut win = w.lock();
+                    for (_, session) in &win.sessions { session.shutdown(); }
+                }
+            }
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
 
-        // Skip main-window UI rendering when hidden.
-        if !main_visible {
-            return;
-        }
-
-        // ── Apply centralized UI theme (only when changed) ──
-        if self.state.theme_dirty {
-            self.state.theme.apply(ctx);
-            crate::host::bridge::update_theme_json(&self.state.theme);
-            self.state.theme_dirty = false;
-        }
-        let bg_color = self.state.theme.bg;
-
-        // Buttonless: no native title bar, so add a thin drag region at the top
-        // so the user can still move the window.
-        if effective_decorations == config::WindowDecorations::Buttonless {
-            let drag_h = self.cell_height.max(6.0);
-            egui::TopBottomPanel::top("drag_region")
-                .exact_height(drag_h)
-                .frame(egui::Frame::NONE.fill(self.state.theme.bg_with_alpha(180)))
-                .show(ctx, |ui| {
-                    let rect = ui.available_rect_before_wrap();
-                    let response = ui.interact(rect, ui.id().with("drag"), egui::Sense::drag());
-                    if response.drag_started() {
-                        ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-                    }
-                });
-        }
-
-        // Full mode with fullsize_content_view (macOS): content extends behind
-        // the native title bar, so add a spacer to push UI below it.
-        if effective_decorations == config::WindowDecorations::Full
-            && cfg!(target_os = "macos")
-        {
-            let title_bar_h = 34.0; // macOS native title bar height + safe margin
-            egui::TopBottomPanel::top("titlebar_spacer")
-                .exact_height(title_bar_h)
-                .frame(egui::Frame::NONE.fill(self.state.theme.surface))
-                .show(ctx, |_ui| {});
-        }
-
-        // Tab bar at the top (only when more than one tab).
-        for action in crate::tab_bar::show(ctx, &self.state, &mut self.tab_bar_state) {
-            match action {
-                crate::tab_bar::TabBarAction::SwitchTo(id) => {
-                    self.state.active_tab = Some(id);
-                }
-                crate::tab_bar::TabBarAction::Close(id) => {
-                    self.remove_session(id);
-                }
-            }
-        }
-
-        // Menu bar.
-        if let Some(action) = crate::menu_bar::show(ctx, &mut self.menu_bar_state) {
-            // If an extra window has focus, route the action there instead.
-            let focused_extra = self.extra_windows.iter_mut().find(|w| w.has_focus);
-            if let Some(window) = focused_extra {
-                window.pending_menu_actions.push(action);
-            } else {
-                crate::menu_bar::handle_action(action, ctx, self);
-            }
-        }
-
-        // Plugin manager window (floating, toggled via View menu).
-        if self.show_plugin_manager {
-            let theme = self.state.theme.clone();
-            let pm_actions = crate::host::plugin_manager_ui::show_plugin_manager_window(
-                ctx,
-                &mut self.show_plugin_manager,
-                &mut self.plugin_manager,
-                &theme,
-            );
-            for pm_action in pm_actions {
-                self.handle_plugin_manager_action(pm_action);
-            }
-        }
-
-        // Lazy-init icon cache on first frame (needs egui context for textures).
-        if self.icon_cache.is_none() {
-            self.icon_cache = Some(crate::icons::IconCache::load(ctx));
-        }
-
-        // Status bar at the very bottom edge.
-        if self.show_status_bar {
-            self.render_status_bar(ctx);
-        }
-
-        // Render plugin panels (side panels, bottom panels).
-        self.render_plugin_panels(ctx);
-
-        // Central panel: terminal.
-        let mut pending_resize: Option<(u16, u16)> = None;
-        let mut context_action: Option<crate::menu_bar::MenuAction> = None;
-
-        let mut close_tab_requested = false;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(bg_color))
-            .show(ctx, |ui| {
-                if let Some(session) = self.state.active_tab.and_then(|id| self.state.sessions.get_mut(&id)) {
-                    match session.status {
-                        conch_plugin_sdk::SessionStatus::Connecting => {
-                            let action = show_connecting_screen(
-                                ui,
-                                &session.title,
-                                session.status_detail.as_deref(),
-                                session.connect_started,
-                                session.prompt.as_mut(),
-                                self.icon_cache.as_ref(),
-                            );
-                            match action {
-                                ConnectingAction::Accept => {
-                                    if let Some(prompt) = session.prompt.take() {
-                                        if let Some(reply) = prompt.reply {
-                                            let _ = reply.send(Some("true".to_string()));
-                                        }
-                                    }
-                                }
-                                ConnectingAction::Reject => {
-                                    if let Some(prompt) = session.prompt.take() {
-                                        if let Some(reply) = prompt.reply {
-                                            let _ = reply.send(None);
-                                        }
-                                    }
-                                }
-                                ConnectingAction::SubmitPassword(pw) => {
-                                    if let Some(prompt) = session.prompt.take() {
-                                        if let Some(reply) = prompt.reply {
-                                            let _ = reply.send(Some(pw));
-                                        }
-                                    }
-                                }
-                                ConnectingAction::None => {}
-                            }
-                        }
-                        conch_plugin_sdk::SessionStatus::Error => {
-                            let detail = session.status_detail.clone().unwrap_or_default();
-                            if show_error_screen(ui, &session.title, &detail) {
-                                close_tab_requested = true;
-                            }
-                        }
-                        conch_plugin_sdk::SessionStatus::Connected => {
-                            let sel = self.selection.normalized();
-                            let term = session.term();
-                            let (response, size_info) = widget::show_terminal(
-                                ui,
-                                term,
-                                self.cell_width,
-                                self.cell_height,
-                                &self.state.colors,
-                                self.state.user_config.font.size,
-                                self.cursor_visible,
-                                sel,
-                                &mut self.terminal_frame_cache,
-                            );
-
-                            pending_resize = Some((size_info.columns() as u16, size_info.rows() as u16));
-
-                            // Check mouse mode for context menu suppression.
-                            let mouse_mode = term
-                                .try_lock_unfair()
-                                .map(|t| t.mode().intersects(alacritty_terminal::term::TermMode::MOUSE_MODE))
-                                .unwrap_or(false);
-
-                            // Mouse handling.
-                            crate::mouse::handle_terminal_mouse(
-                                ctx,
-                                &response,
-                                &size_info,
-                                &mut self.selection,
-                                term,
-                                &|bytes| session.write(bytes),
-                                self.cell_height,
-                                self.state.user_config.terminal.scroll_sensitivity,
-                            );
-
-                            // Context menu (suppressed in mouse mode for tmux compatibility).
-                            let has_selection = self.selection.normalized().is_some();
-                            context_action = crate::context_menu::show(
-                                &response,
-                                &mut self.context_menu_state,
-                                mouse_mode,
-                                has_selection,
-                            );
-                        }
-                    }
-                }
-            });
-
-        // Handle close-tab request from error screen.
-        if close_tab_requested {
-            if let Some(id) = self.state.active_tab {
-                self.remove_session(id);
-            }
-        }
-
-        // Handle context menu action outside the panel closure.
-        if let Some(action) = context_action {
-            crate::menu_bar::handle_action(action, ctx, self);
-        }
-
-        // Resize sessions after releasing the panel borrow.
-        if let Some((cols, rows)) = pending_resize {
-            self.resize_sessions(cols, rows);
-        }
-
-        // Keyboard handling — forward to PTY unless a dialog or text input is consuming input.
-        let text_edit_focused = ctx.memory(|m| m.focused()).is_some()
-            && ctx.wants_keyboard_input();
-        let forward_to_pty = !self.dialog_state.is_active_for(egui::ViewportId::ROOT)
-            && !text_edit_focused;
-        self.handle_keyboard(ctx, forward_to_pty);
-
-        // Quit handling.
-        if self.quit_requested {
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-        }
-
-        // Update window title from active session.
-        if let Some(session) = self.state.active_session() {
-            let title = format!("{} — Conch", session.display_title());
-            ctx.send_viewport_cmd(ViewportCommand::Title(title));
-        }
-
-        // Save window size on each frame (debounced by OS).
-        let rect = ctx.input(|i| i.screen_rect());
-        if rect.width() > 100.0 && rect.height() > 100.0 {
-            self.state.persistent.layout.window_width = rect.width();
-            self.state.persistent.layout.window_height = rect.height();
-        }
+        // If the root closed but other windows remain, make the root
+        // visible again if a new window was promoted into it (future),
+        // or just keep it hidden.  The app stays alive.
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_loaded_plugins();
-        // Shut down Lua plugins.
         let lua_names: Vec<String> = self.lua_plugins.keys().cloned().collect();
         for name in lua_names {
             if let Some(mut running) = self.lua_plugins.remove(&name) {
                 let _ = running.sender.try_send(conch_plugin::bus::PluginMail::Shutdown);
-                if let Some(handle) = running.thread.take() {
-                    let _ = handle.join();
-                }
-                self.plugin_bus.unregister_plugin(&name);
+                if let Some(handle) = running.thread.take() { let _ = handle.join(); }
+                self.shared.plugin_bus.unregister_plugin(&name);
             }
         }
         self.native_plugin_mgr.shutdown_all();
         self.java_plugin_mgr.shutdown_all();
-        let _ = config::save_persistent_state(&self.state.persistent);
+        let cfg = self.shared.config.lock();
+        let _ = config::save_persistent_state(&cfg.persistent);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Connecting / Error screens for plugin sessions
+// Connecting / Error screens (free functions, used by render_window)
 // ---------------------------------------------------------------------------
 
-/// Action from the connecting screen (prompt response or close).
-pub(crate) enum ConnectingAction {
-    None,
-    /// User accepted a confirm prompt (e.g., host key fingerprint).
-    Accept,
-    /// User rejected a confirm prompt.
-    Reject,
-    /// User submitted a password.
-    SubmitPassword(String),
-}
+pub(crate) enum ConnectingAction { None, Accept, Reject, SubmitPassword(String) }
 
-/// Render a "Connecting to..." screen with optional inline prompts.
-///
-/// When `prompt` is `Some`, renders the prompt UI (fingerprint accept or
-/// password input) instead of the progress bar.
 pub(crate) fn show_connecting_screen(
-    ui: &mut egui::Ui,
-    title: &str,
-    detail: Option<&str>,
+    ui: &mut egui::Ui, title: &str, detail: Option<&str>,
     started: Option<std::time::Instant>,
     prompt: Option<&mut crate::state::SessionPrompt>,
     icon_cache: Option<&crate::icons::IconCache>,
 ) -> ConnectingAction {
     let rect = ui.available_rect_before_wrap();
-    let bg = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(30)
-    } else {
-        egui::Color32::from_gray(241)
-    };
+    let bg = if ui.visuals().dark_mode { egui::Color32::from_gray(30) } else { egui::Color32::from_gray(241) };
     ui.painter().rect_filled(rect, 0.0, bg);
-
     let center = rect.center();
 
-    // --- Inline prompt (fingerprint / password) ---
     if let Some(prompt) = prompt {
         let content_width = (rect.width() * 0.7).min(560.0);
-        let content_rect = egui::Rect::from_center_size(
-            center,
-            egui::Vec2::new(content_width, rect.height() * 0.7),
-        );
+        let content_rect = egui::Rect::from_center_size(center, egui::Vec2::new(content_width, rect.height() * 0.7));
         let mut action = ConnectingAction::None;
-
         if prompt.prompt_type == 0 {
-            // Confirm prompt (host key fingerprint).
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(20.0);
-
                     let is_changed = prompt.message.contains("HAS CHANGED");
                     if is_changed {
-                        ui.label(
-                            egui::RichText::new("WARNING: HOST KEY HAS CHANGED!")
-                                .size(22.0)
-                                .strong()
-                                .color(egui::Color32::from_rgb(220, 50, 50)),
-                        );
+                        ui.label(egui::RichText::new("WARNING: HOST KEY HAS CHANGED!").size(22.0).strong().color(egui::Color32::from_rgb(220, 50, 50)));
                         ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(&prompt.message)
-                                .size(13.0)
-                                .color(if ui.visuals().dark_mode {
-                                    egui::Color32::from_gray(180)
-                                } else {
-                                    egui::Color32::from_gray(60)
-                                }),
-                        );
-                    } else {
-                        ui.label(egui::RichText::new(&prompt.message).size(18.0));
-                    }
-
-                    if !prompt.detail.is_empty() {
-                        ui.add_space(16.0);
-                        ui.label(
-                            egui::RichText::new(&prompt.detail)
-                                .size(15.0)
-                                .family(egui::FontFamily::Monospace)
-                                .strong(),
-                        );
-                    }
-
+                        ui.label(egui::RichText::new(&prompt.message).size(13.0).color(if ui.visuals().dark_mode { egui::Color32::from_gray(180) } else { egui::Color32::from_gray(60) }));
+                    } else { ui.label(egui::RichText::new(&prompt.message).size(18.0)); }
+                    if !prompt.detail.is_empty() { ui.add_space(16.0); ui.label(egui::RichText::new(&prompt.detail).size(15.0).family(egui::FontFamily::Monospace).strong()); }
                     ui.add_space(20.0);
-                    ui.label(
-                        egui::RichText::new("Are you sure you want to continue connecting?")
-                            .size(14.0),
-                    );
-
+                    ui.label(egui::RichText::new("Are you sure you want to continue connecting?").size(14.0));
                     ui.add_space(12.0);
                     let btn_size = egui::Vec2::new(120.0, 34.0);
                     ui.horizontal(|ui| {
                         let total_w = btn_size.x * 2.0 + ui.spacing().item_spacing.x;
                         let avail = ui.available_width();
-                        if avail > total_w {
-                            ui.add_space((avail - total_w) / 2.0);
-                        }
-                        if ui.add_sized(btn_size, egui::Button::new("Accept")).clicked() {
-                            action = ConnectingAction::Accept;
-                        }
-                        if ui.add_sized(btn_size, egui::Button::new("Reject")).clicked() {
-                            action = ConnectingAction::Reject;
-                        }
+                        if avail > total_w { ui.add_space((avail - total_w) / 2.0); }
+                        if ui.add_sized(btn_size, egui::Button::new("Accept")).clicked() { action = ConnectingAction::Accept; }
+                        if ui.add_sized(btn_size, egui::Button::new("Reject")).clicked() { action = ConnectingAction::Reject; }
                     });
                 });
             });
         } else {
-            // Password prompt.
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(20.0);
                     ui.label(egui::RichText::new(&prompt.message).size(22.0));
-                    if !prompt.detail.is_empty() {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(&prompt.detail)
-                                .size(14.0)
-                                .color(if ui.visuals().dark_mode {
-                                    egui::Color32::from_gray(160)
-                                } else {
-                                    egui::Color32::from_gray(80)
-                                }),
-                        );
-                    }
+                    if !prompt.detail.is_empty() { ui.add_space(4.0); ui.label(egui::RichText::new(&prompt.detail).size(14.0).color(if ui.visuals().dark_mode { egui::Color32::from_gray(160) } else { egui::Color32::from_gray(80) })); }
                     ui.add_space(16.0);
-
-                    // Combined password field with inline eye + lock buttons.
-                    let field_width = 340.0;
-                    let field_height = 34.0;
-                    let btn_zone = 32.0; // space for the eye icon button
-
-                    let (outer_rect, _) = ui.allocate_exact_size(
-                        egui::Vec2::new(field_width, field_height),
-                        egui::Sense::hover(),
-                    );
-
-                    // Draw the outer frame (rounded rect with focus glow).
+                    let field_width = 340.0; let field_height = 34.0; let btn_zone = 32.0;
+                    let (outer_rect, _) = ui.allocate_exact_size(egui::Vec2::new(field_width, field_height), egui::Sense::hover());
                     let visuals = ui.visuals();
-                    let rounding = egui::CornerRadius::same(6);
-                    let stroke = visuals.widgets.active.bg_stroke;
-                    ui.painter().rect(outer_rect, rounding, visuals.widgets.inactive.bg_fill, stroke, egui::StrokeKind::Outside);
-
-                    // Text edit area (left portion).
-                    let text_rect = egui::Rect::from_min_max(
-                        outer_rect.min,
-                        egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.max.y),
-                    );
-                    let mut text_child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(text_rect.shrink2(egui::vec2(8.0, 0.0))),
-                    );
-                    let pw_resp = text_child.add(
-                        egui::TextEdit::singleline(&mut prompt.password_buf)
-                            .password(!prompt.show_password)
-                            .frame(false)
-                            .margin(egui::Margin { left: 0, right: 0, top: 8, bottom: 4 })
-                            .font(egui::TextStyle::Body)
-                            .desired_width(text_rect.width() - 16.0)
-                            .hint_text("Password"),
-                    );
-                    if prompt.focus_password {
-                        pw_resp.request_focus();
-                        prompt.focus_password = false;
-                    }
-                    let enter_pressed = pw_resp.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-                    // Icon button area (right portion, inset to avoid overlapping border).
-                    let btn_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.min.y),
-                        outer_rect.max,
-                    ).shrink(4.0);
+                    ui.painter().rect(outer_rect, egui::CornerRadius::same(6), visuals.widgets.inactive.bg_fill, visuals.widgets.active.bg_stroke, egui::StrokeKind::Outside);
+                    let text_rect = egui::Rect::from_min_max(outer_rect.min, egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.max.y));
+                    let mut text_child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect.shrink2(egui::vec2(8.0, 0.0))));
+                    let pw_resp = text_child.add(egui::TextEdit::singleline(&mut prompt.password_buf).password(!prompt.show_password).frame(false).margin(egui::Margin { left: 0, right: 0, top: 8, bottom: 4 }).font(egui::TextStyle::Body).desired_width(text_rect.width() - 16.0).hint_text("Password"));
+                    if prompt.focus_password { pw_resp.request_focus(); prompt.focus_password = false; }
+                    let enter_pressed = pw_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let btn_rect = egui::Rect::from_min_max(egui::Pos2::new(outer_rect.max.x - btn_zone, outer_rect.min.y), outer_rect.max).shrink(4.0);
                     let dark_mode = ui.visuals().dark_mode;
-                    let can_submit = !prompt.password_buf.is_empty();
-
-                    // Eye icon: toggle show/hide password.
                     let tooltip = if prompt.show_password { "Hide password" } else { "Show password" };
                     let icon_size = egui::vec2(16.0, 16.0);
-                    let icon_pos = egui::Pos2::new(
-                        btn_rect.center().x - 8.0,
-                        btn_rect.center().y - 8.0,
-                    );
+                    let icon_pos = egui::Pos2::new(btn_rect.center().x - 8.0, btn_rect.center().y - 8.0);
                     let icon_rect = egui::Rect::from_min_size(icon_pos, icon_size);
                     let eye_resp = ui.allocate_rect(icon_rect, egui::Sense::click());
-
-                    if let Some(img) = icon_cache
-                        .and_then(|ic| ic.themed_image(crate::icons::Icon::Eye, dark_mode))
-                    {
-                        img.fit_to_exact_size(icon_size).paint_at(ui, icon_rect);
-                    }
-                    if eye_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip).clicked() {
-                        prompt.show_password = !prompt.show_password;
-                    }
-
-                    // Submit on Enter.
-                    if enter_pressed && can_submit {
-                        action = ConnectingAction::SubmitPassword(
-                            prompt.password_buf.clone(),
-                        );
-                    }
-
+                    if let Some(img) = icon_cache.and_then(|ic| ic.themed_image(crate::icons::Icon::Eye, dark_mode)) { img.fit_to_exact_size(icon_size).paint_at(ui, icon_rect); }
+                    if eye_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip).clicked() { prompt.show_password = !prompt.show_password; }
+                    if enter_pressed && !prompt.password_buf.is_empty() { action = ConnectingAction::SubmitPassword(prompt.password_buf.clone()); }
                     ui.add_space(8.0);
-                    // Cancel link.
-                    let cancel_text = egui::RichText::new("Cancel")
-                        .size(13.0)
-                        .color(if ui.visuals().dark_mode {
-                            egui::Color32::from_gray(140)
-                        } else {
-                            egui::Color32::from_gray(100)
-                        });
-                    if ui.add(egui::Label::new(cancel_text).sense(egui::Sense::click())).clicked() {
-                        action = ConnectingAction::Reject;
-                    }
+                    let cancel_text = egui::RichText::new("Cancel").size(13.0).color(if ui.visuals().dark_mode { egui::Color32::from_gray(140) } else { egui::Color32::from_gray(100) });
+                    if ui.add(egui::Label::new(cancel_text).sense(egui::Sense::click())).clicked() { action = ConnectingAction::Reject; }
                 });
             });
         }
-
         return action;
     }
 
-    // --- Normal connecting screen (no prompt) ---
     let heading = format!("Connecting to {title}\u{2026}");
-    let heading_galley = ui.painter().layout_no_wrap(
-        heading,
-        egui::FontId::new(28.0, egui::FontFamily::Proportional),
-        if ui.visuals().dark_mode { egui::Color32::WHITE } else { egui::Color32::BLACK },
-    );
-    let heading_pos = egui::Pos2::new(
-        center.x - heading_galley.size().x / 2.0,
-        center.y - 40.0,
-    );
-    ui.painter().galley(heading_pos, heading_galley, egui::Color32::PLACEHOLDER);
-
+    let heading_galley = ui.painter().layout_no_wrap(heading, egui::FontId::new(28.0, egui::FontFamily::Proportional), if ui.visuals().dark_mode { egui::Color32::WHITE } else { egui::Color32::BLACK });
+    ui.painter().galley(egui::Pos2::new(center.x - heading_galley.size().x / 2.0, center.y - 40.0), heading_galley, egui::Color32::PLACEHOLDER);
     if let Some(detail) = detail {
-        let detail_galley = ui.painter().layout_no_wrap(
-            detail.to_string(),
-            egui::FontId::new(16.0, egui::FontFamily::Proportional),
-            if ui.visuals().dark_mode { egui::Color32::from_gray(200) } else { egui::Color32::from_gray(40) },
-        );
-        let detail_pos = egui::Pos2::new(
-            center.x - detail_galley.size().x / 2.0,
-            center.y + 5.0,
-        );
-        ui.painter().galley(detail_pos, detail_galley, egui::Color32::PLACEHOLDER);
+        let dg = ui.painter().layout_no_wrap(detail.to_string(), egui::FontId::new(16.0, egui::FontFamily::Proportional), if ui.visuals().dark_mode { egui::Color32::from_gray(200) } else { egui::Color32::from_gray(40) });
+        ui.painter().galley(egui::Pos2::new(center.x - dg.size().x / 2.0, center.y + 5.0), dg, egui::Color32::PLACEHOLDER);
     }
-
-    // Bouncing progress bar.
-    let bar_w = 400.0_f32.min(rect.width() * 0.6);
-    let bar_h = 6.0;
-    let bar_y = center.y + 50.0;
-    let bar_rect = egui::Rect::from_min_size(
-        egui::Pos2::new(center.x - bar_w / 2.0, bar_y),
-        egui::Vec2::new(bar_w, bar_h),
-    );
-
-    let track_color = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(60)
-    } else {
-        egui::Color32::from_gray(210)
-    };
-    ui.painter().rect_filled(bar_rect, bar_h / 2.0, track_color);
-
-    let elapsed = started
-        .map(|s| s.elapsed().as_secs_f32())
-        .unwrap_or(0.0);
-    let cycle = 1.8;
-    let t = (elapsed % cycle) / cycle;
-    let pos_t = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
-    let eased = pos_t * pos_t * (3.0 - 2.0 * pos_t);
-    let indicator_w = bar_w * 0.15;
-    let indicator_x = bar_rect.min.x + eased * (bar_w - indicator_w);
-    let indicator_rect = egui::Rect::from_min_size(
-        egui::Pos2::new(indicator_x, bar_y),
-        egui::Vec2::new(indicator_w, bar_h),
-    );
-    let accent = egui::Color32::from_rgb(66, 133, 244);
-    ui.painter().rect_filled(indicator_rect, bar_h / 2.0, accent);
-
+    let bar_w = 400.0_f32.min(rect.width() * 0.6); let bar_h = 6.0; let bar_y = center.y + 50.0;
+    let bar_rect = egui::Rect::from_min_size(egui::Pos2::new(center.x - bar_w / 2.0, bar_y), egui::Vec2::new(bar_w, bar_h));
+    ui.painter().rect_filled(bar_rect, bar_h / 2.0, if ui.visuals().dark_mode { egui::Color32::from_gray(60) } else { egui::Color32::from_gray(210) });
+    let elapsed = started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
+    let t = (elapsed % 1.8) / 1.8; let pos_t = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 }; let eased = pos_t * pos_t * (3.0 - 2.0 * pos_t);
+    let iw = bar_w * 0.15; let ix = bar_rect.min.x + eased * (bar_w - iw);
+    ui.painter().rect_filled(egui::Rect::from_min_size(egui::Pos2::new(ix, bar_y), egui::Vec2::new(iw, bar_h)), bar_h / 2.0, egui::Color32::from_rgb(66, 133, 244));
     ConnectingAction::None
 }
 
-/// Render a connection error screen. Returns `true` if the user clicked "Close Tab".
 pub(crate) fn show_error_screen(ui: &mut egui::Ui, title: &str, error: &str) -> bool {
     let rect = ui.available_rect_before_wrap();
-    let bg = if ui.visuals().dark_mode {
-        egui::Color32::from_gray(30)
-    } else {
-        egui::Color32::from_gray(241)
-    };
-    ui.painter().rect_filled(rect, 0.0, bg);
-
+    ui.painter().rect_filled(rect, 0.0, if ui.visuals().dark_mode { egui::Color32::from_gray(30) } else { egui::Color32::from_gray(241) });
     let center = rect.center();
-    let content_width = (rect.width() * 0.7).min(600.0);
-    let content_rect = egui::Rect::from_center_size(
-        center,
-        egui::Vec2::new(content_width, rect.height() * 0.8),
-    );
-
+    let content_rect = egui::Rect::from_center_size(center, egui::Vec2::new((rect.width() * 0.7).min(600.0), rect.height() * 0.8));
     let mut close = false;
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(20.0);
-                ui.label(
-                    egui::RichText::new(format!("Connection to {title} failed"))
-                        .size(24.0)
-                        .color(egui::Color32::from_rgb(220, 50, 50)),
-                );
-                ui.add_space(16.0);
-            });
-
-            let error_color = if ui.visuals().dark_mode {
-                egui::Color32::from_gray(180)
-            } else {
-                egui::Color32::from_gray(60)
-            };
-            ui.label(
-                egui::RichText::new(error)
-                    .size(13.0)
-                    .family(egui::FontFamily::Monospace)
-                    .color(error_color),
-            );
-
+            ui.vertical_centered(|ui| { ui.add_space(20.0); ui.label(egui::RichText::new(format!("Connection to {title} failed")).size(24.0).color(egui::Color32::from_rgb(220, 50, 50))); ui.add_space(16.0); });
+            ui.label(egui::RichText::new(error).size(13.0).family(egui::FontFamily::Monospace).color(if ui.visuals().dark_mode { egui::Color32::from_gray(180) } else { egui::Color32::from_gray(60) }));
             ui.add_space(16.0);
-            ui.vertical_centered(|ui| {
-                if ui.button("Close Tab").clicked() {
-                    close = true;
-                }
-            });
+            ui.vertical_centered(|ui| { if ui.button("Close Tab").clicked() { close = true; } });
             ui.add_space(12.0);
         });
     });
-
     close
 }

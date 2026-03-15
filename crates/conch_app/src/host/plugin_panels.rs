@@ -8,7 +8,6 @@ use conch_plugin_sdk::widgets::{PluginEvent, Widget};
 use conch_plugin_sdk::PanelLocation;
 use parking_lot::Mutex;
 
-use crate::app::ConchApp;
 use crate::host::bridge::PanelRegistry;
 use crate::icons::IconCache;
 use crate::ui_theme::UiTheme;
@@ -410,53 +409,9 @@ pub(crate) fn render_status_bar(ctx: &egui::Context, theme: &UiTheme) {
         });
 }
 
-impl ConchApp {
-    /// Render plugin panels into egui side/bottom panels with tabbing.
-    ///
-    /// When multiple plugins register at the same location, they share a single
-    /// egui panel with a vertical tab strip on the outer edge.
-    pub(crate) fn render_plugin_panels(&mut self, ctx: &egui::Context) {
-        let theme = self.state.theme.clone();
-        let layout = &self.state.persistent.layout;
-        let left_w = if layout.left_panel_width > 0.0 { layout.left_panel_width.min(600.0) } else { DEFAULT_SIDE_WIDTH };
-        let right_w = if layout.right_panel_width > 0.0 { layout.right_panel_width.min(600.0) } else { DEFAULT_SIDE_WIDTH };
-        let bottom_h = if layout.bottom_panel_height > 0.0 { layout.bottom_panel_height } else { DEFAULT_BOTTOM_HEIGHT };
-
-        let sizes = render_plugin_panels_for_ctx(
-            ctx,
-            &self.panel_registry,
-            &self.plugin_bus,
-            &self.render_cache,
-            &mut self.plugin_text_state,
-            &mut self.active_panel_tab,
-            self.left_panel_visible,
-            self.right_panel_visible,
-            self.bottom_panel_visible,
-            &theme,
-            self.icon_cache.as_ref(),
-            left_w,
-            right_w,
-            bottom_h,
-            egui::ViewportId::ROOT,
-        );
-
-        // Persist measured sizes for the main window.
-        if let Some(w) = sizes.left_width {
-            self.state.persistent.layout.left_panel_width = w;
-        }
-        if let Some(w) = sizes.right_width {
-            self.state.persistent.layout.right_panel_width = w;
-        }
-        if let Some(h) = sizes.bottom_height {
-            self.state.persistent.layout.bottom_panel_height = h;
-        }
-    }
-
-    /// Render the global status bar at the very bottom of the window.
-    pub(crate) fn render_status_bar(&self, ctx: &egui::Context) {
-        render_status_bar(ctx, &self.state.theme);
-    }
-}
+// NOTE: The ConchApp::render_plugin_panels() method has been removed.
+// render_plugin_panels_for_ctx() is now called directly from render_window()
+// in window_state.rs. Panel size persistence is handled via WindowAction::SavePanelSizes.
 
 // ---------------------------------------------------------------------------
 // Vertical tab strip for multi-panel locations

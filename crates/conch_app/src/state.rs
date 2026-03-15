@@ -1,22 +1,17 @@
 //! Application state: sessions, tabs, and UI state.
 
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 
 use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
-use conch_core::color_scheme;
-use conch_core::config::{PersistentState, UserConfig};
 use conch_plugin_sdk::{SessionBackendVtable, SessionStatus};
 use conch_pty::EventProxy;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::host::session_bridge::PluginSessionBridge;
-use crate::terminal::color::ResolvedColors;
-use crate::ui_theme::UiTheme;
 
 /// An inline prompt displayed in the session's connecting screen.
 pub struct SessionPrompt {
@@ -137,38 +132,5 @@ impl Session {
 // HashMap<SessionHandle, Box<SshBackendState>>). The host only borrows
 // the backend_handle pointer. Calling vtable.drop here would double-free.
 
-/// The full application state.
-pub struct AppState {
-    pub user_config: UserConfig,
-    pub persistent: PersistentState,
-    pub colors: ResolvedColors,
-    pub theme: UiTheme,
-    pub theme_dirty: bool,
-    pub sessions: HashMap<Uuid, Session>,
-    pub active_tab: Option<Uuid>,
-    pub tab_order: Vec<Uuid>,
-}
-
-impl AppState {
-    pub fn new(user_config: UserConfig, persistent: PersistentState) -> Self {
-        let scheme = color_scheme::resolve_theme(&user_config.colors.theme);
-        let colors = ResolvedColors::from_scheme(&scheme);
-        let theme = UiTheme::from_colors(&colors, user_config.colors.appearance_mode);
-
-        Self {
-            user_config,
-            persistent,
-            colors,
-            theme,
-            theme_dirty: true,
-            sessions: HashMap::new(),
-            active_tab: None,
-            tab_order: Vec::new(),
-        }
-    }
-
-    /// Get the currently active session, if any.
-    pub fn active_session(&self) -> Option<&Session> {
-        self.active_tab.and_then(|id| self.sessions.get(&id))
-    }
-}
+// NOTE: AppState has been replaced by WindowState (per-window state) and
+// SharedConfig (global config/theme). See window_state.rs.

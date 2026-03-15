@@ -2,7 +2,6 @@
 
 mod app;
 mod context_menu;
-mod extra_window;
 mod host;
 mod icons;
 mod input;
@@ -12,12 +11,12 @@ mod mouse;
 mod notifications;
 mod platform;
 mod sessions;
-mod shortcuts;
 mod state;
 mod tab_bar;
 mod terminal;
 mod ui_theme;
 mod watcher;
+mod window_state;
 
 use std::sync::Arc;
 
@@ -328,13 +327,16 @@ fn main() -> eframe::Result<()> {
             .expect("Failed to create tokio runtime"),
     );
 
+    // The root viewport IS the first user window.  Extra windows use
+    // show_viewport_immediate and the same render_window() function —
+    // no hidden daemon, no deferred viewport coordination overhead.
+    let icon = Arc::new(load_app_icon());
     let platform = platform::PlatformCapabilities::current();
     let decorations = platform.effective_decorations(user_config.window.decorations);
 
     let base_viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
-        .with_icon(Arc::new(load_app_icon()));
-
+        .with_icon(Arc::clone(&icon));
     let viewport = build_viewport(base_viewport, decorations, &platform);
 
     let options = eframe::NativeOptions {
@@ -350,7 +352,7 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             setup_system_ui_font(&cc.egui_ctx);
             apply_appearance_mode(&cc.egui_ctx, appearance_mode);
-            Ok(Box::new(ConchApp::new(rt)))
+            Ok(Box::new(ConchApp::new(rt, window_size, icon)))
         }),
     )
 }
