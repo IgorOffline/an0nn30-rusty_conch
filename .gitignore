@@ -29,3 +29,6 @@ Conch.app/
 
 # Logs
 *.log
+
+# Java SDK build output
+java-sdk/build/

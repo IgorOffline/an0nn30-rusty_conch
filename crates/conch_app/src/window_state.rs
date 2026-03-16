@@ -415,8 +415,10 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
 
     // 5. Apply theme if version changed, and restore persisted zoom on first frame.
     if win.last_theme_version != cfg.theme_version {
-        cfg.theme.apply(ctx);
+        // Set dark theme preference first (for title bar + egui base), then
+        // apply our custom UiTheme visuals on top.
         crate::apply_appearance_mode(ctx, cfg.user_config.colors.appearance_mode);
+        cfg.theme.apply(ctx);
         crate::host::bridge::update_theme_json(&cfg.theme);
         // On first frame (version 0 → N), restore persisted zoom factor.
         if win.last_theme_version == 0 {

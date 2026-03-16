@@ -89,7 +89,7 @@ impl UiTheme {
                 (
                     Color32::from_rgb(0x20, 0x1E, 0x1F), // #201E1F
                     Color32::from_rgb(0x29, 0x28, 0x29), // #292829
-                    fg,
+                    Color32::from_rgb(0xE8, 0xE6, 0xE3), // warm white text
                     Color32::from_rgb(0xA0, 0x9C, 0x9D), // warm gray
                     Color32::from_rgb(0x5A, 0x57, 0x58),  // warm muted
                     Color32::from_rgb(100, 160, 230),      // soft sky blue
