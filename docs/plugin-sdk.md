@@ -166,10 +166,9 @@ jar {
 >     manifest {
 >         attributes 'Plugin-Class': 'com.example.MyPlugin'
 >     }
->     // Don't bundle the SDK — Conch provides it at runtime.
->     dependencies {
->         exclude(dependency('conch.plugin:.*'))
->     }
+>     // Avoid META-INF merge conflicts.
+>     exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+>     mergeServiceFiles()
 > }
 > ```
 >
