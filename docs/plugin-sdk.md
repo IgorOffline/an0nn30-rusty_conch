@@ -329,10 +329,12 @@ public void onEvent(String eventJson) {
 }
 ```
 
-For structured parsing, add a JSON library (Gson, Jackson) to your project:
+For structured parsing, add Gson to your project (`implementation 'com.google.code.gson:gson:2.11.0'` in Gradle):
 
 ```java
-// With Gson
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
 JsonObject event = JsonParser.parseString(eventJson).getAsJsonObject();
 if (event.get("kind").getAsString().equals("menu_action")) {
     String action = event.get("action").getAsString();
@@ -779,13 +781,11 @@ String formJson = """
 String result = HostApi.showForm(formJson);
 if (result != null) {
     // result = {"mode":"Encrypt", "key":"my-secret", "input_text":"hello world"}
-    // Simple string matching (no JSON library needed):
-    if (result.contains("\"Encrypt\"")) {
-        HostApi.info("Encrypting...");
-    }
-    // Or use a JSON library like Gson/Jackson if available:
-    // JsonObject obj = JsonParser.parseString(result).getAsJsonObject();
-    // String mode = obj.get("mode").getAsString();
+    // Requires Gson: implementation 'com.google.code.gson:gson:2.11.0'
+    JsonObject obj = JsonParser.parseString(result).getAsJsonObject();
+    String mode = obj.get("mode").getAsString();
+    String key = obj.get("key").getAsString();
+    String text = obj.get("input_text").getAsString();
 }
 ```
 
