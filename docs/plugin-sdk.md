@@ -779,10 +779,13 @@ String formJson = """
 String result = HostApi.showForm(formJson);
 if (result != null) {
     // result = {"mode":"Encrypt", "key":"my-secret", "input_text":"hello world"}
-    JsonObject obj = JsonParser.parseString(result).getAsJsonObject();
-    String mode = obj.get("mode").getAsString();
-    String key = obj.get("key").getAsString();
-    String text = obj.get("input_text").getAsString();
+    // Simple string matching (no JSON library needed):
+    if (result.contains("\"Encrypt\"")) {
+        HostApi.info("Encrypting...");
+    }
+    // Or use a JSON library like Gson/Jackson if available:
+    // JsonObject obj = JsonParser.parseString(result).getAsJsonObject();
+    // String mode = obj.get("mode").getAsString();
 }
 ```
 
