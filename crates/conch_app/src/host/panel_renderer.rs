@@ -129,7 +129,7 @@ pub fn render_panel_header<'a>(
             if !title.is_empty() {
                 ui.label(
                     egui::RichText::new(title)
-                        .size(theme.font_normal + 1.0)
+                        .size(theme.font_normal)
                         .strong()
                         .color(theme.text),
                 );
@@ -311,7 +311,7 @@ fn render_widget(
         Widget::Heading { text } => {
             ui.label(
                 RichText::new(text)
-                    .size(theme.font_normal + 2.0)
+                    .size(theme.font_normal)
                     .strong()
                     .color(theme.text),
             );
@@ -319,7 +319,7 @@ fn render_widget(
 
         Widget::Label { text, style } => {
             let color = text_style_color(style.as_ref(), theme);
-            ui.label(RichText::new(text).size(theme.font_normal).color(color));
+            ui.label(RichText::new(text).size(theme.font_small).color(color));
         }
 
         Widget::Text { text } => {
@@ -374,7 +374,7 @@ fn render_widget(
         Widget::IconLabel { text, style, .. } => {
             // MVP: render as a plain label, ignoring the icon.
             let color = text_style_color(style.as_ref(), theme);
-            ui.label(RichText::new(text).size(theme.font_normal).color(color));
+            ui.label(RichText::new(text).size(theme.font_small).color(color));
         }
 
         Widget::Badge { text, variant } => {
@@ -448,7 +448,7 @@ fn render_widget(
                         }
                         let button = egui::Button::new(
                             RichText::new(label)
-                                .size(theme.font_normal)
+                                .size(theme.font_small)
                                 .color(text_color),
                         )
                         .frame(false);
@@ -569,7 +569,7 @@ fn render_widget(
 
         Widget::Checkbox { id, label, checked } => {
             let mut val = *checked;
-            if ui.checkbox(&mut val, label).changed() {
+            if circle_checkbox(ui, &mut val, label).clicked() {
                 events.push(WidgetEvent::CheckboxChanged {
                     id: id.clone(),
                     checked: val,
@@ -862,6 +862,9 @@ fn render_tree_node(
     let has_children = !node.children.is_empty();
     let is_bold = node.bold.unwrap_or(false);
 
+    // Compact vertical spacing between tree items.
+    ui.spacing_mut().item_spacing.y = 2.0;
+
     if has_children {
         // --- Folder node: animated collapsing header via CollapsingState ---
         let coll_id = ui.make_persistent_id(("tree_node", &node.id));
@@ -896,7 +899,7 @@ fn render_tree_node(
             // Label — clicking toggles the collapsing state.
             let mut label_text =
                 RichText::new(&node.label)
-                    .size(theme.font_normal)
+                    .size(theme.font_small)
                     .color(if is_selected {
                         theme.accent
                     } else {
@@ -980,7 +983,7 @@ fn render_tree_node(
 
             // Clickable label (no selection highlight).
             let mut label_text = RichText::new(&node.label)
-                .size(theme.font_normal)
+                .size(theme.font_small)
                 .color(theme.text);
             if is_bold {
                 label_text = label_text.strong();
@@ -1057,7 +1060,7 @@ fn render_footer_widget(
                     .add(
                         egui::Label::new(
                             RichText::new(label)
-                                .size(theme.font_normal)
+                                .size(theme.font_small)
                                 .color(theme.text),
                         )
                         .sense(egui::Sense::click()),
@@ -1327,7 +1330,7 @@ fn render_table(
                 ui.separator();
                 for toggle_col in columns.iter() {
                     let mut visible = toggle_col.visible.unwrap_or(true);
-                    if ui.checkbox(&mut visible, &toggle_col.label).clicked() {
+                    if circle_checkbox(ui, &mut visible, &toggle_col.label).clicked() {
                         events.push(WidgetEvent::TableHeaderContextMenu {
                             id: table_id.to_string(),
                             column: toggle_col.id.clone(),
@@ -1342,7 +1345,7 @@ fn render_table(
     ui.separator();
 
     // Data rows in a scroll area. Reserve space for a footer below the table.
-    let row_height = 22.0;
+    let row_height = 20.0;
     let footer_reserve = row_height + ui.spacing().item_spacing.y;
     let max_h = (ui.available_height() - footer_reserve).max(row_height * 2.0);
     egui::ScrollArea::vertical()
@@ -1414,7 +1417,7 @@ fn render_table(
                             text_pos,
                             egui::Align2::LEFT_CENTER,
                             text,
-                            egui::FontId::proportional(theme.font_normal),
+                            egui::FontId::proportional(theme.font_small),
                             theme.text,
                         );
 
@@ -1457,6 +1460,43 @@ fn render_table(
 }
 
 /// Map an optional `TextStyle` to a theme color.
+/// Custom checkbox rendered as a filled circle (checked) or hollow circle (unchecked).
+fn circle_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Response {
+    let spacing = 4.0;
+    let circle_radius = 5.0;
+    let text_galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::proportional(11.0),
+        ui.visuals().text_color(),
+    );
+    let desired_size = egui::vec2(
+        circle_radius * 2.0 + spacing + text_galley.size().x,
+        text_galley.size().y.max(circle_radius * 2.0),
+    );
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+
+    if response.clicked() {
+        *checked = !*checked;
+    }
+
+    if ui.is_rect_visible(rect) {
+        let circle_center = egui::pos2(rect.left() + circle_radius, rect.center().y);
+        let accent = ui.visuals().selection.bg_fill;
+        let border = ui.visuals().widgets.inactive.fg_stroke.color;
+
+        if *checked {
+            ui.painter().circle_filled(circle_center, circle_radius, accent);
+        } else {
+            ui.painter().circle_stroke(circle_center, circle_radius, egui::Stroke::new(1.0, border));
+        }
+
+        let text_pos = egui::pos2(rect.left() + circle_radius * 2.0 + spacing, rect.center().y - text_galley.size().y / 2.0);
+        ui.painter().galley(text_pos, text_galley, egui::Color32::PLACEHOLDER);
+    }
+
+    response
+}
+
 fn text_style_color(style: Option<&TextStyle>, theme: &UiTheme) -> egui::Color32 {
     match style {
         None | Some(TextStyle::Normal) => theme.text,
