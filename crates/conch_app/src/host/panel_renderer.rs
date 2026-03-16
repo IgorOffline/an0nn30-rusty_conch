@@ -474,8 +474,8 @@ fn render_widget(
 
             let mut te = egui::TextEdit::singleline(buf)
                 .id(te_id)
-                .font(egui::TextStyle::Body)
-                .margin(theme.text_edit_margin());
+                .font(egui::FontId::proportional(theme.font_small))
+                .margin(egui::Margin::symmetric(4, 3));
             if let Some(h) = hint {
                 te = te.hint_text(h);
             }
@@ -548,8 +548,8 @@ fn render_widget(
 
             let desired_rows = lines.unwrap_or(4) as usize;
             let mut te = egui::TextEdit::multiline(buf)
-                .font(egui::TextStyle::Monospace)
-                .margin(theme.text_edit_margin())
+                .font(egui::FontId::monospace(theme.font_small))
+                .margin(egui::Margin::symmetric(4, 3))
                 .desired_rows(desired_rows);
             if let Some(h) = hint {
                 te = te.hint_text(h);
