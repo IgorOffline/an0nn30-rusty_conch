@@ -532,13 +532,11 @@ impl Pane {
                     tooltip: Some("Forward".into()),
                     enabled: Some(!self.forward_stack.is_empty()),
                 },
-                ToolbarItem::Separator,
                 ToolbarItem::TextInput {
                     id: format!("{p}_path"),
                     value: self.path_input.clone(),
                     hint: Some("Path...".into()),
                 },
-                ToolbarItem::Separator,
                 ToolbarItem::Button {
                     id: format!("{p}_home"),
                     icon: Some("go-home".into()),

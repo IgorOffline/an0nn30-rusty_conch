@@ -146,9 +146,13 @@ impl UiTheme {
         };
 
         let inactive = WidgetVisuals {
-            bg_fill: self.surface,
+            bg_fill: if self.dark_mode { self.surface } else { Color32::WHITE },
             weak_bg_fill: self.surface,
-            bg_stroke: Stroke::new(1.0, self.border),
+            bg_stroke: if self.dark_mode {
+                Stroke::new(1.0, self.border)
+            } else {
+                Stroke::new(1.0, Color32::from_rgb(0x30, 0x30, 0x30))
+            },
             corner_radius: rounding,
             fg_stroke: Stroke::new(1.0, self.text),
             expansion: 0.0,

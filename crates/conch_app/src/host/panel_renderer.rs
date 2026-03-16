@@ -1206,8 +1206,8 @@ fn render_toolbar_text_input(
         let te_id = ui.id().with(id);
         let mut te = egui::TextEdit::singleline(buf)
             .id(te_id)
-            .font(egui::TextStyle::Body)
-            .margin(theme.text_edit_margin())
+            .font(egui::FontId::proportional(theme.font_small))
+            .margin(egui::Margin::symmetric(4, 3))
             .desired_width(width);
         if let Some(h) = hint {
             te = te.hint_text(h);
@@ -1281,8 +1281,21 @@ fn render_table(
         })
         .collect();
 
-    // Header row.
+    // Header row — styled as bordered cells (Java Swing JTableHeader style).
+    let header_height = 20.0;
+    let header_bg = if theme.dark_mode {
+        egui::Color32::from_rgb(0x38, 0x36, 0x38)
+    } else {
+        egui::Color32::from_rgb(0xE8, 0xE8, 0xE8)
+    };
+    let header_border = if theme.dark_mode {
+        egui::Color32::from_rgb(0x50, 0x4E, 0x50)
+    } else {
+        egui::Color32::from_rgb(0xB0, 0xB0, 0xB0)
+    };
+
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         for (vi, &col_idx) in visible_cols.iter().enumerate() {
             let col = &columns[col_idx];
             let is_sorted = sort_column == Some(col.id.as_str());
@@ -1303,9 +1316,28 @@ fn render_table(
             };
 
             let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(width, ui.spacing().interact_size.y), sense);
+                ui.allocate_exact_size(egui::vec2(width, header_height), sense);
 
-            // Draw left-aligned header text.
+            // Cell background.
+            ui.painter().rect_filled(rect, 0.0, header_bg);
+
+            // Right border (skip last column).
+            if vi < visible_cols.len() - 1 {
+                let right = egui::Rect::from_min_size(
+                    egui::pos2(rect.max.x - 1.0, rect.min.y),
+                    egui::vec2(1.0, header_height),
+                );
+                ui.painter().rect_filled(right, 0.0, header_border);
+            }
+
+            // Bottom border.
+            let bottom = egui::Rect::from_min_size(
+                egui::pos2(rect.min.x, rect.max.y - 1.0),
+                egui::vec2(width, 1.0),
+            );
+            ui.painter().rect_filled(bottom, 0.0, header_border);
+
+            // Header text.
             let text_pos = rect.left_center() + egui::vec2(4.0, 0.0);
             ui.painter().text(
                 text_pos,
@@ -1341,8 +1373,6 @@ fn render_table(
             });
         }
     });
-
-    ui.separator();
 
     // Data rows in a scroll area. Reserve space for a footer below the table.
     let row_height = 20.0;
