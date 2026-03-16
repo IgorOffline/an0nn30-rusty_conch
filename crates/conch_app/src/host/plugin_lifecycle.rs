@@ -55,9 +55,7 @@ impl ConchApp {
         }
 
         // User plugin directory (~/.config/conch/plugins/ or platform equivalent).
-        if let Some(config_dir) = dirs::config_dir() {
-            dirs.push(config_dir.join("conch").join("plugins"));
-        }
+        dirs.push(conch_core::config::config_dir().join("plugins"));
 
         // Append user-configured search paths (these supplement the defaults).
         for p in configured {

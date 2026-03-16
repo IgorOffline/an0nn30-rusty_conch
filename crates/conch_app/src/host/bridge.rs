@@ -802,7 +802,7 @@ extern "C" fn host_register_service(name: *const c_char) {
 
 /// Get the per-plugin config directory: `~/.config/conch/plugins/{plugin_name}/`
 fn plugin_config_dir(plugin_name: &str) -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("conch").join("plugins").join(plugin_name))
+    Some(conch_core::config::config_dir().join("plugins").join(plugin_name))
 }
 
 extern "C" fn host_get_config(key: *const c_char) -> *mut c_char {

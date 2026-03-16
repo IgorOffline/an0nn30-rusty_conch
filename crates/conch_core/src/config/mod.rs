@@ -55,11 +55,24 @@ impl Default for UserConfig {
 // Paths
 // ---------------------------------------------------------------------------
 
-/// Returns the config directory: `~/.config/conch/`.
+/// Returns the config directory.
+///
+/// - macOS / Linux: `~/.config/conch/`
+/// - Windows: `%APPDATA%\conch\`
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("conch")
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(".config")
+            .join("conch")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("conch")
+    }
 }
 
 pub fn config_path() -> PathBuf { config_dir().join("config.toml") }
