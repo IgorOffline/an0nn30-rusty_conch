@@ -30,7 +30,8 @@ help:
 	@echo ""
 	@echo "Other:"
 	@echo "  all            Build all cross targets"
-	@echo "  release V=x.y.z  Bump version, tag, and push"
+	@echo "  bump V=x.y.z   Bump version everywhere (no tag, no push)"
+	@echo "  release V=x.y.z  Bump version, commit, tag, and push"
 	@echo "  clean          Remove build artifacts"
 	@echo "  changelog      Generate release notes locally"
 	@echo ""
@@ -201,7 +202,31 @@ all: dmg-universal linux-amd64 linux-arm64 windows-cross
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
+# Bump version: make bump V=0.3.1
+# Updates all version references without tagging or pushing.
+# ---------------------------------------------------------------------------
+.PHONY: bump
+bump:
+ifndef V
+	$(error Usage: make bump V=x.y.z)
+endif
+	@echo "Bumping version to $(V)..."
+	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
+	sed -i '' 's|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>$(V)</string>|g' packaging/macos/Info.plist
+	sed -i '' 's|Version="[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"|Version="$(V)"|g' packaging/windows/conch.wxs
+	cargo check --workspace
+	@echo ""
+	@echo "Version bumped to $(V) in:"
+	@echo "  - Cargo.toml (workspace version)"
+	@echo "  - packaging/macos/Info.plist"
+	@echo "  - packaging/windows/conch.wxs"
+	@echo "  - Cargo.lock (updated by cargo check)"
+	@echo ""
+	@echo "Review changes with 'git diff', then commit when ready."
+
+# ---------------------------------------------------------------------------
 # Release: make release V=0.2.2
+# Bumps version, commits, tags, and pushes.
 # ---------------------------------------------------------------------------
 .PHONY: release
 release:
@@ -209,10 +234,8 @@ ifndef V
 	$(error Usage: make release V=x.y.z)
 endif
 	@echo "Releasing v$(V)..."
-	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
-	sed -i '' 's|<string>[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*</string>|<string>$(V)</string>|g' packaging/macos/Info.plist
-	cargo check --workspace
-	git add Cargo.toml packaging/macos/Info.plist Cargo.lock
+	$(MAKE) bump V=$(V)
+	git add Cargo.toml packaging/macos/Info.plist packaging/windows/conch.wxs Cargo.lock
 	git diff --cached --quiet || git commit -m "release: v$(V)"
 	git tag -a "v$(V)" -m "v$(V)" -f
 	git push origin main
