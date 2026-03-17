@@ -1,3 +1,6 @@
 #!/bin/sh
 set -e
-rm -f /usr/bin/conch
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    update-alternatives --remove x-terminal-emulator /opt/conch/bin/conch
+    rm -f /usr/bin/conch
+fi

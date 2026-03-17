@@ -72,8 +72,8 @@ assets = [
 ]
 
 [package.metadata.generate-rpm]
-post_install_script = "ln -sf /opt/conch/bin/conch /usr/bin/conch"
-pre_uninstall_script = "rm -f /usr/bin/conch"
+post_install_script = "ln -sf /opt/conch/bin/conch /usr/bin/conch\nif command -v update-alternatives >/dev/null 2>&1; then update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /opt/conch/bin/conch 50; fi"
+pre_uninstall_script = "if command -v update-alternatives >/dev/null 2>&1; then update-alternatives --remove x-terminal-emulator /opt/conch/bin/conch; fi\nrm -f /usr/bin/conch"
 assets = [
     { source = "target/release/conch", dest = "/opt/conch/bin/conch", mode = "755" },
     { source = "target/release/libconch_ssh.so", dest = "/opt/conch/lib/libconch_ssh.so", mode = "755" },
