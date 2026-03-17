@@ -37,6 +37,10 @@ use crate::ui_theme::UiTheme;
 /// Cursor blink interval in milliseconds.
 const CURSOR_BLINK_MS: u128 = 500;
 
+/// When unfocused, poll for PTY/plugin events at this interval so background
+/// terminal updates (e.g. command output) still appear without user interaction.
+const UNFOCUSED_POLL_MS: u64 = 250;
+
 fn deferred_select_all_key(ctx: &egui::Context) -> egui::Id {
     egui::Id::new("__deferred_plugin_select_all").with(ctx.viewport_id())
 }
@@ -873,8 +877,11 @@ pub(crate) fn render_window(ctx: &egui::Context, win: &mut WindowState, shared: 
         let elapsed = win.last_blink.elapsed().as_millis() as u64;
         let remaining = (CURSOR_BLINK_MS as u64).saturating_sub(elapsed);
         ctx.request_repaint_after(Duration::from_millis(remaining.max(16)));
+    } else {
+        // Unfocused: poll at a low frequency so PTY output and plugin
+        // updates are still picked up without waiting for re-focus.
+        ctx.request_repaint_after(Duration::from_millis(UNFOCUSED_POLL_MS));
     }
-    // When unfocused and nothing changed: no repaint requested → true idle.
 }
 
 // ── handle_menu_action ──
@@ -1423,5 +1430,13 @@ mod tests {
         // A window at version 1 would detect the mismatch.
         let ws = make_test_state();
         assert_ne!(ws.last_theme_version, cfg.theme_version);
+    }
+
+    #[test]
+    fn unfocused_poll_interval_is_reasonable() {
+        // Must be fast enough to feel responsive (< 1s) but slow enough
+        // to avoid burning CPU (~4fps or less).
+        assert!(UNFOCUSED_POLL_MS >= 100, "polling too aggressively when unfocused");
+        assert!(UNFOCUSED_POLL_MS <= 1000, "polling too slowly — updates will feel laggy");
     }
 }
