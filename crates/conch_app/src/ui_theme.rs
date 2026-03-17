@@ -52,6 +52,8 @@ pub struct UiTheme {
     pub rounding: u8,
     /// Small font size (labels, tab titles).
     pub font_small: f32,
+    /// List item font size (tree nodes, table rows).
+    pub font_list: f32,
     /// Normal font size (body text, buttons).
     pub font_normal: f32,
     /// Minimum width for menu popups (menu bar and context menus).
@@ -125,6 +127,7 @@ impl UiTheme {
             error: to_color32(colors.normal[1]), // red
             rounding: 0,
             font_small: 11.0,
+            font_list: 13.0,
             font_normal: 14.0,
             menu_width: 120.0,
             dark_mode,
@@ -487,6 +490,7 @@ mod tests {
         let theme = UiTheme::from_colors(&dark_colors(), AppearanceMode::Dark);
         assert_eq!(theme.rounding, 0);
         assert_eq!(theme.font_small, 11.0);
+        assert_eq!(theme.font_list, 13.0);
         assert_eq!(theme.font_normal, 14.0);
         assert_eq!(theme.menu_width, 120.0);
     }

@@ -899,7 +899,7 @@ fn render_tree_node(
             // Label — clicking toggles the collapsing state.
             let mut label_text =
                 RichText::new(&node.label)
-                    .size(theme.font_small)
+                    .size(theme.font_list)
                     .color(if is_selected {
                         theme.accent
                     } else {
@@ -983,7 +983,7 @@ fn render_tree_node(
 
             // Clickable label (no selection highlight).
             let mut label_text = RichText::new(&node.label)
-                .size(theme.font_small)
+                .size(theme.font_list)
                 .color(theme.text);
             if is_bold {
                 label_text = label_text.strong();
@@ -1343,7 +1343,7 @@ fn render_table(
                 text_pos,
                 egui::Align2::LEFT_CENTER,
                 &label,
-                egui::FontId::proportional(theme.font_small),
+                egui::FontId::proportional(theme.font_list),
                 theme.text,
             );
 
@@ -1455,7 +1455,7 @@ fn render_table(
                             text_pos,
                             egui::Align2::LEFT_CENTER,
                             text,
-                            egui::FontId::proportional(theme.font_small),
+                            egui::FontId::proportional(theme.font_list),
                             theme.text,
                         );
 
