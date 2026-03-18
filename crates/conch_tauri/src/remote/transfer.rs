@@ -171,26 +171,26 @@ async fn download_file(
     file_name: &str,
     progress_tx: &mpsc::UnboundedSender<TransferProgress>,
 ) -> Result<u64, String> {
+    use std::time::Instant;
     use tokio::io::AsyncReadExt;
 
-    // Stat the remote file for total size.
     let stat = sftp::stat(ssh, remote_path).await?;
     let total_bytes = stat.size;
 
-    // Open SFTP session and remote file.
     let sftp_session = open_sftp(ssh).await?;
     let mut remote_file = sftp_session
         .open(remote_path)
         .await
         .map_err(|e| format!("open failed: {e}"))?;
 
-    // Create local file.
     let mut local_file =
         std::fs::File::create(local_path).map_err(|e| format!("create local file: {e}"))?;
 
     let mut bytes_transferred: u64 = 0;
-    let chunk_size = 256 * 1024; // 256KB chunks
+    let chunk_size = 256 * 1024;
     let mut buf = vec![0u8; chunk_size];
+    let mut last_progress = Instant::now();
+    let progress_interval = std::time::Duration::from_millis(100);
 
     loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -211,15 +211,19 @@ async fn download_file(
 
         bytes_transferred += n as u64;
 
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id: transfer_id.to_string(),
-            kind: TransferKind::Download,
-            status: TransferStatus::InProgress,
-            bytes_transferred,
-            total_bytes,
-            file_name: file_name.to_string(),
-            error: None,
-        });
+        // Throttle progress events to avoid flooding the frontend.
+        if last_progress.elapsed() >= progress_interval {
+            last_progress = Instant::now();
+            let _ = progress_tx.send(TransferProgress {
+                transfer_id: transfer_id.to_string(),
+                kind: TransferKind::Download,
+                status: TransferStatus::InProgress,
+                bytes_transferred,
+                total_bytes,
+                file_name: file_name.to_string(),
+                error: None,
+            });
+        }
     }
 
     Ok(bytes_transferred)
@@ -312,18 +316,16 @@ async fn upload_file(
     file_name: &str,
     progress_tx: &mpsc::UnboundedSender<TransferProgress>,
 ) -> Result<u64, String> {
+    use std::time::Instant;
     use tokio::io::AsyncWriteExt;
 
-    // Get local file size.
     let local_meta =
         std::fs::metadata(local_path).map_err(|e| format!("stat local file: {e}"))?;
     let total_bytes = local_meta.len();
 
-    // Open local file.
     let mut local_file =
         std::fs::File::open(local_path).map_err(|e| format!("open local file: {e}"))?;
 
-    // Open SFTP session and create remote file.
     let sftp_session = open_sftp(ssh).await?;
     let mut remote_file = sftp_session
         .create(remote_path)
@@ -331,8 +333,10 @@ async fn upload_file(
         .map_err(|e| format!("create remote file: {e}"))?;
 
     let mut bytes_transferred: u64 = 0;
-    let chunk_size = 256 * 1024; // 256KB chunks
+    let chunk_size = 256 * 1024;
     let mut buf = vec![0u8; chunk_size];
+    let mut last_progress = Instant::now();
+    let progress_interval = std::time::Duration::from_millis(100);
 
     loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -353,15 +357,18 @@ async fn upload_file(
 
         bytes_transferred += n as u64;
 
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id: transfer_id.to_string(),
-            kind: TransferKind::Upload,
-            status: TransferStatus::InProgress,
-            bytes_transferred,
-            total_bytes,
-            file_name: file_name.to_string(),
-            error: None,
-        });
+        if last_progress.elapsed() >= progress_interval {
+            last_progress = Instant::now();
+            let _ = progress_tx.send(TransferProgress {
+                transfer_id: transfer_id.to_string(),
+                kind: TransferKind::Upload,
+                status: TransferStatus::InProgress,
+                bytes_transferred,
+                total_bytes,
+                file_name: file_name.to_string(),
+                error: None,
+            });
+        }
     }
 
     Ok(bytes_transferred)

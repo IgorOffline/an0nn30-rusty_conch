@@ -486,24 +486,50 @@
     if (!p || !p.file_name) return;
 
     const pct = p.total_bytes > 0 ? Math.round((p.bytes_transferred / p.total_bytes) * 100) : 0;
-
-    // Update the relevant pane's transfer status
     const pane = p.kind === 'download' ? localPane : remotePane;
+    const el = panelEl.querySelector(`#fp-${pane.prefix}`);
+
     if (p.status === 'completed') {
       pane.transferStatus[p.file_name] = { status: 'completed', percent: 100 };
-      // Refresh the target pane to show the new file
+      updateRowTransferState(el, p.file_name, 'completed', 100);
+      // Refresh to show the newly transferred file in the list
       loadEntries(pane);
       showToast(`Transfer complete: ${p.file_name}`);
     } else if (p.status === 'failed' || p.status === 'cancelled') {
       delete pane.transferStatus[p.file_name];
-      if (p.status === 'failed') showToast(`Transfer failed: ${p.file_name}`, true);
+      updateRowTransferState(el, p.file_name, null, 0);
+      if (p.status === 'failed') {
+        showToast(`Transfer failed: ${p.file_name}${p.error ? ' — ' + p.error : ''}`, true);
+      }
     } else {
       pane.transferStatus[p.file_name] = { status: 'in_progress', percent: pct };
+      updateRowTransferState(el, p.file_name, 'in_progress', pct);
     }
+  }
 
-    // Re-render the affected pane
-    const el = panelEl.querySelector(`#fp-${pane.prefix}`);
-    renderPane(pane, el);
+  /// Update a single row's transfer visual state without re-rendering the whole pane.
+  function updateRowTransferState(paneEl, fileName, status, pct) {
+    if (!paneEl) return;
+    const row = paneEl.querySelector(`tr[data-name="${CSS.escape(fileName)}"]`);
+    if (!row) return;
+
+    row.classList.remove('fp-transferring', 'fp-transferred');
+    // Remove existing percent badge
+    const existingPct = row.querySelector('.fp-transfer-pct');
+    if (existingPct) existingPct.remove();
+
+    if (status === 'in_progress') {
+      row.classList.add('fp-transferring');
+      const nameCell = row.querySelector('.fp-cell-name');
+      if (nameCell) {
+        const badge = document.createElement('span');
+        badge.className = 'fp-transfer-pct';
+        badge.textContent = pct + '%';
+        nameCell.appendChild(badge);
+      }
+    } else if (status === 'completed') {
+      row.classList.add('fp-transferred');
+    }
   }
 
   // ---------------------------------------------------------------------------
