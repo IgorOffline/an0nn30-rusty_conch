@@ -15,6 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 conch_core = { workspace = true }
+conch_plugin = { workspace = true }
+conch_plugin_sdk = { workspace = true }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 portable-pty = "0.8"

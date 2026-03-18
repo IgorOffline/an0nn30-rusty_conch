@@ -1222,6 +1222,8 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "conch_core",
+ "conch_plugin",
+ "conch_plugin_sdk",
  "dirs",
  "env_logger",
  "log",

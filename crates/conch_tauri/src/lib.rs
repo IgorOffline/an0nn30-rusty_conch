@@ -5,6 +5,7 @@
 //! handles all terminal emulation.
 
 mod pty_backend;
+pub(crate) mod plugins;
 pub(crate) mod remote;
 
 use std::collections::HashMap;
@@ -460,6 +461,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     let (transfer_tx, mut transfer_rx) =
         tokio::sync::mpsc::unbounded_channel::<remote::transfer::TransferProgress>();
     let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
+    let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new()));
+    let plugins_config = config.conch.plugins.clone();
 
     // Load persisted window size.
     let persisted = config::load_persistent_state().unwrap_or_default();
@@ -481,6 +484,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             config,
         })
         .manage(Arc::clone(&remote_state))
+        .manage(Arc::clone(&plugin_state))
         .setup(move |app| {
             let kb_config = config::load_user_config()
                 .map(|c| c.conch.keyboard)
@@ -494,6 +498,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             // Apply persisted window size.
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
+            }
+
+            // Start Lua plugins.
+            if plugins_config.enabled && plugins_config.lua {
+                let handle = app.handle().clone();
+                plugin_state.lock().start_lua_plugins(&handle);
             }
 
             // Forward transfer progress events to the frontend.
@@ -582,6 +592,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::tunnel_save,
             remote::tunnel_delete,
             remote::tunnel_get_all,
+            plugins::get_plugin_panels,
+            plugins::get_panel_widgets,
+            plugins::plugin_widget_event,
+            plugins::request_plugin_render,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
