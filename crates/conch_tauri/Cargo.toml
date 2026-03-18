@@ -2,6 +2,16 @@
 name = "conch_tauri"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "Conch terminal emulator — Tauri/xterm.js UI"
+
+[[bin]]
+name = "conch"
+path = "src/main.rs"
+
+[lib]
+name = "conch_tauri"
+path = "src/lib.rs"
 
 [dependencies]
 conch_core = { workspace = true }
@@ -14,6 +24,7 @@ tokio = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
+env_logger = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
 

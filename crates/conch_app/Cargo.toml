@@ -6,7 +6,7 @@ license.workspace = true
 description = "Cross-platform terminal emulator"
 
 [[bin]]
-name = "conch"
+name = "conch-egui"
 path = "src/main.rs"
 
 [dependencies]
@@ -45,13 +45,6 @@ font-kit = "0.14"
 # Terminal emulation (for types)
 alacritty_terminal = "0.25"
 rfd = "0.17.2"
-
-# Experimental Tauri UI (opt-in)
-conch_tauri = { workspace = true, optional = true }
-
-[features]
-default = []
-tauri-ui = ["dep:conch_tauri"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
