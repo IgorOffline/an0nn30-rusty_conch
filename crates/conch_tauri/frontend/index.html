@@ -432,6 +432,22 @@
         return listen(eventName, handler);
       };
       const currentWindowLabel = await invoke('current_window_label');
+
+      // Load terminal font config
+      let termFontFamily = '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace';
+      let termFontSize = 14;
+      try {
+        const fontCfg = await invoke('get_terminal_font');
+        if (fontCfg.family) {
+          termFontFamily = '"' + fontCfg.family + '", "Fira Code", "Cascadia Code", monospace';
+        }
+        if (fontCfg.size > 0) {
+          termFontSize = fontCfg.size;
+        }
+      } catch (e) {
+        console.warn('Failed to load terminal font config:', e);
+      }
+
       const appEl = document.getElementById('app');
       const tabBarEl = document.getElementById('tabbar');
       const terminalHostEl = document.getElementById('terminal-host');
@@ -669,8 +685,8 @@
 
         const term = new Terminal({
           theme,
-          fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
-          fontSize: 14,
+          fontFamily: termFontFamily,
+          fontSize: termFontSize,
           cursorBlink: true,
           allowProposedApi: true,
         });
@@ -751,8 +767,8 @@
 
         const term = new Terminal({
           theme,
-          fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
-          fontSize: 14,
+          fontFamily: termFontFamily,
+          fontSize: termFontSize,
           cursorBlink: true,
           allowProposedApi: true,
         });
@@ -835,6 +851,7 @@
           panelWrapEl: sshPanelWrapEl,
           resizeHandleEl: sshResizeEl,
           fitActiveTab: () => fitAndResizeTab(currentTab()),
+          refocusTerminal: () => { const tab = currentTab(); if (tab) tab.term.focus(); },
         });
       }
 
@@ -908,6 +925,14 @@
         }
         if (action === 'close-tab' && activeTabId !== null) {
           closeTab(activeTabId).catch((e) => showStatus('Failed to close tab: ' + String(e)));
+          return;
+        }
+        if (action === 'toggle-right-panel' && window.sshPanel) {
+          window.sshPanel.togglePanel();
+          return;
+        }
+        if (action === 'focus-sessions' && window.sshPanel) {
+          window.sshPanel.focusQuickConnect();
           return;
         }
         if (action === 'manage-tunnels' && window.tunnelManager) {

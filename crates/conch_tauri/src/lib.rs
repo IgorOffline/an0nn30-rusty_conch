@@ -22,10 +22,14 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 const MENU_NEW_TAB_ID: &str = "file.new_tab";
 const MENU_CLOSE_TAB_ID: &str = "file.close_tab";
 const MENU_NEW_WINDOW_ID: &str = "file.new_window";
+const MENU_TOGGLE_RIGHT_PANEL_ID: &str = "view.toggle_right_panel";
+const MENU_FOCUS_SESSIONS_ID: &str = "view.focus_sessions";
 const MENU_MANAGE_TUNNELS_ID: &str = "tools.manage_tunnels";
 const MENU_ACTION_EVENT: &str = "menu-action";
 const MENU_ACTION_NEW_TAB: &str = "new-tab";
 const MENU_ACTION_CLOSE_TAB: &str = "close-tab";
+const MENU_ACTION_TOGGLE_RIGHT_PANEL: &str = "toggle-right-panel";
+const MENU_ACTION_FOCUS_SESSIONS: &str = "focus-sessions";
 const MENU_ACTION_MANAGE_TUNNELS: &str = "manage-tunnels";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
@@ -147,6 +151,64 @@ fn current_window_label(window: tauri::WebviewWindow) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal font config
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct TerminalFontConfig {
+    family: String,
+    size: f64,
+}
+
+#[tauri::command]
+fn get_terminal_font(state: tauri::State<'_, TauriState>) -> TerminalFontConfig {
+    let font = state.config.resolved_terminal_font();
+    TerminalFontConfig {
+        family: font.normal.family.clone(),
+        size: font.size as f64,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard config
+// ---------------------------------------------------------------------------
+
+/// Convert a conch config keybinding (e.g. "cmd+shift+r") to a Tauri
+/// accelerator string (e.g. "CmdOrCtrl+Shift+R").
+fn config_key_to_accelerator(key: &str) -> String {
+    key.split('+')
+        .map(|part| {
+            let lower = part.trim().to_lowercase();
+            match lower.as_str() {
+                "cmd" | "ctrl" => "CmdOrCtrl".to_string(),
+                "shift" => "Shift".to_string(),
+                "alt" | "opt" | "option" => "Alt".to_string(),
+                other => other.to_uppercase(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Keyboard shortcuts exposed to the frontend.
+#[derive(Serialize)]
+struct KeyboardShortcuts {
+    toggle_right_panel: String,
+    toggle_left_panel: String,
+    toggle_bottom_panel: String,
+}
+
+#[tauri::command]
+fn get_keyboard_shortcuts(state: tauri::State<'_, TauriState>) -> KeyboardShortcuts {
+    let kb = &state.config.conch.keyboard;
+    KeyboardShortcuts {
+        toggle_right_panel: kb.toggle_right_panel.clone(),
+        toggle_left_panel: kb.toggle_left_panel.clone(),
+        toggle_bottom_panel: kb.toggle_bottom_panel.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Window state persistence
 // ---------------------------------------------------------------------------
 
@@ -196,7 +258,10 @@ fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLayout) {
     let _ = config::save_persistent_state(&state);
 }
 
-fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
+fn build_app_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    keyboard: &conch_core::config::KeyboardConfig,
+) -> tauri::Result<Menu<R>> {
     let new_tab = MenuItem::with_id(app, MENU_NEW_TAB_ID, "New Tab", true, Some("CmdOrCtrl+T"))?;
     let close_tab = MenuItem::with_id(
         app,
@@ -235,6 +300,29 @@ fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result
             &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
+    // View menu — panel toggles using configured shortcuts
+    let toggle_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
+    let toggle_right = MenuItem::with_id(
+        app,
+        MENU_TOGGLE_RIGHT_PANEL_ID,
+        "Toggle Right Panel",
+        true,
+        Some(&toggle_accel),
+    )?;
+    let focus_sessions = MenuItem::with_id(
+        app,
+        MENU_FOCUS_SESSIONS_ID,
+        "Toggle & Focus Sessions",
+        true,
+        Some("CmdOrCtrl+/"),
+    )?;
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[&toggle_right, &focus_sessions],
+    )?;
+
     let manage_tunnels = MenuItem::with_id(
         app,
         MENU_MANAGE_TUNNELS_ID,
@@ -274,13 +362,13 @@ fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result
         )?;
         return Menu::with_items(
             app,
-            &[&app_menu, &file_menu, &edit_menu, &tools_menu, &window_menu],
+            &[&app_menu, &file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu],
         );
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        Menu::with_items(app, &[&file_menu, &edit_menu, &tools_menu, &window_menu])
+        Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu])
     }
 }
 
@@ -365,7 +453,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         })
         .manage(Arc::clone(&remote_state))
         .setup(move |app| {
-            let menu = build_app_menu(&app.handle())
+            let kb_config = config::load_user_config()
+                .map(|c| c.conch.keyboard)
+                .unwrap_or_default();
+            let menu = build_app_menu(&app.handle(), &kb_config)
                 .map_err(|e| anyhow::anyhow!("Failed to build app menu: {e}"))?;
             app.handle()
                 .set_menu(menu)
@@ -393,6 +484,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_NEW_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_NEW_TAB),
             MENU_CLOSE_TAB_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_CLOSE_TAB),
+            MENU_TOGGLE_RIGHT_PANEL_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_RIGHT_PANEL)
+            }
+            MENU_FOCUS_SESSIONS_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_FOCUS_SESSIONS)
+            }
             MENU_MANAGE_TUNNELS_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_MANAGE_TUNNELS)
             }
@@ -411,6 +508,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             current_window_label,
             get_saved_layout,
             save_window_layout,
+            get_keyboard_shortcuts,
+            get_terminal_font,
             remote::ssh_connect,
             remote::ssh_quick_connect,
             remote::ssh_write,

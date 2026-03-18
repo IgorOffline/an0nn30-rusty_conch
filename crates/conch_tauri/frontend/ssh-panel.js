@@ -14,6 +14,7 @@
   let sessionListEl = null;
   let tunnelsSectionEl = null;
   let fitActiveTabFn = null;
+  let refocusTerminalFn = null;
 
   // State
   let serverData = { folders: [], ungrouped: [], ssh_config: [] };
@@ -29,6 +30,7 @@
     panelEl = opts.panelEl;
     panelWrapEl = opts.panelWrapEl;
     resizeHandleEl = opts.resizeHandleEl;
+    refocusTerminalFn = opts.refocusTerminal;
 
     panelEl.innerHTML = `
       <div class="ssh-panel-header">
@@ -113,6 +115,7 @@
           hidePanel();
           panelWasHiddenBeforeQuickConnect = false;
         }
+        if (refocusTerminalFn) refocusTerminalFn();
       }
     });
 
@@ -167,18 +170,9 @@
   }
 
   function handleGlobalKeydown(e) {
-    // Cmd+/ — focus quick connect
-    if ((e.metaKey || e.ctrlKey) && e.key === '/') {
-      e.preventDefault();
-      focusQuickConnect();
-      return;
-    }
-    // Cmd+Shift+S — toggle panel
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 's') {
-      e.preventDefault();
-      togglePanel();
-      return;
-    }
+    // Keyboard shortcuts are now handled via native menu accelerators.
+    // The menu emits events which are caught in the menu-action listener.
+    // Keep Escape handling for the quick connect input (handled in its own listener).
   }
 
   // ---------------------------------------------------------------------------
