@@ -425,5 +425,5 @@
     return String(str || '').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  exports.tunnelManager = { init, show };
+  exports.tunnelManager = { init, show, showEdit: showEditTunnelForm };
 })(window);

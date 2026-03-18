@@ -10,6 +10,7 @@
   let serverListEl = null;
   let quickConnectEl = null;
   let sessionListEl = null;
+  let tunnelsSectionEl = null;
   let fitActiveTabFn = null;
 
   // State
@@ -38,12 +39,14 @@
                spellcheck="false" autocomplete="off" />
       </div>
       <div class="ssh-active-sessions" id="ssh-active-sessions"></div>
+      <div class="ssh-tunnels-section" id="ssh-tunnels-section"></div>
       <div class="ssh-server-list" id="ssh-server-list"></div>
     `;
 
     serverListEl = panelEl.querySelector('#ssh-server-list');
     quickConnectEl = panelEl.querySelector('#ssh-quick-connect-input');
     sessionListEl = panelEl.querySelector('#ssh-active-sessions');
+    tunnelsSectionEl = panelEl.querySelector('#ssh-tunnels-section');
 
     // Quick connect input
     quickConnectEl.addEventListener('keydown', (e) => {
@@ -137,6 +140,7 @@
     }
     renderServerList();
     await refreshSessions();
+    await refreshTunnels();
   }
 
   async function refreshSessions() {
@@ -255,6 +259,119 @@
     }
 
     sessionListEl.appendChild(frag);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tunnels section in sidebar
+  // ---------------------------------------------------------------------------
+
+  async function refreshTunnels() {
+    let tunnels = [];
+    try {
+      tunnels = await invoke('tunnel_get_all');
+    } catch (e) {
+      console.error('Failed to load tunnels:', e);
+    }
+    renderTunnels(tunnels);
+  }
+
+  function renderTunnels(tunnels) {
+    tunnelsSectionEl.innerHTML = '';
+    if (tunnels.length === 0 && !tunnelsSectionEl.dataset.showEmpty) return;
+
+    const frag = document.createDocumentFragment();
+
+    // Separator + header
+    const sep = document.createElement('div');
+    sep.className = 'ssh-panel-separator';
+    frag.appendChild(sep);
+
+    const headerRow = document.createElement('div');
+    headerRow.className = 'ssh-tunnels-header';
+    headerRow.innerHTML =
+      `<span class="ssh-section-header-inline">Tunnels</span>` +
+      `<button class="ssh-icon-btn ssh-icon-btn-sm" id="ssh-add-tunnel" title="New Tunnel">+</button>`;
+    frag.appendChild(headerRow);
+
+    for (const t of tunnels) {
+      frag.appendChild(createTunnelNode(t));
+    }
+
+    if (tunnels.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'ssh-tunnel-empty';
+      empty.textContent = 'No tunnels configured';
+      frag.appendChild(empty);
+    }
+
+    tunnelsSectionEl.appendChild(frag);
+
+    // Wire add button
+    tunnelsSectionEl.querySelector('#ssh-add-tunnel').addEventListener('click', () => {
+      if (window.tunnelManager) window.tunnelManager.show();
+    });
+  }
+
+  function createTunnelNode(tunnel) {
+    const el = document.createElement('div');
+    el.className = 'ssh-tunnel-node';
+
+    const status = tunnel.status || null;
+    let dotClass = 'inactive';
+    if (status === 'active') dotClass = 'active';
+    else if (status === 'connecting') dotClass = 'connecting';
+    else if (status && status.startsWith('error')) dotClass = 'error';
+
+    const remote = `${tunnel.remote_host}:${tunnel.remote_port}`;
+    const desc = `:${tunnel.local_port} \u2192 ${remote}`;
+
+    el.innerHTML =
+      `<span class="tunnel-dot ${dotClass}"></span>` +
+      `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>` +
+      `<span class="ssh-tunnel-detail">${esc(desc)}</span>`;
+
+    // Click to toggle start/stop
+    el.addEventListener('click', async () => {
+      if (status === 'active' || status === 'connecting') {
+        try { await invoke('tunnel_stop', { tunnelId: tunnel.id }); } catch (e) { console.error(e); }
+      } else {
+        try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (e) { alert('Tunnel error: ' + e); }
+      }
+      setTimeout(refreshTunnels, 500);
+    });
+
+    // Right-click for context menu
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showTunnelContextMenu(e, tunnel, status);
+    });
+
+    return el;
+  }
+
+  function showTunnelContextMenu(e, tunnel, status) {
+    const items = [];
+    if (status === 'active' || status === 'connecting') {
+      items.push({ label: 'Stop', action: async () => {
+        try { await invoke('tunnel_stop', { tunnelId: tunnel.id }); } catch (err) { console.error(err); }
+        setTimeout(refreshTunnels, 300);
+      }});
+    } else {
+      items.push({ label: 'Start', action: async () => {
+        try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (err) { alert('Tunnel error: ' + err); }
+        setTimeout(refreshTunnels, 500);
+      }});
+    }
+    items.push({ label: 'Edit', action: () => {
+      if (window.tunnelManager) window.tunnelManager.showEdit(tunnel);
+    }});
+    items.push({ type: 'separator' });
+    items.push({ label: 'Delete', danger: true, action: async () => {
+      try { await invoke('tunnel_delete', { tunnelId: tunnel.id }); } catch (err) { console.error(err); }
+      refreshTunnels();
+    }});
+
+    showContextMenu(e, items);
   }
 
   // ---------------------------------------------------------------------------
