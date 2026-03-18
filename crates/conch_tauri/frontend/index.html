@@ -312,6 +312,25 @@
     .pw-error { color: #ff5555; font-size: 11px; padding: 4px; }
     /* Plugin panel container */
     .plugin-panel-content { padding: 6px 8px; overflow-y: auto; flex: 1; }
+    /* -- Plugin Manager -- */
+    .plugin-manager-dialog { width: 720px; max-width: 95vw; }
+    .pm-body { max-height: 50vh; overflow-y: auto; }
+    .pm-table { width: 100%; border-collapse: collapse; font-size: 12px; color: #c5c8d5; }
+    .pm-table thead { position: sticky; top: 0; z-index: 1; }
+    .pm-table th {
+      padding: 6px 10px; text-align: left; font-weight: 500; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.5px; color: #6272a4;
+      background: #21222c; border-bottom: 1px solid #3a3d4f;
+    }
+    .pm-table td { padding: 6px 10px; border-bottom: 1px solid #2b2e3a; white-space: nowrap; }
+    .pm-row:hover td { background: #2b2e3a; }
+    .pm-col-status { width: 90px; }
+    .pm-col-name { font-weight: 500; }
+    .pm-col-version { color: #6272a4; width: 60px; }
+    .pm-col-path { max-width: 160px; overflow: hidden; text-overflow: ellipsis; color: #6272a4; font-size: 10px; }
+    .pm-th-path { width: 160px; }
+    .pm-col-action { width: 1%; white-space: nowrap; text-align: right; }
+    .pm-empty { padding: 24px; text-align: center; color: #6272a4; font-size: 13px; }
 
     #ssh-panel-wrap {
       display: flex;
@@ -602,6 +621,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script src="toast.js"></script>
+  <script src="plugin-manager.js"></script>
   <script src="plugin-widgets.js"></script>
   <script src="files-panel.js"></script>
   <script src="ssh-panel.js"></script>
@@ -1147,6 +1167,11 @@
         });
       }
 
+      // ---- Plugin manager init ----
+      if (window.pluginManager) {
+        window.pluginManager.init({ invoke });
+      }
+
       // ---- Plugin widget renderer init ----
       if (window.pluginWidgets) {
         window.pluginWidgets.init({
@@ -1321,6 +1346,10 @@
         }
         if (action === 'focus-sessions' && window.sshPanel) {
           window.sshPanel.focusQuickConnect();
+          return;
+        }
+        if (action === 'plugin-manager' && window.pluginManager) {
+          window.pluginManager.show();
           return;
         }
         if (action === 'manage-tunnels' && window.tunnelManager) {

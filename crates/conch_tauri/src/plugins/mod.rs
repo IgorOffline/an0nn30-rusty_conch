@@ -164,6 +164,160 @@ fn default_plugin_search_paths() -> Vec<std::path::PathBuf> {
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Plugin manager types
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DiscoveredPlugin {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub plugin_type: String,
+    pub source: String,  // "lua" or "java"
+    pub path: String,
+    pub loaded: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Plugin manager commands
+// ---------------------------------------------------------------------------
+
+/// Scan all search paths and return discovered plugins with their status.
+#[tauri::command]
+pub(crate) fn scan_plugins(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+) -> Vec<DiscoveredPlugin> {
+    let ps = state.lock();
+    let search_paths = default_plugin_search_paths();
+    let loaded_names: std::collections::HashSet<String> = ps
+        .running_lua
+        .iter()
+        .map(|p| p.meta.name.clone())
+        .collect();
+
+    let mut result = Vec::new();
+
+    // Discover Lua plugins
+    for dir in &search_paths {
+        if !dir.exists() { continue; }
+        let discovered = runner::discover(dir);
+        for plugin in &discovered {
+            result.push(DiscoveredPlugin {
+                name: plugin.meta.name.clone(),
+                description: plugin.meta.description.clone(),
+                version: plugin.meta.version.clone(),
+                plugin_type: format!("{:?}", plugin.meta.plugin_type),
+                source: "Lua".into(),
+                path: plugin.path.to_string_lossy().to_string(),
+                loaded: loaded_names.contains(&plugin.meta.name),
+            });
+        }
+    }
+
+    // Discover Java plugins (JAR files)
+    for dir in &search_paths {
+        if !dir.exists() { continue; }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "jar") {
+                    let name = path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let loaded = ps.java_mgr.as_ref().map_or(false, |mgr| mgr.is_loaded(&name));
+                    result.push(DiscoveredPlugin {
+                        name: name.clone(),
+                        description: String::new(),
+                        version: String::new(),
+                        plugin_type: "Unknown".into(),
+                        source: "Java".into(),
+                        path: path.to_string_lossy().to_string(),
+                        loaded,
+                    });
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Enable (load) a plugin by name and path.
+#[tauri::command]
+pub(crate) fn enable_plugin(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    name: String,
+    source: String,
+    path: String,
+) -> Result<(), String> {
+    let mut ps = state.lock();
+
+    if source == "Lua" {
+        // Find the discovered plugin by path.
+        let discovered = runner::discover(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new(".")));
+        let plugin = discovered.iter().find(|p| p.meta.name == name)
+            .ok_or_else(|| format!("Plugin '{name}' not found at {path}"))?;
+
+        let host_api: Arc<dyn conch_plugin::HostApi> = Arc::new(TauriHostApi {
+            name: name.clone(),
+            app_handle: app.clone(),
+            bus: Arc::clone(&ps.bus),
+            panels: Arc::clone(&ps.panels),
+        });
+
+        let mailbox_rx = ps.bus.register_plugin(&name);
+        let mailbox_tx = ps.bus.sender_for(&name)
+            .ok_or_else(|| "Failed to get mailbox sender".to_string())?;
+
+        let running = runner::spawn_lua_plugin(plugin, host_api, mailbox_tx, mailbox_rx)
+            .map_err(|e| format!("Failed to start: {e}"))?;
+        ps.running_lua.push(running);
+        Ok(())
+    } else if source == "Java" {
+        if let Some(ref mut mgr) = ps.java_mgr {
+            mgr.load_plugin(std::path::Path::new(&path))
+                .map(|_| ())
+                .map_err(|e| format!("Failed to load JAR: {e}"))
+        } else {
+            Err("Java plugin manager not initialized".into())
+        }
+    } else {
+        Err(format!("Unknown plugin source: {source}"))
+    }
+}
+
+/// Disable (unload) a plugin by name.
+#[tauri::command]
+pub(crate) fn disable_plugin(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    name: String,
+    source: String,
+) -> Result<(), String> {
+    let mut ps = state.lock();
+
+    if source == "Lua" {
+        if let Some(idx) = ps.running_lua.iter().position(|p| p.meta.name == name) {
+            let plugin = &ps.running_lua[idx];
+            let _ = plugin.sender.blocking_send(conch_plugin::bus::PluginMail::Shutdown);
+            ps.running_lua.remove(idx);
+            ps.bus.unregister_plugin(&name);
+            Ok(())
+        } else {
+            Err(format!("Plugin '{name}' is not running"))
+        }
+    } else if source == "Java" {
+        if let Some(ref mut mgr) = ps.java_mgr {
+            mgr.unload_plugin(&name).map_err(|e| format!("Failed to unload: {e}"))
+        } else {
+            Err("Java plugin manager not initialized".into())
+        }
+    } else {
+        Err(format!("Unknown plugin source: {source}"))
+    }
+}
+
 /// Get all registered plugin panels.
 #[tauri::command]
 pub(crate) fn get_plugin_panels(

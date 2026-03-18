@@ -26,6 +26,7 @@ const MENU_NEW_WINDOW_ID: &str = "file.new_window";
 const MENU_TOGGLE_LEFT_PANEL_ID: &str = "view.toggle_left_panel";
 const MENU_TOGGLE_RIGHT_PANEL_ID: &str = "view.toggle_right_panel";
 const MENU_FOCUS_SESSIONS_ID: &str = "view.focus_sessions";
+const MENU_PLUGIN_MANAGER_ID: &str = "tools.plugin_manager";
 const MENU_MANAGE_TUNNELS_ID: &str = "tools.manage_tunnels";
 const MENU_ACTION_EVENT: &str = "menu-action";
 const MENU_ACTION_NEW_TAB: &str = "new-tab";
@@ -33,6 +34,7 @@ const MENU_ACTION_CLOSE_TAB: &str = "close-tab";
 const MENU_ACTION_TOGGLE_LEFT_PANEL: &str = "toggle-left-panel";
 const MENU_ACTION_TOGGLE_RIGHT_PANEL: &str = "toggle-right-panel";
 const MENU_ACTION_FOCUS_SESSIONS: &str = "focus-sessions";
+const MENU_ACTION_PLUGIN_MANAGER: &str = "plugin-manager";
 const MENU_ACTION_MANAGE_TUNNELS: &str = "manage-tunnels";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
@@ -353,6 +355,13 @@ fn build_app_menu<R: tauri::Runtime>(
         &[&toggle_left, &toggle_right, &PredefinedMenuItem::separator(app)?, &focus_sessions],
     )?;
 
+    let plugin_manager = MenuItem::with_id(
+        app,
+        MENU_PLUGIN_MANAGER_ID,
+        "Plugin Manager\u{2026}",
+        true,
+        None::<&str>,
+    )?;
     let manage_tunnels = MenuItem::with_id(
         app,
         MENU_MANAGE_TUNNELS_ID,
@@ -360,7 +369,12 @@ fn build_app_menu<R: tauri::Runtime>(
         true,
         Some("CmdOrCtrl+Shift+T"),
     )?;
-    let tools_menu = Submenu::with_items(app, "Tools", true, &[&manage_tunnels])?;
+    let tools_menu = Submenu::with_items(
+        app,
+        "Tools",
+        true,
+        &[&plugin_manager, &PredefinedMenuItem::separator(app)?, &manage_tunnels],
+    )?;
 
     let window_menu = Submenu::with_items(
         app,
@@ -538,6 +552,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             MENU_FOCUS_SESSIONS_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_FOCUS_SESSIONS)
             }
+            MENU_PLUGIN_MANAGER_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_PLUGIN_MANAGER)
+            }
             MENU_MANAGE_TUNNELS_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_MANAGE_TUNNELS)
             }
@@ -598,6 +615,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::tunnel_save,
             remote::tunnel_delete,
             remote::tunnel_get_all,
+            plugins::scan_plugins,
+            plugins::enable_plugin,
+            plugins::disable_plugin,
             plugins::get_plugin_panels,
             plugins::get_panel_widgets,
             plugins::plugin_widget_event,
