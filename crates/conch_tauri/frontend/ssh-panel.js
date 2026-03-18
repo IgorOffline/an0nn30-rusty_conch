@@ -547,7 +547,7 @@
       }});
     } else {
       items.push({ label: 'Start', action: async () => {
-        try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (err) { alert('Tunnel error: ' + err); }
+        try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (err) { window.toast.error('Tunnel Error', String(err)); }
         setTimeout(refreshTunnels, 500);
       }});
     }
@@ -719,7 +719,7 @@
           createSshTabFn({ serverId: entry.id, password: password || undefined });
         }
       })
-      .catch((e) => alert('Failed to save: ' + e));
+      .catch((e) => window.toast.error('Save Failed', String(e)));
   }
 
   // ---------------------------------------------------------------------------
@@ -761,7 +761,7 @@
       const name = nameInput.value.trim();
       if (!name) { nameInput.focus(); return; }
       removeOverlay();
-      invoke('remote_add_folder', { name }).then(() => refreshAll()).catch((e) => alert('Failed: ' + e));
+      invoke('remote_add_folder', { name }).then(() => refreshAll()).catch((e) => window.toast.error('Folder Error', String(e)));
     };
 
     overlay.querySelector('#fd-cancel').addEventListener('click', removeOverlay);
@@ -804,7 +804,7 @@
       if (!name) { nameInput.focus(); return; }
       removeOverlay();
       invoke('remote_rename_folder', { folderId: folder.id, newName: name })
-        .then(() => refreshAll()).catch((e) => alert('Failed: ' + e));
+        .then(() => refreshAll()).catch((e) => window.toast.error('Error', String(e)));
     };
 
     overlay.querySelector('#rf-cancel').addEventListener('click', removeOverlay);

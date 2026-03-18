@@ -163,7 +163,7 @@
     try {
       await invoke('tunnel_stop', { tunnelId });
     } catch (e) {
-      alert('Failed to stop tunnel: ' + e);
+      window.toast.error('Tunnel Error', 'Failed to stop: ' + e);
     }
     show();
   }
@@ -186,7 +186,7 @@
     try {
       await invoke('tunnel_delete', { tunnelId: tunnel.id });
     } catch (e) {
-      alert('Failed to delete tunnel: ' + e);
+      window.toast.error('Tunnel Error', 'Failed to delete: ' + e);
     }
     show();
   }
@@ -268,12 +268,12 @@
     const label = overlay.querySelector('#nt-label').value.trim();
 
     if (!localPort || localPort < 1 || localPort > 65535) {
-      alert('Local port must be between 1 and 65535.');
+      window.toast.warn('Invalid Port', 'Local port must be between 1 and 65535.');
       overlay.querySelector('#nt-local-port').focus();
       return;
     }
     if (!remotePort || remotePort < 1 || remotePort > 65535) {
-      alert('Remote port must be between 1 and 65535.');
+      window.toast.warn('Invalid Port', 'Remote port must be between 1 and 65535.');
       overlay.querySelector('#nt-remote-port').focus();
       return;
     }
@@ -296,12 +296,12 @@
       await invoke('tunnel_save', { tunnel });
       // Start connecting immediately
       invoke('tunnel_start', { tunnelId: tunnel.id }).catch((e) => {
-        alert('Tunnel start error: ' + e);
+        window.toast.error('Tunnel Error', String(e));
       });
       // Show the manager with updated state after a brief delay
       setTimeout(() => show(), 800);
     } catch (e) {
-      alert('Failed to save tunnel: ' + e);
+      window.toast.error('Save Failed', String(e));
       show();
     }
   }
@@ -381,11 +381,11 @@
     const label = overlay.querySelector('#et-label').value.trim();
 
     if (!localPort || localPort < 1 || localPort > 65535) {
-      alert('Local port must be between 1 and 65535.');
+      window.toast.warn('Invalid Port', 'Local port must be between 1 and 65535.');
       return;
     }
     if (!remotePort || remotePort < 1 || remotePort > 65535) {
-      alert('Remote port must be between 1 and 65535.');
+      window.toast.warn('Invalid Port', 'Remote port must be between 1 and 65535.');
       return;
     }
 
@@ -406,7 +406,7 @@
       await invoke('tunnel_stop', { tunnelId: original.id }).catch(() => {});
       await invoke('tunnel_save', { tunnel });
     } catch (e) {
-      alert('Failed to save tunnel: ' + e);
+      window.toast.error('Save Failed', String(e));
     }
     show();
   }

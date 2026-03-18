@@ -442,7 +442,7 @@
   async function doDownload() {
     const entry = getSelectedEntry(remotePane);
     if (!entry || !activeRemoteTabId) return;
-    if (entry.is_dir) { alert('Directory download not yet supported.'); return; }
+    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory download not yet supported.'); return; }
 
     const remotePath = remotePane.currentPath + '/' + entry.name;
     const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
@@ -456,14 +456,14 @@
       // Mark as transferring in local pane
       localPane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
     } catch (e) {
-      alert('Download failed: ' + e);
+      window.toast.error('Download Failed', String(e));
     }
   }
 
   async function doUpload() {
     const entry = getSelectedEntry(localPane);
     if (!entry || !activeRemoteTabId) return;
-    if (entry.is_dir) { alert('Directory upload not yet supported.'); return; }
+    if (entry.is_dir) { window.toast.warn('Not Supported', 'Directory upload not yet supported.'); return; }
 
     const localPath = localPane.currentPath.replace(/\/$/, '') + '/' + entry.name;
     const remotePath = remotePane.currentPath + '/' + entry.name;
@@ -477,7 +477,7 @@
       // Mark as transferring in remote pane
       remotePane.transferStatus[entry.name] = { status: 'in_progress', percent: 0, transferId };
     } catch (e) {
-      alert('Upload failed: ' + e);
+      window.toast.error('Upload Failed', String(e));
     }
   }
 
@@ -539,10 +539,16 @@
       toast._lastBytes = 0;
       toast._lastTime = Date.now();
 
-      document.body.appendChild(toast);
+      // Use the global toast container so transfer toasts stack with other toasts.
+      let container = document.getElementById('toast-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        document.body.appendChild(container);
+      }
+      container.appendChild(toast);
       requestAnimationFrame(() => toast.classList.add('visible'));
       activeTransferToasts.set(p.transfer_id, toast);
-      repositionToasts();
     }
 
     // Update content
@@ -571,32 +577,15 @@
     toast.classList.remove('visible');
     activeTransferToasts.delete(transferId);
     setTimeout(() => toast.remove(), 300);
-    repositionToasts();
-  }
-
-  function repositionToasts() {
-    let bottom = 16;
-    for (const toast of activeTransferToasts.values()) {
-      toast.style.bottom = bottom + 'px';
-      bottom += toast.offsetHeight + 8;
-    }
   }
 
   function showCompletionToast(fileName, kind, error) {
-    const toast = document.createElement('div');
-    const isError = !!error;
-    const icon = kind === 'download' ? '\u2193' : '\u2191';
-    const msg = isError
-      ? `${icon} Failed: ${fileName}` + (error ? ' \u2014 ' + error : '')
-      : `${icon} Complete: ${fileName}`;
-    toast.className = 'fp-toast' + (isError ? ' error' : '');
-    toast.textContent = msg;
-    document.body.appendChild(toast);
-    requestAnimationFrame(() => toast.classList.add('visible'));
-    setTimeout(() => {
-      toast.classList.remove('visible');
-      setTimeout(() => toast.remove(), 300);
-    }, 4000);
+    const arrow = kind === 'download' ? '\u2193' : '\u2191';
+    if (error) {
+      window.toast.error(`${arrow} Transfer Failed: ${fileName}`, error);
+    } else {
+      window.toast.success(`${arrow} Transfer Complete: ${fileName}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
