@@ -491,42 +491,38 @@
       errorMsg = status.replace(/^error:\s*/, '');
     }
 
-    if (errorMsg) {
-      el.title = 'Error: ' + errorMsg + ' (click to retry)';
-    }
+    const isConnected = status === 'active' || status === 'connecting';
+    const btnLabel = isConnected ? 'Disconnect' : 'Connect';
 
     el.innerHTML =
       `<span class="tunnel-dot ${dotClass}"></span>` +
-      `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>`;
+      `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>` +
+      `<button class="ssh-tunnel-btn">${btnLabel}</button>`;
 
-    // Click to toggle start/stop/retry
-    el.addEventListener('click', async () => {
-      if (status === 'active' || status === 'connecting') {
-        try { await invoke('tunnel_stop', { tunnelId: tunnel.id }); } catch (e) { console.error(e); }
-        setTimeout(refreshTunnels, 300);
-      } else if (errorMsg && window.tunnelManager) {
-        // Show the error in a dialog with retry option
-        window.tunnelManager.showError('Tunnel Error', errorMsg, async () => {
-          try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (e) {
-            window.tunnelManager.showError('Tunnel Error', String(e));
-          }
-          setTimeout(refreshTunnels, 500);
-        });
+    if (errorMsg) {
+      el.title = 'Error: ' + errorMsg;
+    }
+
+    const btn = el.querySelector('.ssh-tunnel-btn');
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      if (isConnected) {
+        try {
+          await invoke('tunnel_stop', { tunnelId: tunnel.id });
+          window.toast.info('Tunnel Disconnected', tunnel.label);
+        } catch (err) {
+          window.toast.error('Tunnel Error', String(err));
+        }
       } else {
         try {
           await invoke('tunnel_start', { tunnelId: tunnel.id });
-        } catch (e) {
-          if (window.tunnelManager) {
-            window.tunnelManager.showError('Tunnel Error', String(e), async () => {
-              try { await invoke('tunnel_start', { tunnelId: tunnel.id }); } catch (e2) {
-                window.tunnelManager.showError('Tunnel Error', String(e2));
-              }
-              setTimeout(refreshTunnels, 500);
-            });
-          }
+          window.toast.success('Tunnel Connected', tunnel.label);
+        } catch (err) {
+          window.toast.error('Tunnel Error', String(err));
         }
-        setTimeout(refreshTunnels, 500);
       }
+      setTimeout(refreshTunnels, 400);
     });
 
     // Right-click for context menu
