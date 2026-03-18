@@ -163,6 +163,75 @@
       padding: 5px 14px; cursor: pointer; font-size: 12px; color: #f8f8f2;
     }
     .ssh-context-menu-item:hover { background: #44475a; }
+    .ssh-context-menu-item.danger { color: #ff5555; }
+    .ssh-context-menu-item.danger:hover { background: #ff5555; color: #f8f8f2; }
+    .ssh-context-menu-sep { height: 1px; background: #3a3d4f; margin: 4px 0; }
+    /* -- Form overlay -- */
+    .ssh-overlay {
+      position: fixed; inset: 0; z-index: 3000;
+      background: rgba(0,0,0,0.5); display: flex;
+      align-items: center; justify-content: center;
+    }
+    .ssh-form {
+      background: #21222c; border: 1px solid #4f5368;
+      border-radius: 10px; width: 460px; max-width: 90vw;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #f8f8f2;
+    }
+    .ssh-form-small { width: 320px; }
+    .ssh-form-title {
+      padding: 14px 18px 10px; font-size: 15px; font-weight: 600;
+      border-bottom: 1px solid #3a3d4f;
+    }
+    .ssh-form-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+    .ssh-form-row { display: flex; gap: 10px; }
+    .ssh-form-label {
+      display: flex; flex-direction: column; gap: 3px;
+      font-size: 11px; color: #8b8fa3; font-weight: 500;
+    }
+    .ssh-form-label input,
+    .ssh-form-label select {
+      padding: 6px 8px; background: #2b2e3a; border: 1px solid #3a3d4f;
+      border-radius: 5px; color: #f8f8f2; font: 13px/1.3 "JetBrains Mono", monospace;
+      outline: none; width: 100%;
+    }
+    .ssh-form-label input:focus,
+    .ssh-form-label select:focus { border-color: #6272a4; }
+    .ssh-form-label input::placeholder { color: #6272a4; }
+    .ssh-form-label input[type="number"] { -moz-appearance: textfield; }
+    .ssh-form-label input[type="number"]::-webkit-inner-spin-button,
+    .ssh-form-label input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+    .ssh-form-label select {
+      -webkit-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236272a4'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 8px center;
+      padding-right: 24px; cursor: pointer;
+    }
+    .ssh-form-advanced {
+      border: 1px solid #3a3d4f; border-radius: 5px; padding: 0;
+    }
+    .ssh-form-advanced summary {
+      padding: 6px 10px; cursor: pointer; font-size: 11px;
+      color: #8b8fa3; user-select: none;
+    }
+    .ssh-form-advanced summary:hover { color: #f8f8f2; }
+    .ssh-form-advanced[open] summary { border-bottom: 1px solid #3a3d4f; margin-bottom: 8px; }
+    .ssh-form-advanced[open] { padding-bottom: 10px; }
+    .ssh-form-advanced .ssh-form-label { padding: 0 10px; }
+    .ssh-form-advanced .ssh-form-label + .ssh-form-label { margin-top: 8px; }
+    .ssh-form-buttons {
+      display: flex; justify-content: flex-end; gap: 8px;
+      padding: 10px 18px 14px; border-top: 1px solid #3a3d4f;
+    }
+    .ssh-form-btn {
+      padding: 6px 16px; border: 1px solid #3a3d4f; border-radius: 5px;
+      background: #2b2e3a; color: #c5c8d5; cursor: pointer;
+      font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .ssh-form-btn:hover { background: #3a3d4f; color: #f8f8f2; }
+    .ssh-form-btn.primary { background: #6272a4; color: #f8f8f2; border-color: #6272a4; }
+    .ssh-form-btn.primary:hover { background: #7283b5; }
     .terminal-pane {
       position: absolute;
       inset: 0;
@@ -676,18 +745,9 @@
           listen: listenOnCurrentWindow,
           createSshTab,
           panelEl: sshPanelEl,
+          fitActiveTab: () => fitAndResizeTab(currentTab()),
         });
       }
-
-      // Toggle SSH panel with Cmd+Shift+S
-      document.addEventListener('keydown', (e) => {
-        if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 's') {
-          e.preventDefault();
-          sshPanelEl.classList.toggle('hidden');
-          // Refit the active terminal since layout changed
-          setTimeout(() => fitAndResizeTab(currentTab()), 50);
-        }
-      });
 
       await listenOnCurrentWindow('pty-output', (event) => {
         const payload = event.payload || {};

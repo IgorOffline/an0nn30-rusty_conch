@@ -1,6 +1,4 @@
-// SSH Panel — server tree, quick connect, session management.
-//
-// Depends on: invoke, listen (Tauri APIs) and createSshTab (from main app).
+// SSH Panel — server tree, quick connect, connection form, session management.
 
 (function (exports) {
   'use strict';
@@ -12,27 +10,32 @@
   let serverListEl = null;
   let quickConnectEl = null;
   let sessionListEl = null;
+  let fitActiveTabFn = null;
 
-  // Cached server data
+  // State
   let serverData = { folders: [], ungrouped: [], ssh_config: [] };
+  let panelWasHiddenBeforeQuickConnect = false;
 
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
     createSshTabFn = opts.createSshTab;
+    fitActiveTabFn = opts.fitActiveTab;
     panelEl = opts.panelEl;
 
     panelEl.innerHTML = `
       <div class="ssh-panel-header">
         <span class="ssh-panel-title">Sessions</span>
         <div class="ssh-panel-actions">
-          <button class="ssh-icon-btn" id="ssh-add-server" title="Add Server">+</button>
-          <button class="ssh-icon-btn" id="ssh-add-folder" title="Add Folder">&#128193;</button>
+          <button class="ssh-icon-btn" id="ssh-add-server" title="New Connection">+</button>
+          <button class="ssh-icon-btn" id="ssh-add-folder" title="New Folder">&#128193;</button>
           <button class="ssh-icon-btn" id="ssh-refresh" title="Refresh">&#8635;</button>
         </div>
       </div>
       <div class="ssh-quick-connect">
-        <input type="text" id="ssh-quick-connect-input" placeholder="user@host:port" spellcheck="false" />
+        <input type="text" id="ssh-quick-connect-input"
+               placeholder="Quick connect (user@host:port)"
+               spellcheck="false" autocomplete="off" />
       </div>
       <div class="ssh-active-sessions" id="ssh-active-sessions"></div>
       <div class="ssh-server-list" id="ssh-server-list"></div>
@@ -42,28 +45,88 @@
     quickConnectEl = panelEl.querySelector('#ssh-quick-connect-input');
     sessionListEl = panelEl.querySelector('#ssh-active-sessions');
 
-    // Quick connect
+    // Quick connect input
     quickConnectEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const spec = quickConnectEl.value.trim();
         if (spec) {
           quickConnectEl.value = '';
+          quickConnectEl.blur();
           createSshTabFn({ spec });
+        }
+      }
+      if (e.key === 'Escape') {
+        quickConnectEl.value = '';
+        quickConnectEl.blur();
+        if (panelWasHiddenBeforeQuickConnect) {
+          hidePanel();
+          panelWasHiddenBeforeQuickConnect = false;
         }
       }
     });
 
     // Buttons
-    panelEl.querySelector('#ssh-add-server').addEventListener('click', showAddServerDialog);
+    panelEl.querySelector('#ssh-add-server').addEventListener('click', () => showConnectionForm());
     panelEl.querySelector('#ssh-add-folder').addEventListener('click', showAddFolderDialog);
     panelEl.querySelector('#ssh-refresh').addEventListener('click', refreshAll);
 
-    // Listen for session changes
+    // Auth prompts
     listen('ssh-host-key-prompt', handleHostKeyPrompt);
     listen('ssh-password-prompt', handlePasswordPrompt);
 
+    // Global shortcuts
+    document.addEventListener('keydown', handleGlobalKeydown);
+
     refreshAll();
   }
+
+  // ---------------------------------------------------------------------------
+  // Panel visibility
+  // ---------------------------------------------------------------------------
+
+  function isHidden() {
+    return panelEl.classList.contains('hidden');
+  }
+
+  function showPanel() {
+    panelEl.classList.remove('hidden');
+    if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50);
+  }
+
+  function hidePanel() {
+    panelEl.classList.add('hidden');
+    if (fitActiveTabFn) setTimeout(fitActiveTabFn, 50);
+  }
+
+  function togglePanel() {
+    if (isHidden()) showPanel(); else hidePanel();
+  }
+
+  function focusQuickConnect() {
+    panelWasHiddenBeforeQuickConnect = isHidden();
+    if (isHidden()) showPanel();
+    quickConnectEl.focus();
+    quickConnectEl.select();
+  }
+
+  function handleGlobalKeydown(e) {
+    // Cmd+/ — focus quick connect
+    if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+      e.preventDefault();
+      focusQuickConnect();
+      return;
+    }
+    // Cmd+Shift+S — toggle panel
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      togglePanel();
+      return;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data
+  // ---------------------------------------------------------------------------
 
   async function refreshAll() {
     try {
@@ -86,29 +149,20 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering
+  // Server tree rendering
   // ---------------------------------------------------------------------------
 
   function renderServerList() {
     const frag = document.createDocumentFragment();
 
-    // Folders
     for (const folder of serverData.folders) {
-      const folderEl = createFolderNode(folder);
-      frag.appendChild(folderEl);
+      frag.appendChild(createFolderNode(folder));
     }
-
-    // Ungrouped
     for (const server of serverData.ungrouped) {
       frag.appendChild(createServerNode(server));
     }
-
-    // SSH config imports (dimmed section)
     if (serverData.ssh_config.length > 0) {
-      const header = document.createElement('div');
-      header.className = 'ssh-section-header';
-      header.textContent = '~/.ssh/config';
-      frag.appendChild(header);
+      frag.appendChild(makeSectionHeader('~/.ssh/config'));
       for (const server of serverData.ssh_config) {
         frag.appendChild(createServerNode(server, true));
       }
@@ -118,28 +172,43 @@
     serverListEl.appendChild(frag);
   }
 
+  function makeSectionHeader(text) {
+    const el = document.createElement('div');
+    el.className = 'ssh-section-header';
+    el.textContent = text;
+    return el;
+  }
+
   function createFolderNode(folder) {
     const el = document.createElement('div');
     el.className = 'ssh-folder';
 
     const header = document.createElement('div');
     header.className = 'ssh-folder-header';
-    header.innerHTML = `<span class="ssh-folder-arrow">${folder.expanded !== false ? '▼' : '▶'}</span>
-      <span class="ssh-folder-name">${esc(folder.name)}</span>
-      <span class="ssh-folder-count">${folder.entries.length}</span>`;
+    const expanded = folder.expanded !== false;
+    header.innerHTML =
+      `<span class="ssh-folder-arrow">${expanded ? '▼' : '▶'}</span>` +
+      `<span class="ssh-folder-name">${esc(folder.name)}</span>` +
+      `<span class="ssh-folder-count">${folder.entries.length}</span>`;
+
     header.addEventListener('click', () => {
-      const isExpanded = folder.expanded !== false;
-      invoke('remote_set_folder_expanded', { folderId: folder.id, expanded: !isExpanded }).catch(() => {});
-      folder.expanded = !isExpanded;
+      invoke('remote_set_folder_expanded', { folderId: folder.id, expanded: !expanded }).catch(() => {});
+      folder.expanded = !expanded;
       renderServerList();
     });
+
+    header.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showFolderContextMenu(e, folder);
+    });
+
     el.appendChild(header);
 
-    if (folder.expanded !== false) {
+    if (expanded) {
       const list = document.createElement('div');
       list.className = 'ssh-folder-entries';
       for (const server of folder.entries) {
-        list.appendChild(createServerNode(server));
+        list.appendChild(createServerNode(server, false, folder.id));
       }
       el.appendChild(list);
     }
@@ -147,7 +216,7 @@
     return el;
   }
 
-  function createServerNode(server, dimmed) {
+  function createServerNode(server, dimmed, folderId) {
     const el = document.createElement('div');
     el.className = 'ssh-server-node' + (dimmed ? ' dimmed' : '');
     el.title = `${server.user}@${server.host}:${server.port}`;
@@ -155,154 +224,359 @@
     const label = server.label || `${server.user}@${server.host}`;
     const detail = server.host + (server.port !== 22 ? ':' + server.port : '');
 
-    el.innerHTML = `<span class="ssh-server-label">${esc(label)}</span>
-      <span class="ssh-server-detail">${esc(detail)}</span>`;
+    el.innerHTML =
+      `<span class="ssh-server-label">${esc(label)}</span>` +
+      `<span class="ssh-server-detail">${esc(detail)}</span>`;
 
-    el.addEventListener('dblclick', () => {
-      createSshTabFn({ serverId: server.id });
-    });
+    el.addEventListener('dblclick', () => createSshTabFn({ serverId: server.id }));
 
-    // Context menu on right click
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      showServerContextMenu(e, server);
+      showServerContextMenu(e, server, folderId);
     });
 
     return el;
   }
 
   function renderSessions(sessions) {
-    if (!sessions || sessions.length === 0) {
-      sessionListEl.innerHTML = '';
-      return;
-    }
+    sessionListEl.innerHTML = '';
+    if (!sessions || sessions.length === 0) return;
 
     const frag = document.createDocumentFragment();
-    const header = document.createElement('div');
-    header.className = 'ssh-section-header';
-    header.textContent = 'Active';
-    frag.appendChild(header);
+    frag.appendChild(makeSectionHeader('Active'));
 
     for (const s of sessions) {
       const el = document.createElement('div');
       el.className = 'ssh-session-node';
-      el.innerHTML = `<span class="ssh-session-dot"></span>
-        <span class="ssh-session-label">${esc(s.user)}@${esc(s.host)}</span>`;
+      el.innerHTML =
+        `<span class="ssh-session-dot"></span>` +
+        `<span class="ssh-session-label">${esc(s.user)}@${esc(s.host)}</span>`;
       frag.appendChild(el);
     }
 
-    sessionListEl.innerHTML = '';
     sessionListEl.appendChild(frag);
   }
 
   // ---------------------------------------------------------------------------
-  // Dialogs (simple prompt-based for now)
+  // Connection form (modal overlay)
   // ---------------------------------------------------------------------------
 
-  function showAddServerDialog() {
-    const host = prompt('Host (e.g. example.com):');
-    if (!host) return;
+  function showConnectionForm(existing, defaultFolderId) {
+    removeOverlay();
 
-    const user = prompt('Username:', getCurrentUser());
-    if (!user) return;
+    const isEdit = !!existing;
+    const title = isEdit ? 'Edit SSH Connection' : 'New SSH Connection';
 
-    const portStr = prompt('Port:', '22');
-    const port = parseInt(portStr, 10) || 22;
+    // Build folder options
+    const folderOptions = [{ id: '', name: '(none)' }];
+    for (const f of serverData.folders) {
+      folderOptions.push({ id: f.id, name: f.name });
+    }
 
-    const label = prompt('Label (optional):', `${user}@${host}`);
+    // Determine default folder
+    let selectedFolder = defaultFolderId || '';
+    if (isEdit && !selectedFolder) {
+      for (const f of serverData.folders) {
+        if (f.entries.some((e) => e.id === existing.id)) {
+          selectedFolder = f.id;
+          break;
+        }
+      }
+    }
+
+    // Determine proxy state
+    let proxyType = 'none';
+    let proxyValue = '';
+    if (existing) {
+      if (existing.proxy_jump) { proxyType = 'jump'; proxyValue = existing.proxy_jump; }
+      else if (existing.proxy_command) { proxyType = 'command'; proxyValue = existing.proxy_command; }
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.innerHTML = `
+      <div class="ssh-form">
+        <div class="ssh-form-title">${esc(title)}</div>
+        <div class="ssh-form-body">
+          <label class="ssh-form-label">Session Name
+            <input type="text" id="cf-label" value="${attr(existing ? existing.label : '')}"
+                   placeholder="optional" spellcheck="false" />
+          </label>
+          <div class="ssh-form-row">
+            <label class="ssh-form-label" style="flex:1">Host / IP
+              <input type="text" id="cf-host" value="${attr(existing ? existing.host : '')}"
+                     placeholder="example.com" spellcheck="false" required />
+            </label>
+            <label class="ssh-form-label" style="width:80px">Port
+              <input type="number" id="cf-port" value="${existing ? existing.port : 22}" min="1" max="65535" />
+            </label>
+          </div>
+          <label class="ssh-form-label">Username
+            <input type="text" id="cf-user" value="${attr(existing ? existing.user : '')}"
+                   placeholder="root" spellcheck="false" />
+          </label>
+          <label class="ssh-form-label">Password
+            <input type="password" id="cf-password" value="" placeholder="leave empty for key auth" />
+          </label>
+          <label class="ssh-form-label">Private Key
+            <input type="text" id="cf-key-path" value="${attr(existing && existing.key_path ? existing.key_path : '')}"
+                   placeholder="~/.ssh/id_ed25519" spellcheck="false" />
+          </label>
+          <details class="ssh-form-advanced" ${proxyType !== 'none' ? 'open' : ''}>
+            <summary>Advanced</summary>
+            <label class="ssh-form-label">Proxy Type
+              <select id="cf-proxy-type">
+                <option value="none" ${proxyType === 'none' ? 'selected' : ''}>None</option>
+                <option value="jump" ${proxyType === 'jump' ? 'selected' : ''}>ProxyJump</option>
+                <option value="command" ${proxyType === 'command' ? 'selected' : ''}>ProxyCommand</option>
+              </select>
+            </label>
+            <label class="ssh-form-label">Proxy Value
+              <input type="text" id="cf-proxy-value" value="${attr(proxyValue)}"
+                     placeholder="user@jumphost or ssh -W %h:%p host" spellcheck="false" />
+            </label>
+          </details>
+          <label class="ssh-form-label">Save to Folder
+            <select id="cf-folder">
+              ${folderOptions.map((f) =>
+                `<option value="${attr(f.id)}" ${f.id === selectedFolder ? 'selected' : ''}>${esc(f.name)}</option>`
+              ).join('')}
+            </select>
+          </label>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="cf-cancel">Cancel</button>
+          <button class="ssh-form-btn" id="cf-save">Save</button>
+          <button class="ssh-form-btn primary" id="cf-save-connect">Save & Connect</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Focus the host field
+    const hostInput = overlay.querySelector('#cf-host');
+    setTimeout(() => hostInput.focus(), 50);
+
+    // Close on overlay background click
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) removeOverlay();
+    });
+
+    // Escape to close
+    const onKey = (e) => {
+      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    // Button handlers
+    overlay.querySelector('#cf-cancel').addEventListener('click', removeOverlay);
+    overlay.querySelector('#cf-save').addEventListener('click', () => submitForm(overlay, existing, false));
+    overlay.querySelector('#cf-save-connect').addEventListener('click', () => submitForm(overlay, existing, true));
+  }
+
+  function submitForm(overlay, existing, andConnect) {
+    const host = overlay.querySelector('#cf-host').value.trim();
+    if (!host) { overlay.querySelector('#cf-host').focus(); return; }
+
+    const label = overlay.querySelector('#cf-label').value.trim();
+    const port = parseInt(overlay.querySelector('#cf-port').value, 10) || 22;
+    const user = overlay.querySelector('#cf-user').value.trim() || 'root';
+    const password = overlay.querySelector('#cf-password').value;
+    const keyPath = overlay.querySelector('#cf-key-path').value.trim() || null;
+    const proxyType = overlay.querySelector('#cf-proxy-type').value;
+    const proxyValue = overlay.querySelector('#cf-proxy-value').value.trim();
+    const folderId = overlay.querySelector('#cf-folder').value || null;
+
+    const authMethod = password ? 'password' : 'key';
+    const proxyJump = proxyType === 'jump' && proxyValue ? proxyValue : null;
+    const proxyCommand = proxyType === 'command' && proxyValue ? proxyValue : null;
 
     const entry = {
-      id: crypto.randomUUID(),
+      id: existing ? existing.id : crypto.randomUUID(),
       label: label || `${user}@${host}`,
       host,
       port,
       user,
-      auth_method: 'key',
-      key_path: null,
-      proxy_command: null,
-      proxy_jump: null,
+      auth_method: authMethod,
+      key_path: keyPath,
+      proxy_command: proxyCommand,
+      proxy_jump: proxyJump,
     };
 
-    invoke('remote_save_server', { entry, folderId: null })
-      .then(() => refreshAll())
-      .catch((e) => alert('Failed to save server: ' + e));
+    removeOverlay();
+
+    invoke('remote_save_server', { entry, folderId })
+      .then(() => {
+        refreshAll();
+        if (andConnect) {
+          createSshTabFn({ serverId: entry.id, password: password || undefined });
+        }
+      })
+      .catch((e) => alert('Failed to save: ' + e));
   }
+
+  // ---------------------------------------------------------------------------
+  // Folder dialog (inline prompt-style)
+  // ---------------------------------------------------------------------------
 
   function showAddFolderDialog() {
-    const name = prompt('Folder name:');
-    if (!name) return;
+    removeOverlay();
 
-    invoke('remote_add_folder', { name })
-      .then(() => refreshAll())
-      .catch((e) => alert('Failed to create folder: ' + e));
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.innerHTML = `
+      <div class="ssh-form ssh-form-small">
+        <div class="ssh-form-title">New Folder</div>
+        <div class="ssh-form-body">
+          <label class="ssh-form-label">Name
+            <input type="text" id="fd-name" value="" placeholder="Folder name" spellcheck="false" />
+          </label>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="fd-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="fd-create">Create</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    const nameInput = overlay.querySelector('#fd-name');
+    setTimeout(() => nameInput.focus(), 50);
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
+    const onKey = (e) => {
+      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
+      if (e.key === 'Enter') { doCreate(); document.removeEventListener('keydown', onKey); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    const doCreate = () => {
+      const name = nameInput.value.trim();
+      if (!name) { nameInput.focus(); return; }
+      removeOverlay();
+      invoke('remote_add_folder', { name }).then(() => refreshAll()).catch((e) => alert('Failed: ' + e));
+    };
+
+    overlay.querySelector('#fd-cancel').addEventListener('click', removeOverlay);
+    overlay.querySelector('#fd-create').addEventListener('click', doCreate);
   }
 
-  function showServerContextMenu(event, server) {
-    // Remove existing context menu
-    removeContextMenu();
+  function showRenameFolderDialog(folder) {
+    removeOverlay();
 
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.innerHTML = `
+      <div class="ssh-form ssh-form-small">
+        <div class="ssh-form-title">Rename Folder</div>
+        <div class="ssh-form-body">
+          <label class="ssh-form-label">Name
+            <input type="text" id="rf-name" value="${attr(folder.name)}" spellcheck="false" />
+          </label>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="rf-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="rf-save">Save</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    const nameInput = overlay.querySelector('#rf-name');
+    setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
+    const onKey = (e) => {
+      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
+      if (e.key === 'Enter') { doSave(); document.removeEventListener('keydown', onKey); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    const doSave = () => {
+      const name = nameInput.value.trim();
+      if (!name) { nameInput.focus(); return; }
+      removeOverlay();
+      invoke('remote_rename_folder', { folderId: folder.id, newName: name })
+        .then(() => refreshAll()).catch((e) => alert('Failed: ' + e));
+    };
+
+    overlay.querySelector('#rf-cancel').addEventListener('click', removeOverlay);
+    overlay.querySelector('#rf-save').addEventListener('click', doSave);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Context menus
+  // ---------------------------------------------------------------------------
+
+  function showServerContextMenu(e, server, folderId) {
+    showContextMenu(e, [
+      { label: 'Connect', action: () => createSshTabFn({ serverId: server.id }) },
+      { label: 'Edit', action: () => showConnectionForm(server, folderId) },
+      { label: 'Duplicate', action: () => {
+        invoke('remote_duplicate_server', { serverId: server.id }).then(() => refreshAll()).catch(() => {});
+      }},
+      { type: 'separator' },
+      { label: 'Delete', danger: true, action: () => {
+        if (confirm(`Delete "${server.label}"?`)) {
+          invoke('remote_delete_server', { serverId: server.id }).then(() => refreshAll()).catch(() => {});
+        }
+      }},
+    ]);
+  }
+
+  function showFolderContextMenu(e, folder) {
+    showContextMenu(e, [
+      { label: 'Add Server Here', action: () => showConnectionForm(null, folder.id) },
+      { label: 'Rename', action: () => showRenameFolderDialog(folder) },
+      { type: 'separator' },
+      { label: 'Delete Folder', danger: true, action: () => {
+        if (confirm(`Delete folder "${folder.name}" and all servers in it?`)) {
+          invoke('remote_delete_folder', { folderId: folder.id }).then(() => refreshAll()).catch(() => {});
+        }
+      }},
+    ]);
+  }
+
+  function showContextMenu(e, items) {
+    removeContextMenu();
     const menu = document.createElement('div');
     menu.className = 'ssh-context-menu';
-    menu.style.left = event.clientX + 'px';
-    menu.style.top = event.clientY + 'px';
-
-    const items = [
-      { label: 'Connect', action: () => createSshTabFn({ serverId: server.id }) },
-      { label: 'Edit', action: () => editServer(server) },
-      { label: 'Duplicate', action: () => duplicateServer(server.id) },
-      { label: 'Delete', action: () => deleteServer(server) },
-    ];
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
 
     for (const item of items) {
+      if (item.type === 'separator') {
+        const sep = document.createElement('div');
+        sep.className = 'ssh-context-menu-sep';
+        menu.appendChild(sep);
+        continue;
+      }
       const el = document.createElement('div');
-      el.className = 'ssh-context-menu-item';
+      el.className = 'ssh-context-menu-item' + (item.danger ? ' danger' : '');
       el.textContent = item.label;
-      el.addEventListener('click', () => {
-        removeContextMenu();
-        item.action();
-      });
+      el.addEventListener('click', () => { removeContextMenu(); item.action(); });
       menu.appendChild(el);
     }
 
     document.body.appendChild(menu);
 
-    // Close on click outside
-    setTimeout(() => {
-      document.addEventListener('click', removeContextMenu, { once: true });
-    }, 0);
+    // Clamp to viewport
+    requestAnimationFrame(() => {
+      const rect = menu.getBoundingClientRect();
+      if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+      if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+    });
+
+    setTimeout(() => document.addEventListener('click', removeContextMenu, { once: true }), 0);
   }
 
   function removeContextMenu() {
-    const existing = document.querySelector('.ssh-context-menu');
-    if (existing) existing.remove();
+    document.querySelectorAll('.ssh-context-menu').forEach((el) => el.remove());
   }
 
-  function editServer(server) {
-    const host = prompt('Host:', server.host);
-    if (!host) return;
-    const user = prompt('Username:', server.user);
-    if (!user) return;
-    const portStr = prompt('Port:', String(server.port));
-    const port = parseInt(portStr, 10) || 22;
-    const label = prompt('Label:', server.label);
-
-    const entry = { ...server, host, user, port, label: label || `${user}@${host}` };
-    invoke('remote_save_server', { entry, folderId: null })
-      .then(() => refreshAll())
-      .catch((e) => alert('Failed to update server: ' + e));
-  }
-
-  function duplicateServer(serverId) {
-    invoke('remote_duplicate_server', { serverId })
-      .then(() => refreshAll())
-      .catch((e) => alert('Failed to duplicate: ' + e));
-  }
-
-  function deleteServer(server) {
-    if (!confirm(`Delete "${server.label}"?`)) return;
-    invoke('remote_delete_server', { serverId: server.id })
-      .then(() => refreshAll())
-      .catch((e) => alert('Failed to delete: ' + e));
+  function removeOverlay() {
+    document.querySelectorAll('.ssh-overlay').forEach((el) => el.remove());
   }
 
   // ---------------------------------------------------------------------------
@@ -331,10 +605,9 @@
     return el.innerHTML;
   }
 
-  function getCurrentUser() {
-    // No way to get $USER from JS, but the backend defaults to it anyway
-    return 'root';
+  function attr(str) {
+    return String(str || '').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  exports.sshPanel = { init, refreshAll, refreshSessions };
+  exports.sshPanel = { init, refreshAll, refreshSessions, togglePanel, focusQuickConnect, isHidden };
 })(window);
