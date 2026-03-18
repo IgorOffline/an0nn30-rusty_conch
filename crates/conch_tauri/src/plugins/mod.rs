@@ -28,6 +28,23 @@ pub(crate) struct PanelInfo {
 }
 
 /// Shared plugin state accessible from Tauri commands.
+/// Pending dialog responses from the frontend.
+pub(crate) struct PendingDialogs {
+    pub forms: HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
+    pub prompts: HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>,
+    pub confirms: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
+}
+
+impl PendingDialogs {
+    fn new() -> Self {
+        Self {
+            forms: HashMap::new(),
+            prompts: HashMap::new(),
+            confirms: HashMap::new(),
+        }
+    }
+}
+
 /// A menu item registered by a plugin.
 #[derive(Clone, Serialize)]
 pub(crate) struct PluginMenuItem {
@@ -42,6 +59,7 @@ pub(crate) struct PluginState {
     pub bus: Arc<PluginBus>,
     pub panels: Arc<Mutex<HashMap<u64, PanelInfo>>>,
     pub menu_items: Arc<Mutex<Vec<PluginMenuItem>>>,
+    pub pending_dialogs: Arc<Mutex<PendingDialogs>>,
     pub running_lua: Vec<runner::RunningLuaPlugin>,
     pub java_mgr: Option<JavaPluginManager>,
     pub plugins_config: conch_core::config::PluginsConfig,
@@ -53,6 +71,7 @@ impl PluginState {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(Mutex::new(HashMap::new())),
             menu_items: Arc::new(Mutex::new(Vec::new())),
+            pending_dialogs: Arc::new(Mutex::new(PendingDialogs::new())),
             running_lua: Vec::new(),
             java_mgr: None,
             plugins_config,
@@ -124,6 +143,7 @@ impl PluginState {
                     bus: Arc::clone(&self.bus),
                     panels: Arc::clone(&self.panels),
                     menu_items: Arc::clone(&self.menu_items),
+                    pending_dialogs: Arc::clone(&self.pending_dialogs),
                 });
                 let mailbox_rx = self.bus.register_plugin(&name);
                 let Some(mailbox_tx) = self.bus.sender_for(&name) else { continue };
@@ -161,6 +181,7 @@ impl PluginState {
             bus: Arc::clone(&self.bus),
             panels: Arc::clone(&self.panels),
             menu_items: Arc::clone(&self.menu_items),
+            pending_dialogs: Arc::clone(&self.pending_dialogs),
         });
 
         self.java_mgr = Some(JavaPluginManager::new(Arc::clone(&self.bus), host_api));
@@ -322,6 +343,7 @@ pub(crate) fn enable_plugin(
             bus: Arc::clone(&ps.bus),
             panels: Arc::clone(&ps.panels),
             menu_items: Arc::clone(&ps.menu_items),
+            pending_dialogs: Arc::clone(&ps.pending_dialogs),
         });
 
         let mailbox_rx = ps.bus.register_plugin(&name);
@@ -378,6 +400,43 @@ pub(crate) fn disable_plugin(
         }
     } else {
         Err(format!("Unknown plugin source: {source}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dialog response commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub(crate) fn dialog_respond_form(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    prompt_id: String,
+    result: Option<String>,
+) {
+    if let Some(tx) = state.lock().pending_dialogs.lock().forms.remove(&prompt_id) {
+        let _ = tx.send(result);
+    }
+}
+
+#[tauri::command]
+pub(crate) fn dialog_respond_prompt(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    prompt_id: String,
+    value: Option<String>,
+) {
+    if let Some(tx) = state.lock().pending_dialogs.lock().prompts.remove(&prompt_id) {
+        let _ = tx.send(value);
+    }
+}
+
+#[tauri::command]
+pub(crate) fn dialog_respond_confirm(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    prompt_id: String,
+    accepted: bool,
+) {
+    if let Some(tx) = state.lock().pending_dialogs.lock().confirms.remove(&prompt_id) {
+        let _ = tx.send(accepted);
     }
 }
 

@@ -4,6 +4,7 @@
 //! via `portable-pty`. This bypasses alacritty_terminal entirely — xterm.js
 //! handles all terminal emulation.
 
+mod ipc;
 mod pty_backend;
 pub(crate) mod plugins;
 pub(crate) mod remote;
@@ -291,21 +292,121 @@ fn get_home_dir() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Terminal font config
+// Theme colors
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-struct TerminalFontConfig {
-    family: String,
-    size: f64,
+struct ThemeColors {
+    // Primary
+    background: String,
+    foreground: String,
+    // Cursor
+    cursor_text: String,
+    cursor_color: String,
+    // Selection
+    selection_text: String,
+    selection_bg: String,
+    // Normal ANSI
+    black: String, red: String, green: String, yellow: String,
+    blue: String, magenta: String, cyan: String, white: String,
+    // Bright ANSI
+    bright_black: String, bright_red: String, bright_green: String, bright_yellow: String,
+    bright_blue: String, bright_magenta: String, bright_cyan: String, bright_white: String,
+    // Derived UI colors
+    dim_fg: String,
+    panel_bg: String,
+    tab_bar_bg: String,
+    tab_border: String,
+    active_highlight: String,
+}
+
+fn darken(hex: &str, amount: i32) -> String {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() < 6 { return format!("#{hex}"); }
+    let r = i32::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+    let g = i32::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+    let b = i32::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+    format!("#{:02x}{:02x}{:02x}",
+        (r - amount).clamp(0, 255),
+        (g - amount).clamp(0, 255),
+        (b - amount).clamp(0, 255))
+}
+
+fn lighten(hex: &str, amount: i32) -> String {
+    darken(hex, -amount)
 }
 
 #[tauri::command]
-fn get_terminal_font(state: tauri::State<'_, TauriState>) -> TerminalFontConfig {
+fn get_theme_colors(state: tauri::State<'_, TauriState>) -> ThemeColors {
+    let scheme = conch_core::color_scheme::resolve_theme(&state.config.colors.theme);
+
+    let bg = &scheme.primary.background;
+    let fg = &scheme.primary.foreground;
+    let cursor = scheme.cursor.as_ref();
+    let selection = scheme.selection.as_ref();
+
+    ThemeColors {
+        background: bg.clone(),
+        foreground: fg.clone(),
+        cursor_text: cursor.map(|c| c.text.clone()).unwrap_or_else(|| bg.clone()),
+        cursor_color: cursor.map(|c| c.cursor.clone()).unwrap_or_else(|| fg.clone()),
+        selection_text: selection.map(|s| s.text.clone()).unwrap_or_else(|| fg.clone()),
+        selection_bg: selection.map(|s| s.background.clone()).unwrap_or_else(|| lighten(bg, 30)),
+        black: scheme.normal.black.clone(),
+        red: scheme.normal.red.clone(),
+        green: scheme.normal.green.clone(),
+        yellow: scheme.normal.yellow.clone(),
+        blue: scheme.normal.blue.clone(),
+        magenta: scheme.normal.magenta.clone(),
+        cyan: scheme.normal.cyan.clone(),
+        white: scheme.normal.white.clone(),
+        bright_black: scheme.bright.black.clone(),
+        bright_red: scheme.bright.red.clone(),
+        bright_green: scheme.bright.green.clone(),
+        bright_yellow: scheme.bright.yellow.clone(),
+        bright_blue: scheme.bright.blue.clone(),
+        bright_magenta: scheme.bright.magenta.clone(),
+        bright_cyan: scheme.bright.cyan.clone(),
+        bright_white: scheme.bright.white.clone(),
+        dim_fg: scheme.primary.dim_foreground.clone().unwrap_or_else(|| lighten(bg, 60)),
+        panel_bg: darken(bg, 8),
+        tab_bar_bg: darken(bg, 14),
+        tab_border: lighten(bg, 18),
+        active_highlight: lighten(bg, 28),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal config (font, cursor, scroll)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct TerminalDisplayConfig {
+    font_family: String,
+    font_size: f64,
+    cursor_style: String,
+    cursor_blink: bool,
+    scroll_sensitivity: f64,
+}
+
+#[tauri::command]
+fn get_terminal_config(state: tauri::State<'_, TauriState>) -> TerminalDisplayConfig {
     let font = state.config.resolved_terminal_font();
-    TerminalFontConfig {
-        family: font.normal.family.clone(),
-        size: font.size as f64,
+    let cursor = &state.config.terminal.cursor.style;
+    let cursor_style = match cursor.shape.to_lowercase().as_str() {
+        "block" => "block",
+        "underline" => "underline",
+        "beam" | "bar" => "bar",
+        _ => "block",
+    }
+    .to_string();
+
+    TerminalDisplayConfig {
+        font_family: font.normal.family.clone(),
+        font_size: font.size as f64,
+        cursor_style,
+        cursor_blink: cursor.blinking,
+        scroll_sensitivity: state.config.terminal.scroll_sensitivity as f64,
     }
 }
 
@@ -556,7 +657,7 @@ fn focused_webview_window<R: tauri::Runtime>(
     windows.into_values().next()
 }
 
-fn emit_menu_action_to_focused_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, action: &str) {
+pub(crate) fn emit_menu_action_to_focused_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, action: &str) {
     if let Some(window) = focused_webview_window(app) {
         let _ = window.emit(
             MENU_ACTION_EVENT,
@@ -568,7 +669,7 @@ fn emit_menu_action_to_focused_window<R: tauri::Runtime>(app: &tauri::AppHandle<
     }
 }
 
-fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let label = loop {
         let id = NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed);
         let candidate = format!("window-{id}");
@@ -661,6 +762,14 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     app.handle().set_menu(menu)
                         .map_err(|e| anyhow::anyhow!("Set menu failed: {e}"))?;
                 }
+            }
+
+            // Start IPC socket listener.
+            let _ipc_guard = ipc::start(app.handle().clone());
+            // Keep the guard alive for the app's lifetime by leaking it.
+            // The socket file is cleaned up on process exit.
+            if let Some(guard) = _ipc_guard {
+                std::mem::forget(guard);
             }
 
             // Forward transfer progress events to the frontend.
@@ -761,7 +870,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             get_saved_layout,
             save_window_layout,
             get_keyboard_shortcuts,
-            get_terminal_font,
+            get_theme_colors,
+            get_terminal_config,
             get_home_dir,
             rebuild_menu,
             remote::ssh_connect,
@@ -806,6 +916,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             plugins::scan_plugins,
             plugins::enable_plugin,
             plugins::disable_plugin,
+            plugins::dialog_respond_form,
+            plugins::dialog_respond_prompt,
+            plugins::dialog_respond_confirm,
             plugins::get_plugin_menu_items,
             plugins::trigger_plugin_menu_action,
             plugins::get_plugin_panels,

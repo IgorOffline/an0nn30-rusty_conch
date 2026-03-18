@@ -38,5 +38,8 @@ ssh-key = { version = "0.6", features = ["ed25519", "rsa", "p256"] }
 async-trait = "0.1"
 base64 = "0.22"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

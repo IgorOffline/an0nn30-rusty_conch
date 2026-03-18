@@ -32,6 +32,11 @@
       log('Plugin registered menu item: ' + item.label + ' (' + item.plugin + ')');
     });
 
+    // Listen for plugin dialog requests.
+    listen('plugin-form-dialog', handleFormDialog);
+    listen('plugin-prompt-dialog', handlePromptDialog);
+    listen('plugin-confirm-dialog', handleConfirmDialog);
+
     // Listen for plugin notifications → route to toast system.
     listen('plugin-notification', (event) => {
       const { plugin, json } = event.payload;
@@ -521,6 +526,126 @@
     const el = document.createElement('span');
     el.textContent = str;
     return el.innerHTML;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plugin dialogs
+  // ---------------------------------------------------------------------------
+
+  function handleFormDialog(event) {
+    const { prompt_id, json } = event.payload;
+    let desc;
+    try { desc = typeof json === 'string' ? JSON.parse(json) : json; } catch (_) { desc = {}; }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '4000';
+
+    const title = desc.title || 'Form';
+    const fields = desc.fields || [];
+    const buttons = desc.buttons || [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'OK' }];
+
+    let fieldsHtml = '';
+    for (const f of fields) {
+      if (f.type === 'separator') { fieldsHtml += '<hr class="pw-separator">'; continue; }
+      if (f.type === 'label') { fieldsHtml += `<div class="pw-label">${esc(f.text || '')}</div>`; continue; }
+      const label = f.label || f.id || '';
+      const hint = f.hint ? ` placeholder="${attr(f.hint)}"` : '';
+      const val = f.value != null ? ` value="${attr(String(f.value))}"` : '';
+      if (f.type === 'text') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="text" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></label>`;
+      } else if (f.type === 'password') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="password" data-field="${attr(f.id)}"${val}${hint}></label>`;
+      } else if (f.type === 'number') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="number" data-field="${attr(f.id)}"${val}></label>`;
+      } else if (f.type === 'combo') {
+        const opts = (f.options || []).map(o => `<option value="${attr(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('');
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<select data-field="${attr(f.id)}">${opts}</select></label>`;
+      } else if (f.type === 'checkbox') {
+        const checked = f.value ? 'checked' : '';
+        fieldsHtml += `<label class="pw-checkbox"><input type="checkbox" data-field="${attr(f.id)}" ${checked}> ${esc(label)}</label>`;
+      } else if (f.type === 'host_port') {
+        fieldsHtml += `<div class="ssh-form-row"><label class="ssh-form-label" style="flex:1">${esc(label)}<input type="text" data-field="${attr(f.host_id || 'host')}" value="${attr(f.host_value || '')}" spellcheck="false"></label>`;
+        fieldsHtml += `<label class="ssh-form-label" style="width:80px">Port<input type="number" data-field="${attr(f.port_id || 'port')}" value="${attr(f.port_value || '22')}"></label></div>`;
+      } else if (f.type === 'file_picker') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="text" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></label>`;
+      }
+    }
+
+    let buttonsHtml = '';
+    for (const b of buttons) {
+      const primary = b.id === 'ok' || b.id === 'save' || b.id === 'save_connect' ? ' primary' : '';
+      buttonsHtml += `<button class="ssh-form-btn${primary}" data-action="${attr(b.id)}">${esc(b.label)}</button>`;
+    }
+
+    overlay.innerHTML = `<div class="ssh-form"><div class="ssh-form-title">${esc(title)}</div><div class="ssh-form-body">${fieldsHtml}</div><div class="ssh-form-buttons">${buttonsHtml}</div></div>`;
+    document.body.appendChild(overlay);
+
+    const dismiss = (result) => {
+      overlay.remove();
+      invoke('dialog_respond_form', { promptId: prompt_id, result }).catch(() => {});
+    };
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
+    overlay.querySelectorAll('.ssh-form-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        if (action === 'cancel') { dismiss(null); return; }
+        // Collect field values.
+        const values = { _action: action };
+        overlay.querySelectorAll('[data-field]').forEach(el => {
+          const id = el.dataset.field;
+          if (el.type === 'checkbox') values[id] = el.checked;
+          else values[id] = el.value;
+        });
+        dismiss(JSON.stringify(values));
+      });
+    });
+
+    const onKey = (e) => { if (e.key === 'Escape') { dismiss(null); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
+  function handlePromptDialog(event) {
+    const { prompt_id, message, default_value } = event.payload;
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '4000';
+    overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Prompt</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false"></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="pd-cancel">Cancel</button><button class="ssh-form-btn primary" id="pd-ok">OK</button></div></div>`;
+    document.body.appendChild(overlay);
+    setTimeout(() => overlay.querySelector('#pd-input').focus(), 50);
+
+    const dismiss = (val) => {
+      overlay.remove();
+      invoke('dialog_respond_prompt', { promptId: prompt_id, value: val }).catch(() => {});
+    };
+
+    overlay.querySelector('#pd-cancel').addEventListener('click', () => dismiss(null));
+    overlay.querySelector('#pd-ok').addEventListener('click', () => dismiss(overlay.querySelector('#pd-input').value));
+    overlay.querySelector('#pd-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') dismiss(overlay.querySelector('#pd-input').value); });
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
+    const onKey = (e) => { if (e.key === 'Escape') { dismiss(null); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
+  function handleConfirmDialog(event) {
+    const { prompt_id, message } = event.payload;
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '4000';
+    overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Confirm</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="cd-no">No</button><button class="ssh-form-btn primary" id="cd-yes">Yes</button></div></div>`;
+    document.body.appendChild(overlay);
+
+    const dismiss = (val) => {
+      overlay.remove();
+      invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: val }).catch(() => {});
+    };
+
+    overlay.querySelector('#cd-no').addEventListener('click', () => dismiss(false));
+    overlay.querySelector('#cd-yes').addEventListener('click', () => dismiss(true));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(false); });
+    const onKey = (e) => { if (e.key === 'Escape') { dismiss(false); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
   }
 
   function getMenuItems() { return pluginMenuItems.slice(); }

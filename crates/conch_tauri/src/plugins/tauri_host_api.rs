@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::Emitter;
 
-use super::{PanelInfo, PluginMenuItem};
+use super::{PanelInfo, PendingDialogs, PluginMenuItem};
 
 static NEXT_PANEL_HANDLE: AtomicU64 = AtomicU64::new(1);
 
@@ -25,6 +25,7 @@ pub(crate) struct TauriHostApi {
     pub bus: std::sync::Arc<PluginBus>,
     pub panels: std::sync::Arc<Mutex<HashMap<u64, PanelInfo>>>,
     pub menu_items: std::sync::Arc<Mutex<Vec<PluginMenuItem>>>,
+    pub pending_dialogs: std::sync::Arc<Mutex<PendingDialogs>>,
 }
 
 // -- Tauri events emitted by TauriHostApi --
@@ -241,29 +242,38 @@ impl HostApi for TauriHostApi {
     }
 
     fn show_form(&self, json: &str) -> Option<String> {
-        // TODO: Wire up frontend dialog overlay for full form support.
-        // For now, emit a notification that the form was requested.
-        log::info!("[plugin:{}] show_form requested (dialogs not yet wired to frontend)", self.name);
-        let _ = self.app_handle.emit("plugin-notification", serde_json::json!({
-            "plugin": self.name,
-            "json": serde_json::json!({
-                "title": "Form Dialog (Not Yet Supported)",
-                "body": "Plugin form dialogs are not yet wired to the Tauri frontend. The plugin's form request was cancelled.",
-                "level": "warn",
-                "duration_ms": 5000,
-            }).to_string(),
+        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_dialogs.lock().forms.insert(prompt_id.clone(), tx);
+        let _ = self.app_handle.emit("plugin-form-dialog", serde_json::json!({
+            "prompt_id": prompt_id,
+            "json": json,
         }));
-        None
+        // Block the plugin thread until the frontend responds.
+        rx.blocking_recv().unwrap_or(None)
     }
 
     fn show_confirm(&self, msg: &str) -> bool {
-        log::info!("[plugin:{}] show_confirm: {msg}", self.name);
-        false
+        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_dialogs.lock().confirms.insert(prompt_id.clone(), tx);
+        let _ = self.app_handle.emit("plugin-confirm-dialog", serde_json::json!({
+            "prompt_id": prompt_id,
+            "message": msg,
+        }));
+        rx.blocking_recv().unwrap_or(false)
     }
 
-    fn show_prompt(&self, msg: &str, _default_value: &str) -> Option<String> {
-        log::info!("[plugin:{}] show_prompt: {msg}", self.name);
-        None
+    fn show_prompt(&self, msg: &str, default_value: &str) -> Option<String> {
+        let prompt_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_dialogs.lock().prompts.insert(prompt_id.clone(), tx);
+        let _ = self.app_handle.emit("plugin-prompt-dialog", serde_json::json!({
+            "prompt_id": prompt_id,
+            "message": msg,
+            "default_value": default_value,
+        }));
+        rx.blocking_recv().unwrap_or(None)
     }
 
     fn show_alert(&self, title: &str, msg: &str) {
