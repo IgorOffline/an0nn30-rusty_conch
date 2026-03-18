@@ -84,6 +84,10 @@
       min-height: 0;
       background: #282a36;
     }
+    #terminal-host.drag-over {
+      outline: 2px solid #6272a4;
+      outline-offset: -2px;
+    }
     #ssh-panel-wrap {
       display: flex;
       flex-shrink: 0;
@@ -875,6 +879,69 @@
           invoke,
           listen: listenOnCurrentWindow,
           getServerData: () => window.sshPanel ? window.sshPanel.getServerData() : { folders: [], ungrouped: [], ssh_config: [] },
+        });
+      }
+
+      // ---- Drag and drop ----
+      // Prevent the webview from navigating on file drops.
+      terminalHostEl.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        terminalHostEl.classList.add('drag-over');
+      });
+      terminalHostEl.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        terminalHostEl.classList.remove('drag-over');
+      });
+      terminalHostEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        terminalHostEl.classList.remove('drag-over');
+        // HTML5 drop — may have files with path info
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          const paths = [];
+          for (const file of e.dataTransfer.files) {
+            // In Tauri webviews, File.path may be available
+            const p = file.path || file.name;
+            if (p) paths.push(p);
+          }
+          if (paths.length > 0) {
+            writePathsToTerminal(paths);
+          }
+        }
+      });
+
+      // Tauri drag-drop event (provides real filesystem paths).
+      if (currentWindow && typeof currentWindow.onDragDropEvent === 'function') {
+        currentWindow.onDragDropEvent((event) => {
+          if (event.payload.type === 'over') {
+            terminalHostEl.classList.add('drag-over');
+          } else if (event.payload.type === 'leave') {
+            terminalHostEl.classList.remove('drag-over');
+          } else if (event.payload.type === 'drop') {
+            terminalHostEl.classList.remove('drag-over');
+            const paths = event.payload.paths;
+            if (paths && paths.length > 0) {
+              writePathsToTerminal(paths);
+            }
+          }
+        });
+      }
+
+      function writePathsToTerminal(paths) {
+        const tab = currentTab();
+        if (!tab || !tab.spawned) return;
+        // Shell-escape paths with spaces by quoting them.
+        const escaped = paths.map((p) => {
+          if (/[\s"'\\$`!#&|;()<>]/.test(p)) {
+            return "'" + p.replace(/'/g, "'\\''") + "'";
+          }
+          return p;
+        });
+        const text = escaped.join(' ');
+        const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+        invoke(cmd, { tabId: tab.id, data: text }).catch((e) => {
+          console.error('drag-drop write error:', e);
         });
       }
 
