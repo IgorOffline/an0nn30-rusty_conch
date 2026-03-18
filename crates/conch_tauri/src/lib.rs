@@ -8,6 +8,7 @@ mod ipc;
 mod pty_backend;
 pub(crate) mod plugins;
 pub(crate) mod remote;
+mod watcher;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +28,10 @@ const MENU_NEW_WINDOW_ID: &str = "file.new_window";
 const MENU_TOGGLE_LEFT_PANEL_ID: &str = "view.toggle_left_panel";
 const MENU_TOGGLE_RIGHT_PANEL_ID: &str = "view.toggle_right_panel";
 const MENU_FOCUS_SESSIONS_ID: &str = "view.focus_sessions";
+const MENU_ZEN_MODE_ID: &str = "view.zen_mode";
+const MENU_ZOOM_IN_ID: &str = "view.zoom_in";
+const MENU_ZOOM_OUT_ID: &str = "view.zoom_out";
+const MENU_ZOOM_RESET_ID: &str = "view.zoom_reset";
 const MENU_PLUGIN_MANAGER_ID: &str = "tools.plugin_manager";
 const MENU_MANAGE_TUNNELS_ID: &str = "tools.manage_tunnels";
 const MENU_ACTION_EVENT: &str = "menu-action";
@@ -35,6 +40,10 @@ const MENU_ACTION_CLOSE_TAB: &str = "close-tab";
 const MENU_ACTION_TOGGLE_LEFT_PANEL: &str = "toggle-left-panel";
 const MENU_ACTION_TOGGLE_RIGHT_PANEL: &str = "toggle-right-panel";
 const MENU_ACTION_FOCUS_SESSIONS: &str = "focus-sessions";
+const MENU_ACTION_ZEN_MODE: &str = "zen-mode";
+const MENU_ACTION_ZOOM_IN: &str = "zoom-in";
+const MENU_ACTION_ZOOM_OUT: &str = "zoom-out";
+const MENU_ACTION_ZOOM_RESET: &str = "zoom-reset";
 const MENU_ACTION_PLUGIN_MANAGER: &str = "plugin-manager";
 const MENU_ACTION_MANAGE_TUNNELS: &str = "manage-tunnels";
 
@@ -284,6 +293,15 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
     Ok(base)
 }
 
+/// Return general app config the frontend needs.
+#[tauri::command]
+fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json::Value {
+    serde_json::json!({
+        "appearance_mode": format!("{:?}", state.config.colors.appearance_mode).to_lowercase(),
+        "zen_mode_shortcut": state.config.conch.keyboard.zen_mode,
+    })
+}
+
 #[tauri::command]
 fn get_home_dir() -> String {
     dirs::home_dir()
@@ -338,6 +356,12 @@ fn lighten(hex: &str, amount: i32) -> String {
 
 #[tauri::command]
 fn get_theme_colors(state: tauri::State<'_, TauriState>) -> ThemeColors {
+    // appearance_mode: dark (default), light, system — affects window chrome.
+    // For now we always use the configured theme; system mode detection
+    // would require platform APIs. Logged for awareness.
+    let mode = &state.config.colors.appearance_mode;
+    log::debug!("Appearance mode: {:?}", mode);
+
     let scheme = conch_core::color_scheme::resolve_theme(&state.config.colors.theme);
 
     let bg = &scheme.primary.background;
@@ -577,11 +601,30 @@ fn build_app_menu<R: tauri::Runtime>(
         true,
         Some("CmdOrCtrl+/"),
     )?;
+    let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
+    let zen_mode = MenuItem::with_id(
+        app,
+        MENU_ZEN_MODE_ID,
+        "Zen Mode",
+        true,
+        Some(&zen_accel),
+    )?;
+    let zoom_in = MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
+    let zoom_out = MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+    let zoom_reset = MenuItem::with_id(app, MENU_ZOOM_RESET_ID, "Reset Zoom", true, Some("CmdOrCtrl+0"))?;
+    let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
+    let toggle_bottom = MenuItem::with_id(app, "view.toggle_bottom_panel", "Toggle Bottom Panel", true, Some(&toggle_bottom_accel))?;
     let view_menu = Submenu::with_items(
         app,
         "View",
         true,
-        &[&toggle_left, &toggle_right, &PredefinedMenuItem::separator(app)?, &focus_sessions],
+        &[
+            &toggle_left, &toggle_right, &toggle_bottom,
+            &PredefinedMenuItem::separator(app)?,
+            &focus_sessions, &zen_mode,
+            &PredefinedMenuItem::separator(app)?,
+            &zoom_in, &zoom_out, &zoom_reset,
+        ],
     )?;
 
     let plugin_manager = MenuItem::with_id(
@@ -690,11 +733,18 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         800.0
     };
 
+    let user_cfg = config::load_user_config().unwrap_or_default();
+    let dec = !matches!(
+        user_cfg.window.decorations,
+        conch_core::config::WindowDecorations::None
+            | conch_core::config::WindowDecorations::Buttonless
+    );
+
     WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Conch")
         .inner_size(w, h)
         .resizable(true)
-        .decorations(true)
+        .decorations(dec)
         .build()?;
     Ok(())
 }
@@ -707,18 +757,26 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     let plugins_config = config.conch.plugins.clone();
     let plugin_state = Arc::new(Mutex::new(plugins::PluginState::new(plugins_config.clone())));
 
-    // Load persisted window size.
+    // Load persisted window size, falling back to config dimensions.
     let persisted = config::load_persistent_state().unwrap_or_default();
+    let cfg_dims = &config.window.dimensions;
+    let cfg_w = (cfg_dims.columns.max(80) as f64) * 8.0 + 40.0; // rough cell→pixel
+    let cfg_h = (cfg_dims.lines.max(24) as f64) * 16.0 + 50.0;
     let initial_width = if persisted.layout.window_width > 100.0 {
         persisted.layout.window_width as f64
     } else {
-        1200.0
+        cfg_w.max(600.0)
     };
     let initial_height = if persisted.layout.window_height > 100.0 {
         persisted.layout.window_height as f64
     } else {
-        800.0
+        cfg_h.max(400.0)
     };
+    let use_decorations = !matches!(
+        config.window.decorations,
+        conch_core::config::WindowDecorations::None
+            | conch_core::config::WindowDecorations::Buttonless
+    );
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -738,9 +796,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 .set_menu(menu)
                 .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
 
-            // Apply persisted window size.
+            // Apply persisted window size and decorations.
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
+                let _ = win.set_decorations(use_decorations);
             }
 
             // Initialize plugin system and restore previously enabled plugins.
@@ -763,6 +822,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("Set menu failed: {e}"))?;
                 }
             }
+
+            // Start config/theme file watcher for hot-reload.
+            watcher::start(app.handle().clone());
 
             // Start IPC socket listener.
             let _ipc_guard = ipc::start(app.handle().clone());
@@ -792,6 +854,11 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             MENU_TOGGLE_LEFT_PANEL_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_LEFT_PANEL)
             }
+            MENU_ZEN_MODE_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZEN_MODE),
+            MENU_ZOOM_IN_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZOOM_IN),
+            MENU_ZOOM_OUT_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZOOM_OUT),
+            MENU_ZOOM_RESET_ID => emit_menu_action_to_focused_window(app, MENU_ACTION_ZOOM_RESET),
+            "view.toggle_bottom_panel" => emit_menu_action_to_focused_window(app, "toggle-bottom-panel"),
             MENU_TOGGLE_RIGHT_PANEL_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_TOGGLE_RIGHT_PANEL)
             }
@@ -872,6 +939,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             get_keyboard_shortcuts,
             get_theme_colors,
             get_terminal_config,
+            get_app_config,
             get_home_dir,
             rebuild_menu,
             remote::ssh_connect,

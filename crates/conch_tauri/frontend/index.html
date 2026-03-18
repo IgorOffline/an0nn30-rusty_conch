@@ -340,6 +340,30 @@
     .pm-col-action { width: 1%; white-space: nowrap; text-align: right; }
     .pm-empty { padding: 24px; text-align: center; color: var(--dim-fg); font-size: 13px; }
 
+    /* -- Bottom panel & Status bar -- */
+    #bottom-panel {
+      height: 120px; min-height: 40px; max-height: 300px;
+      background: var(--panel-bg); border-top: 1px solid var(--tab-border);
+      display: flex; flex-direction: column; overflow: hidden;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+    }
+    #bottom-panel.hidden { display: none; }
+    #bottom-panel-header {
+      display: flex; align-items: center; padding: 4px 10px;
+      font-size: 10px; color: var(--dim-fg); text-transform: uppercase;
+      letter-spacing: 0.5px; flex-shrink: 0;
+      border-bottom: 1px solid var(--tab-border);
+    }
+    #bottom-panel-content { flex: 1; overflow-y: auto; padding: 4px 8px; }
+    #status-bar {
+      height: 22px; flex-shrink: 0; display: flex; align-items: center;
+      padding: 0 10px; background: var(--panel-bg);
+      border-top: 1px solid var(--tab-border);
+      font: 11px/1 -apple-system, sans-serif; color: var(--dim-fg);
+    }
+    #status-bar.hidden { display: none; }
+
     #ssh-panel-wrap {
       display: flex;
       flex-shrink: 0;
@@ -622,6 +646,11 @@
         <div id="ssh-panel"></div>
       </div>
     </div>
+    <div id="bottom-panel" class="hidden">
+      <div id="bottom-panel-header">Output</div>
+      <div id="bottom-panel-content"></div>
+    </div>
+    <div id="status-bar"></div>
   </div>
   <div id="status"></div>
 
@@ -1392,6 +1421,95 @@
         }
         if (action === 'manage-tunnels' && window.tunnelManager) {
           window.tunnelManager.show();
+          return;
+        }
+        // Zen mode — toggle all panels off/on.
+        if (action === 'zen-mode') {
+          const filesHidden = window.filesPanel && window.filesPanel.isHidden();
+          const sshHidden = window.sshPanel && window.sshPanel.isHidden();
+          const allHidden = filesHidden && sshHidden;
+          if (allHidden) {
+            if (window.filesPanel) window.filesPanel.togglePanel();
+            if (window.sshPanel) window.sshPanel.togglePanel();
+          } else {
+            if (window.filesPanel && !window.filesPanel.isHidden()) window.filesPanel.togglePanel();
+            if (window.sshPanel && !window.sshPanel.isHidden()) window.sshPanel.togglePanel();
+          }
+          return;
+        }
+        // Zoom.
+        if (action === 'zoom-in') {
+          document.body.style.zoom = (parseFloat(document.body.style.zoom || '1') + 0.1).toFixed(1);
+          return;
+        }
+        if (action === 'zoom-out') {
+          document.body.style.zoom = Math.max(0.5, parseFloat(document.body.style.zoom || '1') - 0.1).toFixed(1);
+          return;
+        }
+        if (action === 'zoom-reset') {
+          document.body.style.zoom = '1';
+          return;
+        }
+        // Toggle bottom panel (placeholder — no bottom panel content yet).
+        if (action === 'toggle-bottom-panel') {
+          const bp = document.getElementById('bottom-panel');
+          if (bp) bp.classList.toggle('hidden');
+          setTimeout(() => fitAndResizeTab(currentTab()), 50);
+          return;
+        }
+      });
+
+      // Tab navigation: Cmd+1-9 to switch tabs.
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key >= '1' && e.key <= '9') {
+          e.preventDefault();
+          const idx = parseInt(e.key, 10) - 1;
+          const tabIds = Array.from(tabs.keys());
+          if (idx < tabIds.length) {
+            activateTab(tabIds[idx]);
+          }
+        }
+      });
+
+      // Hot-reload: re-fetch theme when config changes.
+      listenOnCurrentWindow('config-changed', async () => {
+        try {
+          const tc = await invoke('get_theme_colors');
+          // Re-apply CSS custom properties.
+          const r = document.documentElement.style;
+          r.setProperty('--bg', tc.background);
+          r.setProperty('--fg', tc.foreground);
+          r.setProperty('--dim-fg', tc.dim_fg);
+          r.setProperty('--panel-bg', tc.panel_bg);
+          r.setProperty('--tab-bar-bg', tc.tab_bar_bg);
+          r.setProperty('--tab-border', tc.tab_border);
+          r.setProperty('--active-highlight', tc.active_highlight);
+          r.setProperty('--red', tc.red);
+          r.setProperty('--green', tc.green);
+          r.setProperty('--yellow', tc.yellow);
+          r.setProperty('--blue', tc.blue);
+          r.setProperty('--cyan', tc.cyan);
+          r.setProperty('--magenta', tc.magenta);
+          document.body.style.background = tc.background;
+          // Update xterm.js theme for all tabs.
+          const newTheme = {
+            background: tc.background, foreground: tc.foreground,
+            cursor: tc.cursor_color, cursorAccent: tc.cursor_text,
+            selectionBackground: tc.selection_bg, selectionForeground: tc.selection_text,
+            black: tc.black, red: tc.red, green: tc.green, yellow: tc.yellow,
+            blue: tc.blue, magenta: tc.magenta, cyan: tc.cyan, white: tc.white,
+            brightBlack: tc.bright_black, brightRed: tc.bright_red,
+            brightGreen: tc.bright_green, brightYellow: tc.bright_yellow,
+            brightBlue: tc.bright_blue, brightMagenta: tc.bright_magenta,
+            brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
+          };
+          theme = newTheme;
+          for (const tab of tabs.values()) {
+            tab.term.options.theme = newTheme;
+          }
+          if (window.toast) window.toast.info('Config Reloaded', 'Theme and settings updated');
+        } catch (e) {
+          console.warn('Hot-reload failed:', e);
         }
       });
 
