@@ -282,12 +282,16 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
 
             // Forward transfer progress events to the frontend.
+            // Use a std::thread since we're not inside a tokio runtime here.
             let handle = app.handle().clone();
-            tokio::spawn(async move {
-                while let Some(progress) = transfer_rx.recv().await {
-                    let _ = handle.emit("transfer-progress", &progress);
-                }
-            });
+            std::thread::Builder::new()
+                .name("transfer-progress".into())
+                .spawn(move || {
+                    while let Some(progress) = transfer_rx.blocking_recv() {
+                        let _ = handle.emit("transfer-progress", &progress);
+                    }
+                })
+                .ok();
 
             Ok(())
         })
