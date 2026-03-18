@@ -119,24 +119,13 @@
     actionsTd.className = 'tunnel-actions';
 
     if (status === 'active' || status === 'connecting') {
-      const stopBtn = document.createElement('button');
-      stopBtn.className = 'tunnel-action-btn';
-      stopBtn.textContent = 'Stop';
-      stopBtn.addEventListener('click', () => doStop(tunnel.id));
-      actionsTd.appendChild(stopBtn);
+      actionsTd.appendChild(makeActionBtn('Stop', false, () => doStop(tunnel.id)));
     } else {
-      const startBtn = document.createElement('button');
-      startBtn.className = 'tunnel-action-btn';
-      startBtn.textContent = 'Start';
-      startBtn.addEventListener('click', () => doStart(tunnel.id));
-      actionsTd.appendChild(startBtn);
+      actionsTd.appendChild(makeActionBtn('Start', false, () => doStart(tunnel.id)));
     }
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'tunnel-action-btn danger';
-    deleteBtn.textContent = 'Delete';
-    deleteBtn.addEventListener('click', () => doDelete(tunnel));
-    actionsTd.appendChild(deleteBtn);
+    actionsTd.appendChild(makeActionBtn('Edit', false, () => showEditTunnelForm(tunnel)));
+    actionsTd.appendChild(makeActionBtn('Delete', true, (btn) => doDelete(tunnel, btn)));
 
     tr.appendChild(actionsTd);
     return tr;
@@ -152,6 +141,17 @@
     setTimeout(() => show(), 500);
   }
 
+  function makeActionBtn(label, danger, onClick) {
+    const btn = document.createElement('button');
+    btn.className = 'tunnel-action-btn' + (danger ? ' danger' : '');
+    btn.textContent = label;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onClick(btn);
+    });
+    return btn;
+  }
+
   async function doStop(tunnelId) {
     try {
       await invoke('tunnel_stop', { tunnelId });
@@ -161,8 +161,21 @@
     show();
   }
 
-  async function doDelete(tunnel) {
-    if (!confirm(`Delete tunnel "${tunnel.label}"?`)) return;
+  async function doDelete(tunnel, btn) {
+    // Click-twice confirmation: first click changes label, second click deletes.
+    if (btn.dataset.confirm !== 'yes') {
+      btn.dataset.confirm = 'yes';
+      btn.textContent = 'Confirm?';
+      btn.classList.add('confirm');
+      setTimeout(() => {
+        if (btn.isConnected) {
+          btn.dataset.confirm = '';
+          btn.textContent = 'Delete';
+          btn.classList.remove('confirm');
+        }
+      }, 3000);
+      return;
+    }
     try {
       await invoke('tunnel_delete', { tunnelId: tunnel.id });
     } catch (e) {
@@ -284,6 +297,111 @@
       alert('Failed to save tunnel: ' + e);
       show();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Edit tunnel form
+  // ---------------------------------------------------------------------------
+
+  function showEditTunnelForm(tunnel) {
+    removeOverlay();
+
+    const data = serverDataFn ? serverDataFn() : { folders: [], ungrouped: [], ssh_config: [] };
+    const allServers = [
+      ...data.ungrouped,
+      ...(data.folders || []).flatMap((f) => f.entries),
+      ...(data.ssh_config || []),
+    ];
+
+    const serverOptions = allServers.map((s) => {
+      const key = `${s.user}@${s.host}:${s.port}`;
+      return { key, label: `${s.label} \u2014 ${key}` };
+    });
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.innerHTML = `
+      <div class="ssh-form">
+        <div class="ssh-form-title">Edit SSH Tunnel</div>
+        <div class="ssh-form-body">
+          <label class="ssh-form-label">SSH Server
+            <select id="et-server">
+              ${serverOptions.map((s) =>
+                `<option value="${attr(s.key)}" ${s.key === tunnel.session_key ? 'selected' : ''}>${esc(s.label)}</option>`
+              ).join('')}
+            </select>
+          </label>
+          <div class="ssh-form-row">
+            <label class="ssh-form-label" style="flex:1">Local Port
+              <input type="number" id="et-local-port" value="${tunnel.local_port}" min="1" max="65535" />
+            </label>
+            <label class="ssh-form-label" style="flex:1">Remote Host
+              <input type="text" id="et-remote-host" value="${attr(tunnel.remote_host)}" spellcheck="false" />
+            </label>
+            <label class="ssh-form-label" style="width:90px">Remote Port
+              <input type="number" id="et-remote-port" value="${tunnel.remote_port}" min="1" max="65535" />
+            </label>
+          </div>
+          <label class="ssh-form-label">Label
+            <input type="text" id="et-label" value="${attr(tunnel.label)}" spellcheck="false" />
+          </label>
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="et-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="et-save">Save</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    setTimeout(() => overlay.querySelector('#et-local-port').focus(), 50);
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { removeOverlay(); show(); } });
+    const onKey = (e) => {
+      if (e.key === 'Escape') { removeOverlay(); show(); document.removeEventListener('keydown', onKey); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    overlay.querySelector('#et-cancel').addEventListener('click', () => { removeOverlay(); show(); });
+    overlay.querySelector('#et-save').addEventListener('click', () => submitEditTunnel(overlay, tunnel));
+  }
+
+  async function submitEditTunnel(overlay, original) {
+    const sessionKey = overlay.querySelector('#et-server').value;
+    const localPort = parseInt(overlay.querySelector('#et-local-port').value, 10);
+    const remoteHost = overlay.querySelector('#et-remote-host').value.trim() || 'localhost';
+    const remotePort = parseInt(overlay.querySelector('#et-remote-port').value, 10);
+    const label = overlay.querySelector('#et-label').value.trim();
+
+    if (!localPort || localPort < 1 || localPort > 65535) {
+      alert('Local port must be between 1 and 65535.');
+      return;
+    }
+    if (!remotePort || remotePort < 1 || remotePort > 65535) {
+      alert('Remote port must be between 1 and 65535.');
+      return;
+    }
+
+    const tunnel = {
+      id: original.id,
+      label: label || `:${localPort} -> ${remoteHost}:${remotePort}`,
+      session_key: sessionKey,
+      local_port: localPort,
+      remote_host: remoteHost,
+      remote_port: remotePort,
+      auto_start: original.auto_start || false,
+    };
+
+    removeOverlay();
+
+    try {
+      // Stop the tunnel if it was running (config changed).
+      await invoke('tunnel_stop', { tunnelId: original.id }).catch(() => {});
+      await invoke('tunnel_save', { tunnel });
+    } catch (e) {
+      alert('Failed to save tunnel: ' + e);
+    }
+    show();
   }
 
   // ---------------------------------------------------------------------------
