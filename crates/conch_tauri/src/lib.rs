@@ -263,7 +263,9 @@ fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Res
 
 /// Launch the Tauri-based UI.
 pub fn run(config: UserConfig) -> anyhow::Result<()> {
-    let remote_state = Arc::new(Mutex::new(RemoteState::new()));
+    let (transfer_tx, mut transfer_rx) =
+        tokio::sync::mpsc::unbounded_channel::<remote::transfer::TransferProgress>();
+    let remote_state = Arc::new(Mutex::new(RemoteState::new(transfer_tx)));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -278,6 +280,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             app.handle()
                 .set_menu(menu)
                 .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
+
+            // Forward transfer progress events to the frontend.
+            let handle = app.handle().clone();
+            tokio::spawn(async move {
+                while let Some(progress) = transfer_rx.recv().await {
+                    let _ = handle.emit("transfer-progress", &progress);
+                }
+            });
+
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -327,6 +338,14 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::local_mkdir,
             remote::local_rename,
             remote::local_remove,
+            remote::transfer_download,
+            remote::transfer_upload,
+            remote::transfer_cancel,
+            remote::tunnel_start,
+            remote::tunnel_stop,
+            remote::tunnel_save,
+            remote::tunnel_delete,
+            remote::tunnel_get_all,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;

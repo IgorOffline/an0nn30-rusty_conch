@@ -9,12 +9,14 @@ mod known_hosts;
 pub(crate) mod local_fs;
 pub(crate) mod sftp;
 pub(crate) mod ssh;
+pub(crate) mod transfer;
+pub(crate) mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
@@ -80,10 +82,18 @@ pub(crate) struct RemoteState {
     pub ssh_config_entries: Vec<ServerEntry>,
     /// Pending auth prompts waiting for frontend responses.
     pending_prompts: PendingPrompts,
+    /// Active tunnel manager.
+    pub tunnel_manager: tunnel::TunnelManager,
+    /// Active file transfers.
+    pub transfers: Arc<Mutex<transfer::TransferRegistry>>,
+    /// Channel for transfer progress events (forwarded to Tauri events).
+    pub transfer_progress_tx: mpsc::UnboundedSender<transfer::TransferProgress>,
 }
 
 impl RemoteState {
-    pub fn new() -> Self {
+    pub fn new(
+        transfer_progress_tx: mpsc::UnboundedSender<transfer::TransferProgress>,
+    ) -> Self {
         let config = config::load_config();
         let ssh_config_entries = config::parse_ssh_config();
         Self {
@@ -91,6 +101,9 @@ impl RemoteState {
             config,
             ssh_config_entries,
             pending_prompts: PendingPrompts::new(),
+            tunnel_manager: tunnel::TunnelManager::new(),
+            transfers: Arc::new(Mutex::new(transfer::TransferRegistry::new())),
+            transfer_progress_tx,
         }
     }
 }
@@ -733,6 +746,270 @@ pub(crate) fn local_remove(path: String, is_dir: bool) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Transfer commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub(crate) fn transfer_download(
+    window: tauri::WebviewWindow,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    tab_id: u32,
+    remote_path: String,
+    local_path: String,
+) -> Result<String, String> {
+    let state = remote.lock();
+    let ssh = get_ssh_handle(&state, window.label(), tab_id)?;
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let progress_tx = state.transfer_progress_tx.clone();
+    let registry = Arc::clone(&state.transfers);
+    drop(state);
+
+    Ok(transfer::start_download(
+        transfer_id,
+        ssh,
+        remote_path,
+        local_path,
+        progress_tx,
+        registry,
+    ))
+}
+
+#[tauri::command]
+pub(crate) fn transfer_upload(
+    window: tauri::WebviewWindow,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    tab_id: u32,
+    local_path: String,
+    remote_path: String,
+) -> Result<String, String> {
+    let state = remote.lock();
+    let ssh = get_ssh_handle(&state, window.label(), tab_id)?;
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let progress_tx = state.transfer_progress_tx.clone();
+    let registry = Arc::clone(&state.transfers);
+    drop(state);
+
+    Ok(transfer::start_upload(
+        transfer_id,
+        ssh,
+        local_path,
+        remote_path,
+        progress_tx,
+        registry,
+    ))
+}
+
+#[tauri::command]
+pub(crate) fn transfer_cancel(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    transfer_id: String,
+) -> bool {
+    remote.lock().transfers.lock().cancel(&transfer_id)
+}
+
+// ---------------------------------------------------------------------------
+// Tunnel commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub(crate) async fn tunnel_start(
+    app: tauri::AppHandle,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    tunnel_id: String,
+) -> Result<(), String> {
+    let tunnel_uuid =
+        uuid::Uuid::parse_str(&tunnel_id).map_err(|e| format!("Invalid tunnel ID: {e}"))?;
+
+    // Get tunnel definition and matching server.
+    let (tunnel_def, server) = {
+        let state = remote.lock();
+        let tunnel = state
+            .config
+            .find_tunnel(&tunnel_uuid)
+            .cloned()
+            .ok_or_else(|| format!("Tunnel '{tunnel_id}' not found"))?;
+
+        let server = find_server_for_tunnel(&state, &tunnel.session_key)
+            .ok_or_else(|| format!("No server configured for {}", tunnel.session_key))?;
+
+        (tunnel, server)
+    };
+
+    let mgr = remote.lock().tunnel_manager.clone();
+    mgr.set_connecting(tunnel_uuid).await;
+
+    // Set up prompt channel — tunnel prompts are auto-accepted for known hosts,
+    // otherwise emitted as Tauri events (same pattern as ssh_connect).
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<tunnel::TunnelPrompt>(4);
+    let remote_for_prompts = Arc::clone(&*remote);
+    let prompt_app = app.clone();
+
+    // Spawn a task to service prompts.
+    tokio::spawn(async move {
+        while let Some(prompt) = prompt_rx.recv().await {
+            match prompt {
+                tunnel::TunnelPrompt::ConfirmHostKey {
+                    reply,
+                    message,
+                    detail,
+                } => {
+                    let prompt_id = uuid::Uuid::new_v4().to_string();
+                    remote_for_prompts
+                        .lock()
+                        .pending_prompts
+                        .host_key
+                        .insert(prompt_id.clone(), reply);
+                    let _ = prompt_app.emit(
+                        "ssh-host-key-prompt",
+                        HostKeyPromptEvent {
+                            prompt_id,
+                            message,
+                            detail,
+                        },
+                    );
+                }
+                tunnel::TunnelPrompt::Password { reply, message } => {
+                    let prompt_id = uuid::Uuid::new_v4().to_string();
+                    remote_for_prompts
+                        .lock()
+                        .pending_prompts
+                        .password
+                        .insert(prompt_id.clone(), reply);
+                    let _ = prompt_app.emit(
+                        "ssh-password-prompt",
+                        PasswordPromptEvent {
+                            prompt_id,
+                            message,
+                        },
+                    );
+                }
+            }
+        }
+    });
+
+    let result = mgr
+        .start_tunnel(
+            tunnel_uuid,
+            &server,
+            tunnel_def.local_port,
+            tunnel_def.remote_host.clone(),
+            tunnel_def.remote_port,
+            prompt_tx,
+        )
+        .await;
+
+    if let Err(ref e) = result {
+        mgr.set_error(&tunnel_uuid, e.clone()).await;
+    }
+
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn tunnel_stop(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    tunnel_id: String,
+) -> Result<(), String> {
+    let tunnel_uuid =
+        uuid::Uuid::parse_str(&tunnel_id).map_err(|e| format!("Invalid tunnel ID: {e}"))?;
+    let mgr = remote.lock().tunnel_manager.clone();
+    mgr.stop(&tunnel_uuid).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn tunnel_save(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    tunnel: config::SavedTunnel,
+) {
+    let mut state = remote.lock();
+    // Update if exists, otherwise add.
+    if state.config.find_tunnel(&tunnel.id).is_some() {
+        state.config.update_tunnel(tunnel);
+    } else {
+        state.config.add_tunnel(tunnel);
+    }
+    config::save_config(&state.config);
+}
+
+#[tauri::command]
+pub(crate) async fn tunnel_delete(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    tunnel_id: String,
+) -> Result<(), String> {
+    let tunnel_uuid =
+        uuid::Uuid::parse_str(&tunnel_id).map_err(|e| format!("Invalid tunnel ID: {e}"))?;
+
+    // Stop if running.
+    let mgr = remote.lock().tunnel_manager.clone();
+    mgr.stop(&tunnel_uuid).await;
+
+    let mut state = remote.lock();
+    state.config.remove_tunnel(&tunnel_uuid);
+    config::save_config(&state.config);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn tunnel_get_all(
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+) -> Result<Vec<TunnelWithStatus>, String> {
+    let (tunnels, mgr) = {
+        let state = remote.lock();
+        (state.config.tunnels.clone(), state.tunnel_manager.clone())
+    };
+
+    let mut result = Vec::new();
+    for t in &tunnels {
+        let status = mgr.status(&t.id).await;
+        result.push(TunnelWithStatus {
+            tunnel: t.clone(),
+            status: status.map(|s| match s {
+                tunnel::TunnelStatus::Connecting => "connecting".to_string(),
+                tunnel::TunnelStatus::Active => "active".to_string(),
+                tunnel::TunnelStatus::Error(e) => format!("error: {e}"),
+            }),
+        });
+    }
+
+    Ok(result)
+}
+
+#[derive(Serialize)]
+pub(crate) struct TunnelWithStatus {
+    #[serde(flatten)]
+    tunnel: config::SavedTunnel,
+    status: Option<String>,
+}
+
+/// Find a server matching a tunnel's session_key.
+fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<ServerEntry> {
+    let all_servers = state
+        .config
+        .all_servers()
+        .chain(state.ssh_config_entries.iter());
+
+    for s in all_servers {
+        if config::SavedTunnel::make_session_key(&s.user, &s.host, s.port) == session_key {
+            return Some(s.clone());
+        }
+    }
+
+    // Fallback: parse the session_key and create a minimal entry.
+    config::SavedTunnel::parse_session_key(session_key).map(|(user, host, port)| ServerEntry {
+        id: String::new(),
+        label: session_key.to_string(),
+        host,
+        port,
+        user,
+        auth_method: "key".to_string(),
+        key_path: None,
+        proxy_command: None,
+        proxy_jump: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -792,7 +1069,8 @@ mod tests {
 
     #[test]
     fn remote_state_new_has_no_sessions() {
-        let state = RemoteState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = RemoteState::new(tx);
         assert!(state.sessions.is_empty());
     }
 }
