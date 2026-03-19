@@ -277,7 +277,7 @@ pub(crate) struct DiscoveredPlugin {
 pub(crate) fn scan_plugins(
     state: tauri::State<'_, Arc<Mutex<PluginState>>>,
 ) -> Vec<DiscoveredPlugin> {
-    let ps = state.lock();
+    let mut ps = state.lock();
     let search_paths = ps.search_paths();
     let loaded_names: std::collections::HashSet<String> = ps
         .running_lua
@@ -304,26 +304,32 @@ pub(crate) fn scan_plugins(
         }
     }
 
-    // Discover Java plugins (JAR files)
-    for dir in &search_paths {
-        if !dir.exists() { continue; }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |e| e == "jar") {
-                    let name = path.file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let loaded = ps.java_mgr.as_ref().map_or(false, |mgr| mgr.is_loaded(&name));
-                    result.push(DiscoveredPlugin {
-                        name: name.clone(),
-                        description: String::new(),
-                        version: String::new(),
-                        plugin_type: "Unknown".into(),
-                        source: "Java".into(),
-                        path: path.to_string_lossy().to_string(),
-                        loaded,
-                    });
+    // Discover Java plugins (JAR files) — probe each to get real metadata.
+    if let Some(ref mut mgr) = ps.java_mgr {
+        for dir in &search_paths {
+            if !dir.exists() { continue; }
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "jar") {
+                        // Probe to get the actual plugin name from metadata.
+                        let probe = mgr.probe_jar_name(&path);
+                        let name = probe.unwrap_or_else(|| {
+                            path.file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        });
+                        let loaded = mgr.is_loaded(&name);
+                        result.push(DiscoveredPlugin {
+                            name,
+                            description: String::new(),
+                            version: String::new(),
+                            plugin_type: "Unknown".into(),
+                            source: "Java".into(),
+                            path: path.to_string_lossy().to_string(),
+                            loaded,
+                        });
+                    }
                 }
             }
         }
@@ -369,6 +375,10 @@ pub(crate) fn enable_plugin(
         Ok(())
     } else if source == "Java" {
         if let Some(ref mut mgr) = ps.java_mgr {
+            // Check if already loaded (e.g., restored from previous session).
+            if mgr.is_loaded(&name) {
+                return Ok(());
+            }
             mgr.load_plugin(std::path::Path::new(&path))
                 .map(|_| ())
                 .map_err(|e| format!("Failed to load JAR: {e}"))?;
