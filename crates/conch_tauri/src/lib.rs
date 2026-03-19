@@ -5,6 +5,7 @@
 //! handles all terminal emulation.
 
 mod ipc;
+pub mod platform;
 mod pty_backend;
 pub(crate) mod plugins;
 pub(crate) mod remote;

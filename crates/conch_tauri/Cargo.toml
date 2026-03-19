@@ -41,5 +41,9 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSLocale"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

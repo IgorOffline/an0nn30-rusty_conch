@@ -3,6 +3,10 @@
 use conch_core::config;
 
 fn main() {
+    // Platform init MUST run before anything else — fixes locale, PATH, and
+    // SSH_AUTH_SOCK when launched from Finder/desktop (not a terminal).
+    conch_tauri::platform::init();
+
     env_logger::init();
 
     let user_config = config::load_user_config().unwrap_or_else(|e| {
