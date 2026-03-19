@@ -48,3 +48,8 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSLocale"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "../../target/release/conch", dest = "/usr/bin/conch", mode = "0755" },
+]
