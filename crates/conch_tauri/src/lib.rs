@@ -247,9 +247,6 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let close_window = PredefinedMenuItem::close_window(app, None)?;
         let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &close_tab, &close_window])?;
         let edit_menu = Submenu::with_items(app, "Edit", true, &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
@@ -568,9 +565,6 @@ fn build_app_menu<R: tauri::Runtime>(
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
