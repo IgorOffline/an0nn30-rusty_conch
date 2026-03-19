@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "conch_core"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "conch_plugin_sdk",
  "jni",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "conch_plugin_sdk"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "conch_tauri"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -578,6 +578,8 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "objc2",
+ "objc2-foundation",
  "parking_lot",
  "portable-pty",
  "russh",
@@ -2860,6 +2862,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.11.0",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
 ]
