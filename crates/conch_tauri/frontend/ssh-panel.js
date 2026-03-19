@@ -523,13 +523,18 @@
     el.innerHTML =
       `<span class="tunnel-dot ${dotClass}"></span>` +
       `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>` +
+      (errorMsg ? `<button class="ssh-tunnel-btn ssh-tunnel-edit-btn">Edit</button>` : '') +
       `<button class="ssh-tunnel-btn">${btnLabel}</button>`;
 
     if (errorMsg) {
       el.title = 'Error: ' + errorMsg;
+      el.querySelector('.ssh-tunnel-edit-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (window.tunnelManager) window.tunnelManager.showEdit(tunnel);
+      });
     }
 
-    const btn = el.querySelector('.ssh-tunnel-btn');
+    const btn = el.querySelector('.ssh-tunnel-btn:last-child');
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       btn.disabled = true;
