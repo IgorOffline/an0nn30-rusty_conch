@@ -3,15 +3,16 @@
 ## Critical Engineering Standards
 
 ### 1. Unit Tests Are Required
-Every new function, module, or behavior change MUST have unit tests if at all possible. The project already has `#[cfg(test)]` modules in most files — follow that pattern. If adding a new `.rs` file, add a `#[cfg(test)] mod tests` at the bottom. Pure logic, parsers, config handling, widget building, keybinding resolution — all testable without a GUI context. Only skip tests for code that truly requires a live egui context or OS-level resources.
+Every new function, module, or behavior change MUST have unit tests if at all possible. The project already has `#[cfg(test)]` modules in most files — follow that pattern. If adding a new `.rs` file, add a `#[cfg(test)] mod tests` at the bottom. Pure logic, parsers, config handling, widget building — all testable without a GUI context. Only skip tests for code that truly requires a live Tauri context or OS-level resources.
 
 ### 2. Modularity — No Monoliths
-Code MUST be broken into small, focused modules. `app.rs` is already too large and must not grow further. When adding new functionality:
-- Extract into its own file/module (e.g., `shortcuts.rs`, `input.rs`, `icons.rs`)
-- Group related files into subdirectories with `mod.rs` (e.g., `host/`, `terminal/`, `menu_bar/`, `platform/`)
+Code MUST be broken into small, focused modules. When adding new functionality:
+- Extract into its own file/module
+- Group related files into subdirectories with `mod.rs` (e.g., `remote/`, `plugins/`)
 - Each file should have a single responsibility
 - Prefer many small files over few large files
 - New features go in new modules, not appended to existing large files
+- `lib.rs` should delegate to submodules — avoid growing it beyond ~1000 lines
 
 ## Git Workflow (STRICT)
 
@@ -36,77 +37,80 @@ Code MUST be broken into small, focused modules. `app.rs` is already too large a
 
 ## Architecture
 
-### Workspace Structure
+### Workspace (4 crates, no egui, no native plugins)
 ```
 crates/
-  conch_app/        — GUI application (egui/eframe), the main binary
-  conch_core/       — Config loading, color schemes, shared types
-  conch_plugin/     — Plugin host: Lua runner, JVM runtime, native plugin manager, plugin bus
-  conch_plugin_sdk/ — SDK for native (Rust) plugins: HostApi, widgets, FFI types
-  conch_pty/        — PTY abstraction and connector
-plugins/
-  conch-ssh/        — Native plugin: SSH sessions, SFTP, server tree
-  conch-files/      — Native plugin: dual-pane file explorer with local + SFTP
-  test-*/           — Test plugins for development
-java-sdk/           — Java Plugin SDK: HostApi, ConchPlugin, Widgets, PluginInfo
-examples/plugins/   — Example Lua plugins (tmux-sessions, system-info, etc.)
+  conch_core/         — Config loading, color schemes, persistent state
+  conch_plugin_sdk/   — Widget/event types shared with Lua and Java plugins
+  conch_plugin/       — Plugin host: message bus, Lua runner, Java runtime, HostApi trait
+  conch_tauri/        — The app: Tauri v2 / xterm.js UI, built-in SSH/SFTP/tunnels
+java-sdk/             — Java Plugin SDK: HostApi, ConchPlugin, Widgets, PluginInfo
+editors/
+  vscode/             — VS Code extension for Lua plugin development
 ```
 
-### conch_app Module Layout
+### conch_tauri — The App
 ```
-app.rs              — ConchApp coordinator, eframe::App impl, plugin infrastructure
-main.rs             — Entry point, CLI parsing, font loading, window setup
-window_state.rs     — Per-window state, render_window(), handle_keyboard(), SharedAppState
-input.rs            — KeyBinding parsing, key_to_bytes conversion, ResolvedShortcuts
-state.rs            — Session struct, SessionBackend, AppState
-sessions.rs         — Session creation (local + plain shell)
-notifications.rs    — Toast notification rendering and state
-icons.rs            — IconCache, icon loading
-ui_theme.rs         — UiTheme struct, font sizes, colors, light/dark mode
-context_menu.rs     — Right-click context menus
-tab_bar.rs          — Tab bar rendering
-ipc.rs              — Unix socket IPC
-watcher.rs          — File system watcher (config + theme hot reload)
-mouse.rs            — Mouse event handling
-host/               — Plugin hosting bridge
-  bridge.rs         — HostApi FFI implementation, SFTP registry, PTY write queue, global state
-  panel_renderer.rs — Widget rendering (tables, toolbars, trees, buttons, etc.)
-  plugin_panels.rs  — Panel layout (left/right/bottom panels with tabs), status bar
-  plugin_lifecycle.rs — Plugin discovery, start/stop/reload
-  plugin_manager_ui.rs — Plugin manager UI
-  session_bridge.rs — Session<->plugin bridge
-  dialogs.rs        — Plugin-triggered dialogs (form, prompt, confirm, alert, error)
-terminal/           — Terminal rendering
-  widget.rs         — Terminal grid rendering, selection, cursor
-  color.rs          — ANSI color mapping
-  size_info.rs      — Terminal size calculations
-menu_bar/           — Menu bar
-  mod.rs            — MenuAction enum, MenuBarState, mode resolution
-  egui_menu.rs      — In-window egui menu bar rendering
-  native_macos.rs   — Native macOS NSMenu integration
-platform/           — Platform-specific code
-  capabilities.rs   — PlatformCapabilities detection
-  macos.rs          — macOS-specific (fullsize content view)
-  linux.rs          — Linux-specific
-  windows.rs        — Windows-specific (dark title bar DWM API)
+src/
+  main.rs             — Entry point, config loading, launches Tauri app
+  lib.rs              — Tauri setup, commands, menu building, window management
+  theme.rs            — Color theme loading (Alacritty .toml → CSS variables)
+  pty_backend.rs      — Local PTY via portable-pty (raw byte I/O for xterm.js)
+  ipc.rs              — Unix socket IPC listener (conch msg new-tab/new-window)
+  watcher.rs          — File watcher for config/theme hot-reload
+  remote/             — Built-in SSH + SFTP + file operations (not a plugin)
+    mod.rs            — Session registry, Tauri commands, auth prompt bridge
+    ssh.rs            — SSH connection (russh 0.48), auth, proxy, channel I/O
+    sftp.rs           — SFTP operations via russh-sftp
+    local_fs.rs       — Local filesystem operations (same FileEntry interface)
+    config.rs         — Server entries, folders, tunnels, ~/.ssh/config import
+    known_hosts.rs    — OpenSSH known_hosts read/write
+    transfer.rs       — Upload/download engine with progress events
+    tunnel.rs         — SSH tunnel manager (local port forwarding)
+  plugins/            — Plugin integration for Tauri
+    mod.rs            — PluginState, discovery, enable/disable, dialog responses
+    tauri_host_api.rs — TauriHostApi implementing the safe HostApi trait
+frontend/
+  index.html          — Main HTML/CSS/JS, xterm.js terminal, layout, all inline styles
+  utils.js            — Shared utilities (esc, attr, formatSize, formatDate)
+  toast.js            — Global toast notification system
+  ssh-panel.js        — SSH server tree, quick connect, tunnels, connection forms
+  files-panel.js      — Dual-pane file explorer (local + remote)
+  tunnel-manager.js   — SSH tunnel CRUD dialog
+  plugin-widgets.js   — Widget JSON → HTML renderer, plugin dialog handlers
+  plugin-manager.js   — Plugin discovery/enable/disable dialog
+  icons/              — PNG icon set (file, folder, server, navigation, etc.)
 ```
 
-### Plugin Architecture (3 tiers)
-- **Native** (Rust/C/Go): shared libraries (`.dylib`/`.so`/`.dll`), communicate via `HostApi` C ABI vtable
-- **Java** (Java/Kotlin/Scala): `.jar` files loaded by embedded JVM, communicate via JNI bridge to HostApi
-- **Lua**: single `.lua` files, no compilation, communicate via Lua API wrappers around HostApi
-- All tiers share: declarative widget system (JSON), pub/sub event bus, config persistence, dialog APIs
-- Cross-plugin FFI: `SftpVtable` pattern for direct function-pointer access between native plugins
-- Plugin config persistence via `HostApi::get_config`/`set_config` (JSON files per plugin)
+### Plugin System (2 tiers — Lua + Java only)
+- **Java** (Java/Kotlin/Scala): `.jar` files loaded by embedded JVM via JNI
+- **Lua** (5.4): single `.lua` files loaded by mlua
+- Both tiers call the safe `HostApi` Rust trait (no C ABI, no vtables, no unsafe)
+- Declarative widget system: plugins return JSON widget trees → rendered as HTML
+- Pub/sub event bus + RPC queries for inter-plugin communication
+- Blocking dialog APIs (form, prompt, confirm) via oneshot channels
+- Plugin config persistence: `~/.config/conch/plugins/{name}/{key}.json`
+- Plugins are NOT auto-loaded — managed via Tools > Plugin Manager
+- Enabled plugins persisted in `state.toml` and restored on restart
+
+### Built-in Features (not plugins)
+SSH sessions, SFTP file browsing, file transfers, SSH tunnels, server
+management, `~/.ssh/config` import, and host key verification are all
+built directly into `conch_tauri/src/remote/`. They were previously
+separate native plugins but were consolidated for reliability.
 
 ### Key Patterns
-- egui immediate-mode: all UI rebuilt every frame, state lives on ConchApp
-- Plugin bus: pub/sub event system for plugin<->app and plugin<->plugin communication
-- `query_plugin`: IPC between plugins (JSON messages over mpsc channels)
-- Panel registry: plugins register panels at locations (Left, Right, Bottom)
-- `#[repr(C)]` vtables with manual ref counting for cross-plugin FFI
-- Terminal owns keyboard input by default — only divert when a widget explicitly has focus
-- Tab key: intercepted in `raw_input_hook` before egui sees it, sent directly to PTY
+- **Tauri v2 webview**: HTML/CSS/JS frontend, Rust backend via commands + events
+- **xterm.js**: handles all terminal emulation; backend provides raw byte streams
+- **CSS custom properties**: all colors derived from Alacritty theme files (`var(--bg)`, etc.)
+- **Shared JS utilities**: `utils.js` provides `esc()`, `attr()`, `formatSize()`, `formatDate()` — no duplicating these across modules
+- **Toast notifications**: all user-facing messages go through `toast.js` — never use `alert()` or `confirm()`
+- **Overlay dialogs**: use the `ssh-overlay` / `ssh-form` CSS pattern with Escape to close
+- **Auth prompts**: oneshot channels — emit event to frontend, block calling thread on response
+- **SSH sessions**: reuse the same `pty-output`/`pty-exit` events as local PTY tabs
+- **Plugin menu items**: stored in shared state, native menu rebuilt dynamically after enable
+- **State persistence**: window size, panel widths, panel visibility, enabled plugins in `state.toml`
+- **Hot-reload**: `watcher.rs` polls config.toml + themes/ every 2s, emits `config-changed` event
 
 ## Style Guide
 
@@ -117,19 +121,30 @@ platform/           — Platform-specific code
 - `#[serde(default)]` on config structs for backward compatibility
 - Keep `unsafe` blocks minimal and well-commented
 - No unnecessary `clone()` — borrow where possible
+- Factory methods for repeated struct construction (e.g., `PluginState::make_host_api()`)
+
+### Frontend (JS)
+- Each JS module is a self-contained IIFE exposing a global (e.g., `window.sshPanel`)
+- Use `window.utils.esc()` / `window.utils.attr()` — never define local copies
+- Use the global `toast.js` system for all notifications — never use `alert()` or `confirm()`
+- CSS uses custom properties (`var(--bg)`, `var(--fg)`, `var(--text-secondary)`) — never hardcode hex colors
+- Overlay dialogs use the `ssh-overlay` / `ssh-form` CSS pattern
+- Escape handlers must use capture phase (`addEventListener(..., true)`) to fire before xterm.js
+- Icons: use PNG assets from `frontend/icons/` via `<img>` tags or `iconHtml()` helper
 
 ### Config
-- User config: `config.toml` (loaded by conch_core)
-- Persistent state: `state.toml` (window size, loaded plugins, layout)
-- Plugin config: `{plugin_name}/{key}.json` files via HostApi
+- User config: `~/.config/conch/config.toml` (loaded by conch_core)
+- Persistent state: `~/.config/conch/state.toml` (window size, plugins, layout)
+- SSH server config: `~/.config/conch/remote/servers.json`
+- Plugin config: `~/.config/conch/plugins/{plugin_name}/{key}.json`
 - Keyboard shortcuts: configurable in `[conch.keyboard]` section
 - Default shortcuts use `cmd+` prefix (maps to Cmd on macOS, Ctrl on Linux/Windows)
 
 ### Testing Standards
 - `#[cfg(test)] mod tests` at the bottom of each file
-- Test pure logic: parsing, config defaults, widget building, keybinding matching
+- Test pure logic: parsing, config defaults, widget building
 - Use `assert_eq!` with descriptive messages
 - Test edge cases: empty input, missing fields, boundary values
 - Plugin SDK: test widget serialization/deserialization
 - Config: test defaults, serde round-trips, backward compat with `serde(default)`
-- Keybindings: test parsing, matching, modifier combos
+- Currently 192 tests across the workspace — keep this growing

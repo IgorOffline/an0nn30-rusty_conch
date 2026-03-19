@@ -1,0 +1,685 @@
+// Plugin Widget Renderer — converts Widget JSON trees to HTML.
+// Also handles widget interaction events back to the backend.
+
+(function (exports) {
+  'use strict';
+
+  let invoke = null;
+  let listen = null;
+  const pluginMenuItems = [];
+
+  function log(msg) { console.log('[plugin-widgets] ' + msg); }
+
+  function init(opts) {
+    invoke = opts.invoke;
+    listen = opts.listen;
+
+    // Listen for widget updates from plugins.
+    listen('plugin-widgets-updated', (event) => {
+      const { handle, plugin, widgets_json } = event.payload;
+      const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
+      if (container) {
+        renderWidgets(container, widgets_json, plugin);
+      }
+    });
+
+    // Listen for plugin menu item registrations → store and add to Tools menu area.
+    listen('plugin-menu-item', (event) => {
+      const item = event.payload;
+      if (!item || !item.plugin || !item.action) return;
+      pluginMenuItems.push(item);
+      // Emit a custom DOM event so the menu-action handler can pick it up.
+      log('Plugin registered menu item: ' + item.label + ' (' + item.plugin + ')');
+    });
+
+    // Listen for plugin dialog requests.
+    listen('plugin-form-dialog', handleFormDialog);
+    listen('plugin-prompt-dialog', handlePromptDialog);
+    listen('plugin-confirm-dialog', handleConfirmDialog);
+
+    // Listen for plugin notifications → route to toast system.
+    listen('plugin-notification', (event) => {
+      const { plugin, json } = event.payload;
+      try {
+        const data = JSON.parse(json);
+        const level = data.level || 'info';
+        const title = data.title || plugin;
+        const body = data.body || '';
+        if (window.toast) window.toast[level === 'error' ? 'error' : level === 'warn' ? 'warn' : level === 'success' ? 'success' : 'info'](title, body);
+      } catch (_) {}
+    });
+
+    // Listen for write-to-pty events from plugins.
+    listen('plugin-write-pty', (event) => {
+      if (opts.writeToActivePty) opts.writeToActivePty(event.payload);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Widget rendering
+  // ---------------------------------------------------------------------------
+
+  function renderWidgets(container, widgetsJson, pluginName) {
+    let widgets;
+    try {
+      widgets = typeof widgetsJson === 'string' ? JSON.parse(widgetsJson) : widgetsJson;
+    } catch (e) {
+      container.innerHTML = '<div class="pw-error">Invalid widget JSON</div>';
+      return;
+    }
+
+    if (!Array.isArray(widgets)) widgets = [widgets];
+
+    const frag = document.createDocumentFragment();
+    for (const w of widgets) {
+      const el = renderWidget(w, pluginName);
+      if (el) frag.appendChild(el);
+    }
+    container.innerHTML = '';
+    container.appendChild(frag);
+  }
+
+  function renderWidget(w, pluginName) {
+    if (!w || !w.type) return null;
+
+    switch (w.type) {
+      case 'heading': return renderHeading(w);
+      case 'label': return renderLabel(w);
+      case 'text': return renderText(w);
+      case 'scroll_text': return renderScrollText(w);
+      case 'key_value': return renderKeyValue(w);
+      case 'separator': return renderSeparator();
+      case 'spacer': return renderSpacer(w);
+      case 'icon_label': return renderIconLabel(w);
+      case 'badge': return renderBadge(w);
+      case 'progress': return renderProgress(w);
+      case 'button': return renderButton(w, pluginName);
+      case 'text_input': return renderTextInput(w, pluginName);
+      case 'text_edit': return renderTextEdit(w, pluginName);
+      case 'checkbox': return renderCheckbox(w, pluginName);
+      case 'combo_box': return renderComboBox(w, pluginName);
+      case 'toolbar': return renderToolbar(w, pluginName);
+      case 'tree_view': return renderTreeView(w, pluginName);
+      case 'table': return renderTable(w, pluginName);
+      case 'horizontal': return renderHorizontal(w, pluginName);
+      case 'vertical': return renderVertical(w, pluginName);
+      case 'scroll_area': return renderScrollArea(w, pluginName);
+      case 'tabs': return renderTabs(w, pluginName);
+      default:
+        const el = document.createElement('div');
+        el.className = 'pw-unknown';
+        el.textContent = `[unknown widget: ${w.type}]`;
+        return el;
+    }
+  }
+
+  // -- Layout --
+
+  function renderHorizontal(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-horizontal';
+    if (w.spacing) el.style.gap = w.spacing + 'px';
+    if (w.centered) el.style.justifyContent = 'center';
+    for (const child of (w.children || [])) {
+      const c = renderWidget(child, pn);
+      if (c) el.appendChild(c);
+    }
+    return el;
+  }
+
+  function renderVertical(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-vertical';
+    if (w.spacing) el.style.gap = w.spacing + 'px';
+    for (const child of (w.children || [])) {
+      const c = renderWidget(child, pn);
+      if (c) el.appendChild(c);
+    }
+    return el;
+  }
+
+  function renderScrollArea(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-scroll-area';
+    if (w.max_height) el.style.maxHeight = w.max_height + 'px';
+    for (const child of (w.children || [])) {
+      const c = renderWidget(child, pn);
+      if (c) el.appendChild(c);
+    }
+    return el;
+  }
+
+  function renderTabs(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-tabs';
+    const bar = document.createElement('div');
+    bar.className = 'pw-tabs-bar';
+    const content = document.createElement('div');
+    content.className = 'pw-tabs-content';
+
+    (w.tabs || []).forEach((tab, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'pw-tab-btn' + (i === w.active ? ' active' : '');
+      btn.textContent = tab.label;
+      btn.addEventListener('click', () => {
+        sendEvent(pn, { type: 'tab_changed', id: w.id, active: i });
+      });
+      bar.appendChild(btn);
+
+      if (i === w.active) {
+        for (const child of (tab.children || [])) {
+          const c = renderWidget(child, pn);
+          if (c) content.appendChild(c);
+        }
+      }
+    });
+
+    el.appendChild(bar);
+    el.appendChild(content);
+    return el;
+  }
+
+  // -- Data Display --
+
+  function renderHeading(w) {
+    const el = document.createElement('h3');
+    el.className = 'pw-heading';
+    el.textContent = w.text;
+    return el;
+  }
+
+  function renderLabel(w) {
+    const el = document.createElement('span');
+    el.className = 'pw-label' + (w.style ? ' pw-style-' + w.style : '');
+    el.textContent = w.text;
+    return el;
+  }
+
+  function renderText(w) {
+    const el = document.createElement('pre');
+    el.className = 'pw-text';
+    el.textContent = w.text;
+    return el;
+  }
+
+  function renderScrollText(w) {
+    const el = document.createElement('pre');
+    el.className = 'pw-scroll-text';
+    if (w.max_height) el.style.maxHeight = w.max_height + 'px';
+    el.textContent = w.text;
+    // Auto-scroll to bottom.
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    return el;
+  }
+
+  function renderKeyValue(w) {
+    const el = document.createElement('div');
+    el.className = 'pw-kv';
+    el.innerHTML = `<span class="pw-kv-key">${esc(w.key)}</span><span class="pw-kv-value">${esc(w.value)}</span>`;
+    return el;
+  }
+
+  function renderSeparator() {
+    const el = document.createElement('hr');
+    el.className = 'pw-separator';
+    return el;
+  }
+
+  function renderSpacer(w) {
+    const el = document.createElement('div');
+    el.className = 'pw-spacer';
+    if (w.size) el.style.height = w.size + 'px';
+    else el.style.flex = '1';
+    return el;
+  }
+
+  function renderIconLabel(w) {
+    const el = document.createElement('span');
+    el.className = 'pw-icon-label' + (w.style ? ' pw-style-' + w.style : '');
+    if (w.icon) el.innerHTML = iconHtml(w.icon, 14) + esc(w.text);
+    else el.textContent = w.text;
+    return el;
+  }
+
+  function renderBadge(w) {
+    const el = document.createElement('span');
+    el.className = 'pw-badge pw-badge-' + (w.variant || 'info');
+    el.textContent = w.text;
+    return el;
+  }
+
+  function renderProgress(w) {
+    const el = document.createElement('div');
+    el.className = 'pw-progress';
+    const pct = Math.round((w.fraction || 0) * 100);
+    el.innerHTML = `<div class="pw-progress-bar" style="width:${pct}%"></div>`;
+    if (w.label) {
+      const lbl = document.createElement('span');
+      lbl.className = 'pw-progress-label';
+      lbl.textContent = w.label;
+      el.appendChild(lbl);
+    }
+    return el;
+  }
+
+  // -- Interactive --
+
+  function renderButton(w, pn) {
+    const el = document.createElement('button');
+    el.className = 'pw-button';
+    if (w.icon) el.innerHTML = iconHtml(w.icon, 14) + esc(w.label);
+    else el.textContent = w.label;
+    if (w.enabled === false) el.disabled = true;
+    el.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: w.id }));
+    return el;
+  }
+
+  function renderTextInput(w, pn) {
+    const el = document.createElement('input');
+    el.className = 'pw-text-input';
+    el.type = 'text';
+    el.value = w.value || '';
+    if (w.hint) el.placeholder = w.hint;
+    el.spellcheck = false;
+    let debounce = null;
+    el.addEventListener('input', () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        sendEvent(pn, { type: 'text_input_changed', id: w.id, value: el.value });
+      }, 200);
+    });
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendEvent(pn, { type: 'text_input_submit', id: w.id, value: el.value });
+      if (e.key === 'ArrowDown') sendEvent(pn, { type: 'text_input_arrow_down', id: w.id });
+      if (e.key === 'ArrowUp') sendEvent(pn, { type: 'text_input_arrow_up', id: w.id });
+    });
+    if (w.request_focus) setTimeout(() => el.focus(), 50);
+    return el;
+  }
+
+  function renderTextEdit(w, pn) {
+    const el = document.createElement('textarea');
+    el.className = 'pw-text-edit';
+    el.value = w.value || '';
+    if (w.hint) el.placeholder = w.hint;
+    if (w.lines) el.rows = w.lines;
+    el.addEventListener('input', () => {
+      sendEvent(pn, { type: 'text_edit_changed', id: w.id, value: el.value });
+    });
+    return el;
+  }
+
+  function renderCheckbox(w, pn) {
+    const el = document.createElement('label');
+    el.className = 'pw-checkbox';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = w.checked;
+    input.addEventListener('change', () => {
+      sendEvent(pn, { type: 'checkbox_changed', id: w.id, checked: input.checked });
+    });
+    el.appendChild(input);
+    el.appendChild(document.createTextNode(' ' + w.label));
+    return el;
+  }
+
+  function renderComboBox(w, pn) {
+    const el = document.createElement('select');
+    el.className = 'pw-combo-box';
+    for (const opt of (w.options || [])) {
+      const o = document.createElement('option');
+      o.value = opt.value;
+      o.textContent = opt.label;
+      if (opt.value === w.selected) o.selected = true;
+      el.appendChild(o);
+    }
+    el.addEventListener('change', () => {
+      sendEvent(pn, { type: 'combo_box_changed', id: w.id, value: el.value });
+    });
+    return el;
+  }
+
+  // -- Toolbar --
+
+  function renderToolbar(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-toolbar';
+    for (const item of (w.items || [])) {
+      if (item.type === 'separator') {
+        const sep = document.createElement('div');
+        sep.className = 'pw-toolbar-sep';
+        el.appendChild(sep);
+      } else if (item.type === 'spacer') {
+        const sp = document.createElement('div');
+        sp.className = 'pw-toolbar-spacer';
+        el.appendChild(sp);
+      } else if (item.type === 'button') {
+        const btn = document.createElement('button');
+        btn.className = 'pw-toolbar-btn';
+        btn.textContent = item.label || '';
+        if (item.tooltip) btn.title = item.tooltip;
+        if (item.enabled === false) btn.disabled = true;
+        btn.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: item.id }));
+        el.appendChild(btn);
+      } else if (item.type === 'text_input') {
+        const input = document.createElement('input');
+        input.className = 'pw-toolbar-input';
+        input.type = 'text';
+        input.value = item.value || '';
+        if (item.hint) input.placeholder = item.hint;
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') sendEvent(pn, { type: 'toolbar_input_submit', id: item.id, value: input.value });
+        });
+        el.appendChild(input);
+      }
+    }
+    return el;
+  }
+
+  // -- Tree View --
+
+  function renderTreeView(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-tree';
+    for (const node of (w.nodes || [])) {
+      el.appendChild(renderTreeNode(node, w.id, w.selected, pn));
+    }
+    return el;
+  }
+
+  function renderTreeNode(node, treeId, selectedId, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-tree-node';
+
+    const row = document.createElement('div');
+    row.className = 'pw-tree-row' + (node.id === selectedId ? ' selected' : '');
+    if (node.bold) row.classList.add('bold');
+
+    const hasChildren = node.children && node.children.length > 0;
+    const expanded = node.expanded !== false;
+
+    if (hasChildren) {
+      const arrow = document.createElement('span');
+      arrow.className = 'pw-tree-arrow';
+      arrow.textContent = expanded ? '▼' : '▶';
+      arrow.addEventListener('click', (e) => {
+        e.stopPropagation();
+        sendEvent(pn, { type: 'tree_toggle', id: treeId, node_id: node.id, expanded: !expanded });
+      });
+      row.appendChild(arrow);
+    } else {
+      const sp = document.createElement('span');
+      sp.className = 'pw-tree-arrow-placeholder';
+      row.appendChild(sp);
+    }
+
+    if (node.icon) {
+      const iconEl = document.createElement('span');
+      iconEl.innerHTML = iconHtml(node.icon, 14);
+      row.appendChild(iconEl);
+    }
+
+    const label = document.createElement('span');
+    label.className = 'pw-tree-label';
+    label.textContent = node.label;
+    row.appendChild(label);
+
+    if (node.badge) {
+      const badge = document.createElement('span');
+      badge.className = 'pw-tree-badge';
+      badge.textContent = node.badge;
+      row.appendChild(badge);
+    }
+
+    row.addEventListener('click', () => {
+      sendEvent(pn, { type: 'tree_select', id: treeId, node_id: node.id });
+    });
+    row.addEventListener('dblclick', () => {
+      sendEvent(pn, { type: 'tree_activate', id: treeId, node_id: node.id });
+    });
+
+    el.appendChild(row);
+
+    if (hasChildren && expanded) {
+      const childContainer = document.createElement('div');
+      childContainer.className = 'pw-tree-children';
+      for (const child of node.children) {
+        childContainer.appendChild(renderTreeNode(child, treeId, selectedId, pn));
+      }
+      el.appendChild(childContainer);
+    }
+
+    return el;
+  }
+
+  // -- Table --
+
+  function renderTable(w, pn) {
+    const el = document.createElement('div');
+    el.className = 'pw-table-wrap';
+
+    const table = document.createElement('table');
+    table.className = 'pw-table';
+
+    // Header
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    for (const col of (w.columns || [])) {
+      if (col.visible === false) continue;
+      const th = document.createElement('th');
+      th.textContent = col.label;
+      if (col.width) th.style.width = col.width + 'px';
+      if (col.sortable) {
+        th.style.cursor = 'pointer';
+        if (w.sort_column === col.id) {
+          th.textContent += w.sort_ascending ? ' \u25B4' : ' \u25BE';
+        }
+        th.addEventListener('click', () => {
+          const asc = w.sort_column === col.id ? !w.sort_ascending : true;
+          sendEvent(pn, { type: 'table_sort', id: w.id, column: col.id, ascending: asc });
+        });
+      }
+      headerRow.appendChild(th);
+    }
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    // Body
+    const tbody = document.createElement('tbody');
+    for (const row of (w.rows || [])) {
+      const tr = document.createElement('tr');
+      tr.className = 'pw-table-row' + (row.id === w.selected_row ? ' selected' : '');
+      for (let i = 0; i < (w.columns || []).length; i++) {
+        const col = w.columns[i];
+        if (col.visible === false) continue;
+        const cell = row.cells[i];
+        const td = document.createElement('td');
+        if (typeof cell === 'string') {
+          td.textContent = cell;
+        } else if (cell && typeof cell === 'object') {
+          if (cell.icon) td.innerHTML = iconHtml(cell.icon, 14) + esc(cell.text || '');
+          else td.textContent = cell.text || '';
+        }
+        tr.appendChild(td);
+      }
+      tr.addEventListener('click', () => {
+        sendEvent(pn, { type: 'table_select', id: w.id, row_id: row.id });
+      });
+      tr.addEventListener('dblclick', () => {
+        sendEvent(pn, { type: 'table_activate', id: w.id, row_id: row.id });
+      });
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    el.appendChild(table);
+    return el;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Event dispatch
+  // ---------------------------------------------------------------------------
+
+  function sendEvent(pluginName, widgetEvent) {
+    if (!invoke || !pluginName) return;
+    const eventJson = JSON.stringify({ kind: 'widget', ...widgetEvent });
+    invoke('plugin_widget_event', { pluginName, eventJson }).catch((e) => {
+      console.error('plugin_widget_event error:', e);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  const esc = window.utils.esc;
+  const attr = window.utils.attr;
+
+  // ---------------------------------------------------------------------------
+  // Plugin dialogs
+  // ---------------------------------------------------------------------------
+
+  function handleFormDialog(event) {
+    const { prompt_id, json } = event.payload;
+    let desc;
+    try { desc = typeof json === 'string' ? JSON.parse(json) : json; } catch (_) { desc = {}; }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '4000';
+
+    const title = desc.title || 'Form';
+    const fields = desc.fields || [];
+    const buttons = desc.buttons || [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'OK' }];
+
+    let fieldsHtml = '';
+    for (const f of fields) {
+      if (f.type === 'separator') { fieldsHtml += '<hr class="pw-separator">'; continue; }
+      if (f.type === 'label') { fieldsHtml += `<div class="pw-label">${esc(f.text || '')}</div>`; continue; }
+      const label = f.label || f.id || '';
+      const hint = f.hint ? ` placeholder="${attr(f.hint)}"` : '';
+      const val = f.value != null ? ` value="${attr(String(f.value))}"` : '';
+      if (f.type === 'text') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="text" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></label>`;
+      } else if (f.type === 'password') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="password" data-field="${attr(f.id)}"${val}${hint}></label>`;
+      } else if (f.type === 'number') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="number" data-field="${attr(f.id)}"${val}></label>`;
+      } else if (f.type === 'combo') {
+        const opts = (f.options || []).map(o => `<option value="${attr(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('');
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<select data-field="${attr(f.id)}">${opts}</select></label>`;
+      } else if (f.type === 'checkbox') {
+        const checked = f.value ? 'checked' : '';
+        fieldsHtml += `<label class="pw-checkbox"><input type="checkbox" data-field="${attr(f.id)}" ${checked}> ${esc(label)}</label>`;
+      } else if (f.type === 'host_port') {
+        fieldsHtml += `<div class="ssh-form-row"><label class="ssh-form-label" style="flex:1">${esc(label)}<input type="text" data-field="${attr(f.host_id || 'host')}" value="${attr(f.host_value || '')}" spellcheck="false"></label>`;
+        fieldsHtml += `<label class="ssh-form-label" style="width:80px">Port<input type="number" data-field="${attr(f.port_id || 'port')}" value="${attr(f.port_value || '22')}"></label></div>`;
+      } else if (f.type === 'file_picker') {
+        fieldsHtml += `<label class="ssh-form-label">${esc(label)}<input type="text" data-field="${attr(f.id)}"${val}${hint} spellcheck="false"></label>`;
+      }
+    }
+
+    let buttonsHtml = '';
+    for (const b of buttons) {
+      const primary = b.id === 'ok' || b.id === 'save' || b.id === 'save_connect' ? ' primary' : '';
+      buttonsHtml += `<button class="ssh-form-btn${primary}" data-action="${attr(b.id)}">${esc(b.label)}</button>`;
+    }
+
+    overlay.innerHTML = `<div class="ssh-form"><div class="ssh-form-title">${esc(title)}</div><div class="ssh-form-body">${fieldsHtml}</div><div class="ssh-form-buttons">${buttonsHtml}</div></div>`;
+    document.body.appendChild(overlay);
+
+    const dismiss = (result) => {
+      overlay.remove();
+      invoke('dialog_respond_form', { promptId: prompt_id, result }).catch(() => {});
+    };
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
+    overlay.querySelectorAll('.ssh-form-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        if (action === 'cancel') { dismiss(null); return; }
+        // Collect field values.
+        const values = { _action: action };
+        overlay.querySelectorAll('[data-field]').forEach(el => {
+          const id = el.dataset.field;
+          if (el.type === 'checkbox') values[id] = el.checked;
+          else values[id] = el.value;
+        });
+        dismiss(JSON.stringify(values));
+      });
+    });
+
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); dismiss(null); document.removeEventListener('keydown', onKey, true); } };
+    document.addEventListener('keydown', onKey, true);
+  }
+
+  function handlePromptDialog(event) {
+    const { prompt_id, message, default_value } = event.payload;
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '4000';
+    overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Prompt</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div><input class="pw-text-input" id="pd-input" type="text" value="${attr(default_value || '')}" spellcheck="false"></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="pd-cancel">Cancel</button><button class="ssh-form-btn primary" id="pd-ok">OK</button></div></div>`;
+    document.body.appendChild(overlay);
+    setTimeout(() => overlay.querySelector('#pd-input').focus(), 50);
+
+    const dismiss = (val) => {
+      overlay.remove();
+      invoke('dialog_respond_prompt', { promptId: prompt_id, value: val }).catch(() => {});
+    };
+
+    overlay.querySelector('#pd-cancel').addEventListener('click', () => dismiss(null));
+    overlay.querySelector('#pd-ok').addEventListener('click', () => dismiss(overlay.querySelector('#pd-input').value));
+    overlay.querySelector('#pd-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') dismiss(overlay.querySelector('#pd-input').value); });
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(null); });
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); dismiss(null); document.removeEventListener('keydown', onKey, true); } };
+    document.addEventListener('keydown', onKey, true);
+  }
+
+  function handleConfirmDialog(event) {
+    const { prompt_id, message } = event.payload;
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+    overlay.style.zIndex = '4000';
+    overlay.innerHTML = `<div class="ssh-form ssh-form-small"><div class="ssh-form-title">Confirm</div><div class="ssh-form-body"><div class="pw-label">${esc(message)}</div></div><div class="ssh-form-buttons"><button class="ssh-form-btn" id="cd-no">No</button><button class="ssh-form-btn primary" id="cd-yes">Yes</button></div></div>`;
+    document.body.appendChild(overlay);
+
+    const dismiss = (val) => {
+      overlay.remove();
+      invoke('dialog_respond_confirm', { promptId: prompt_id, accepted: val }).catch(() => {});
+    };
+
+    overlay.querySelector('#cd-no').addEventListener('click', () => dismiss(false));
+    overlay.querySelector('#cd-yes').addEventListener('click', () => dismiss(true));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) dismiss(false); });
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); dismiss(false); document.removeEventListener('keydown', onKey, true); } };
+    document.addEventListener('keydown', onKey, true);
+  }
+
+  /// Map a plugin icon name to an <img> tag using the PNG icon set.
+  function iconHtml(name, size) {
+    if (!name) return '';
+    size = size || 14;
+    // Map icon names to filenames (dark variants for dark theme).
+    const map = {
+      'file': 'file-dark', 'folder': 'folder', 'folder-open': 'folder-open',
+      'server': 'server', 'network-server': 'network-server', 'terminal': 'terminal',
+      'go-home': 'go-home-dark', 'go-next': 'go-next-dark', 'go-previous': 'go-previous-dark',
+      'refresh': 'view-refresh-dark', 'folder-new': 'folder-new-dark',
+      'transfer-up': 'transfer-up-dark', 'transfer-down': 'transfer-down-dark',
+      'tab-close': 'tab-close-dark', 'computer': 'computer-dark',
+      'locked': 'locked-dark', 'unlocked': 'unlocked-dark', 'eye': 'eye-dark',
+    };
+    const file = map[name] || name;
+    return `<img src="icons/${file}.png" width="${size}" height="${size}" style="vertical-align:middle;margin-right:3px">`;
+  }
+
+  function getMenuItems() { return pluginMenuItems.slice(); }
+
+  function triggerMenuAction(pluginName, action) {
+    if (!invoke) return;
+    invoke('trigger_plugin_menu_action', { pluginName, action }).catch((e) => {
+      console.error('trigger_plugin_menu_action error:', e);
+    });
+  }
+
+  exports.pluginWidgets = { init, renderWidgets, getMenuItems, triggerMenuAction };
+})(window);

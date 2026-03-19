@@ -29,7 +29,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BODY=$(./.github/workflows/generate_changelog.sh)
-          # Write to file to avoid escaping issues.
           echo "$BODY" > /tmp/release_body.md
           cat /tmp/release_body.md
 
@@ -38,7 +37,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Try to edit an existing release first (in case upload_asset.sh created a draft).
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --draft --notes-file /tmp/release_body.md
           else
@@ -70,10 +68,10 @@ jobs:
         run: cargo test --release --target=x86_64-apple-darwin
 
       - name: Build ARM64
-        run: cargo build --release --target=aarch64-apple-darwin
+        run: cargo build --release -p conch_tauri --target=aarch64-apple-darwin
 
       - name: Build x86_64
-        run: cargo build --release --target=x86_64-apple-darwin
+        run: cargo build --release -p conch_tauri --target=x86_64-apple-darwin
 
       - name: Extract version
         id: version
@@ -84,26 +82,18 @@ jobs:
       - name: Create universal .app bundle
         run: |
           APP="Conch.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Plugins"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-          # Create universal binary
           lipo -create \
             target/aarch64-apple-darwin/release/conch \
             target/x86_64-apple-darwin/release/conch \
             -output "$APP/Contents/MacOS/conch"
 
-          # Create universal plugin libraries
-          for plugin in libconch_ssh.dylib libconch_files.dylib; do
-            lipo -create \
-              "target/aarch64-apple-darwin/release/$plugin" \
-              "target/x86_64-apple-darwin/release/$plugin" \
-              -output "$APP/Contents/Plugins/$plugin"
-          done
-
           cp packaging/macos/Info.plist "$APP/Contents/"
-          cp crates/conch_app/icons/conch.icns "$APP/Contents/Resources/"
+          if [ -f crates/conch_tauri/icons/icon.icns ]; then
+            cp crates/conch_tauri/icons/icon.icns "$APP/Contents/Resources/conch.icns"
+          fi
 
-          # Remove any existing signature, then ad-hoc sign
           codesign --remove-signature "$APP" 2>/dev/null || true
           codesign --force --deep --sign - "$APP"
 
@@ -112,14 +102,10 @@ jobs:
 
       - name: Create DMG
         run: |
-          # create-dmg copies contents of source_folder into the DMG,
-          # so stage the .app inside a temporary directory.
           mkdir -p dmg-staging
           mv Conch.app dmg-staging/
           create-dmg \
             --volname "Conch" \
-            --volicon "crates/conch_app/icons/conch.icns" \
-            --background "packaging/macos/dmg-background.png" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 80 \
@@ -165,7 +151,7 @@ jobs:
         run: cargo test --release
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release -p conch_tauri
 
       - name: Extract version
         id: version
@@ -177,9 +163,6 @@ jobs:
         run: |
           mkdir -p portable
           cp ./target/release/conch.exe portable/
-          cp ./target/release/conch_ssh.dll portable/ 2>/dev/null || true
-          cp ./target/release/conch_files.dll portable/ 2>/dev/null || true
-          # Zip the portable directory (exe + plugin DLLs)
           cd portable && 7z a -tzip "../Conch-v${{ steps.version.outputs.version }}-portable.zip" . && cd ..
           ./.github/workflows/upload_asset.sh \
             ./Conch-v${{ steps.version.outputs.version }}-portable.zip $GITHUB_TOKEN
@@ -212,12 +195,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install system deps
+      - name: Install system deps (Tauri/WebKit)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libwayland-dev libgtk-3-dev libssl-dev pkg-config
+            libwebkit2gtk-4.1-dev libgtk-3-dev libssl-dev pkg-config \
+            libayatana-appindicator3-dev librsvg2-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -229,7 +212,7 @@ jobs:
         run: cargo test --release
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release -p conch_tauri
 
       - name: Extract version
         id: version
@@ -244,12 +227,12 @@ jobs:
 
       - name: Build AMD64 .deb
         run: |
-          cargo deb -p conch_app --no-build
+          cargo deb -p conch_tauri --no-build
           cp target/debian/*.deb ./conch-v${{ steps.version.outputs.version }}-amd64.deb
 
       - name: Build AMD64 .rpm
         run: |
-          cargo generate-rpm -p crates/conch_app
+          cargo generate-rpm -p crates/conch_tauri
           cp target/generate-rpm/*.rpm ./conch-v${{ steps.version.outputs.version }}-1.x86_64.rpm
 
       - name: Upload AMD64 packages
@@ -259,37 +242,8 @@ jobs:
           ./.github/workflows/upload_asset.sh \
             ./conch-v${{ steps.version.outputs.version }}-1.x86_64.rpm $GITHUB_TOKEN
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Clean host build artifacts before cross
-        run: cargo clean
-
-      - name: Build ARM64 with cross
-        run: cross build --release --target aarch64-unknown-linux-gnu
-
-      - name: Build ARM64 .deb
-        run: |
-          cargo deb -p conch_app --no-build --no-strip \
-            --target aarch64-unknown-linux-gnu
-          cp target/aarch64-unknown-linux-gnu/debian/*.deb \
-            ./conch-v${{ steps.version.outputs.version }}-arm64.deb
-
-      - name: Build ARM64 .rpm
-        run: |
-          cargo generate-rpm -p crates/conch_app --target aarch64-unknown-linux-gnu
-          cp target/aarch64-unknown-linux-gnu/generate-rpm/*.rpm \
-            ./conch-v${{ steps.version.outputs.version }}-1.aarch64.rpm
-
-      - name: Upload ARM64 packages
-        run: |
-          ./.github/workflows/upload_asset.sh \
-            ./conch-v${{ steps.version.outputs.version }}-arm64.deb $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh \
-            ./conch-v${{ steps.version.outputs.version }}-1.aarch64.rpm $GITHUB_TOKEN
-
   # ---------------------------------------------------------------------------
-  # Extras — VS Code extension, Java SDK, example config & plugins
+  # Extras — VS Code extension, Java SDK
   # ---------------------------------------------------------------------------
   extras:
     needs: changelog
@@ -346,14 +300,8 @@ jobs:
           ./.github/workflows/upload_asset.sh \
             ./editors/vscode/conch-lua-*.vsix $GITHUB_TOKEN
 
-      - name: Package example config & plugins
+      - name: Upload example config
         run: |
-          mkdir -p conch-examples
-          cp config.example.toml conch-examples/
-          cp -r examples/plugins conch-examples/plugins
-          tar czf conch-examples-v${{ steps.version.outputs.version }}.tar.gz conch-examples/
-
-      - name: Upload examples archive
-        run: |
+          cp config.example.toml conch-config-example-v${{ steps.version.outputs.version }}.toml
           ./.github/workflows/upload_asset.sh \
-            ./conch-examples-v${{ steps.version.outputs.version }}.tar.gz $GITHUB_TOKEN
+            ./conch-config-example-v${{ steps.version.outputs.version }}.toml $GITHUB_TOKEN

@@ -1,0 +1,1738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conch</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <style>
+    :root {
+      --bg: #282a36; --fg: #f8f8f2; --dim-fg: #6272a4;
+      --panel-bg: #21222c; --tab-bar-bg: #1f212b; --tab-border: #3a3d4f;
+      --active-highlight: #44475a;
+      --red: #ff5555; --green: #50fa7b; --yellow: #f1fa8c; --blue: #bd93f9;
+      --cyan: #8be9fd; --magenta: #ff79c6;
+      --input-bg: #2b2e3a; --hover-bg: #2b2e3a;
+      --text-secondary: #c5c8d5; --text-muted: #8b8fa3;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden; background: var(--bg);
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+    }
+    #app { width: 100%; height: 100%; display: flex; flex-direction: column; }
+    #drag-handle {
+      height: 28px; flex-shrink: 0; display: none;
+      background: var(--tab-bar-bg);
+      -webkit-app-region: drag;
+    }
+    #drag-handle.visible { display: block; }
+
+    /* -- Custom titlebar (Windows) -- */
+    #custom-titlebar {
+      display: none; /* shown via JS on Windows */
+      height: 30px;
+      flex-shrink: 0;
+      background: var(--tab-bar-bg);
+      color: var(--text-secondary);
+      font: 12px/30px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #app.custom-titlebar #custom-titlebar { display: flex; }
+    /* When custom titlebar is active, hide the old drag handle */
+    #app.custom-titlebar #drag-handle { display: none !important; }
+
+    .titlebar-menu-area {
+      display: flex;
+      flex-shrink: 0;
+    }
+    .titlebar-menu-btn {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font: inherit;
+      padding: 0 10px;
+      height: 30px;
+      cursor: pointer;
+      outline: none;
+    }
+    .titlebar-menu-btn:hover,
+    .titlebar-menu-btn.active {
+      background: var(--active-highlight);
+      color: var(--fg);
+    }
+
+    .titlebar-drag {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-app-region: drag;
+    }
+    .titlebar-title {
+      font-size: 12px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .titlebar-controls {
+      display: flex;
+      flex-shrink: 0;
+      height: 30px;
+    }
+    .titlebar-btn {
+      width: 46px;
+      height: 30px;
+      border: none;
+      background: none;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      outline: none;
+    }
+    .titlebar-btn:hover {
+      background: var(--active-highlight);
+      color: var(--fg);
+    }
+    .titlebar-btn-close:hover {
+      background: #e81123;
+      color: #fff;
+    }
+
+    /* Dropdown menus */
+    .titlebar-dropdown {
+      position: fixed;
+      z-index: 10000;
+      min-width: 220px;
+      background: var(--panel-bg);
+      border: 1px solid var(--tab-border);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      padding: 4px 0;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--text-secondary);
+    }
+    .titlebar-dropdown-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 24px 4px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .titlebar-dropdown-item:hover {
+      background: var(--active-highlight);
+      color: var(--fg);
+    }
+    .titlebar-dropdown-label {
+      flex: 1;
+      margin-right: 24px;
+    }
+    .titlebar-dropdown-shortcut {
+      color: var(--text-muted);
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+    .titlebar-dropdown-sep {
+      height: 1px;
+      background: var(--tab-border);
+      margin: 4px 0;
+    }
+
+    #tabbar {
+      height: 0;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      padding: 0;
+      background: var(--tab-bar-bg);
+      border-bottom: 0 solid #3a3d4f;
+      overflow-x: hidden;
+      overflow-y: hidden;
+      flex-shrink: 0;
+      opacity: 0;
+      transition:
+        height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        padding 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        border-bottom-width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+        opacity 160ms ease;
+    }
+    #app.tabs-visible #tabbar {
+      height: 36px;
+      padding: 3px 0 0;
+      border-bottom-width: 1px;
+      opacity: 1;
+    }
+    .tab-btn {
+      flex: 1 1 0;
+      min-width: 0;
+      max-width: none;
+      padding: 0 12px;
+      border: 1px solid var(--tab-border);
+      border-left-width: 0;
+      border-bottom: none;
+      border-radius: 0;
+      background: var(--input-bg);
+      color: var(--text-secondary);
+      font: 12px/1.1 "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      text-align: center;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: 1;
+      transform: translateY(0) scaleY(1);
+      transform-origin: top center;
+      transition:
+        background 130ms ease,
+        color 130ms ease,
+        border-color 130ms ease,
+        opacity 180ms ease,
+        transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .tab-btn:first-child {
+      border-left-width: 1px;
+    }
+    .tab-btn.entering {
+      opacity: 0;
+      transform: translateY(-8px) scaleY(0.88);
+    }
+    .tab-btn.active {
+      background: var(--bg);
+      color: var(--fg);
+      border-color: var(--active-highlight);
+    }
+    #main-area {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+    #terminal-host {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      background: var(--bg);
+    }
+    #terminal-host.drag-over {
+      outline: 2px solid var(--dim-fg);
+      outline-offset: -2px;
+    }
+    /* -- Files panel (left) -- */
+    #files-panel-wrap { display: flex; flex-shrink: 0; }
+    #files-panel-wrap.hidden { display: none; }
+    #files-panel {
+      width: 300px; min-width: 200px; max-width: 600px;
+      background: var(--panel-bg); border-right: 1px solid var(--tab-border);
+      display: flex; flex-direction: column; overflow: hidden;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--text-secondary);
+    }
+    #files-panel-resize {
+      width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0;
+      transition: background 150ms;
+    }
+    #files-panel-resize:hover, #files-panel-resize.dragging { background: var(--dim-fg); }
+    .fp-pane-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .fp-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+    .fp-pane-label {
+      padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
+    }
+    .fp-toolbar {
+      display: flex; align-items: center; gap: 2px; padding: 3px 6px; flex-shrink: 0;
+    }
+    .fp-tb-btn {
+      background: none; border: 1px solid transparent; border-radius: 3px;
+      color: var(--text-muted); cursor: pointer; padding: 2px 5px; font-size: 11px; line-height: 1;
+    }
+    .fp-tb-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
+    .fp-tb-btn:disabled { opacity: 0.3; cursor: default; }
+    .fp-tb-btn.active { color: var(--green); }
+    .fp-path-input {
+      flex: 1; min-width: 0; padding: 3px 6px; background: var(--input-bg); border: 1px solid var(--tab-border);
+      border-radius: 3px; color: var(--fg); font: 11px "JetBrains Mono", monospace; outline: none;
+    }
+    .fp-path-input:focus { border-color: var(--dim-fg); }
+    .fp-path-input:disabled { opacity: 0.4; }
+    .fp-error { padding: 4px 8px; font-size: 11px; color: var(--red); flex-shrink: 0; }
+    .fp-table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
+    .fp-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .fp-table th {
+      position: sticky; top: 0; z-index: 1; padding: 3px 6px; text-align: left;
+      font-size: 10px; font-weight: 500; color: var(--dim-fg); background: var(--panel-bg);
+      border-bottom: 1px solid var(--tab-border); white-space: nowrap; user-select: none;
+    }
+    .fp-table td { padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fp-row { cursor: default; }
+    .fp-row:hover td { background: var(--input-bg); }
+    .fp-row.selected td { background: var(--active-highlight); }
+    .fp-row.fp-transferring td { opacity: 0.6; }
+    .fp-row.fp-transferring { outline: 1px solid #50fa7b; outline-offset: -1px; }
+    .fp-row.fp-transferred td { color: var(--green); }
+    .fp-cell-name { max-width: 180px; }
+    .fp-icon { vertical-align: middle; }
+    .fp-cell-name img, .fp-cell-name svg { vertical-align: middle; margin-right: 3px; }
+    .fp-cell-ext { width: 45px; color: var(--dim-fg); }
+    .fp-cell-size { width: 65px; text-align: right; color: var(--text-muted); font-family: "JetBrains Mono", monospace; font-size: 10px; }
+    .fp-cell-mod { width: 110px; color: var(--text-muted); font-size: 10px; }
+    .fp-th-ext { width: 45px; }
+    .fp-th-size { width: 65px; }
+    .fp-th-mod { width: 110px; }
+    .fp-footer { padding: 3px 8px; font-size: 10px; color: var(--dim-fg); flex-shrink: 0; }
+    .fp-transfer-bar {
+      display: flex; justify-content: center; gap: 8px;
+      padding: 4px 8px; border-top: 1px solid var(--tab-border); border-bottom: 1px solid var(--tab-border);
+      flex-shrink: 0;
+    }
+    .fp-transfer-btn {
+      padding: 3px 12px; border: 1px solid var(--tab-border); border-radius: 4px;
+      background: var(--input-bg); color: var(--text-secondary); cursor: pointer; font-size: 11px;
+    }
+    .fp-transfer-btn:hover { background: var(--tab-border); color: var(--fg); }
+    .fp-transfer-pct { margin-left: 6px; color: var(--green); font-weight: 600; font-size: 10px; }
+    .fp-col-menu {
+      position: fixed; z-index: 2000; background: var(--input-bg); border: 1px solid var(--active-highlight);
+      border-radius: 6px; padding: 4px 0; min-width: 130px; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+    .fp-col-menu-item {
+      padding: 4px 12px; cursor: pointer; font-size: 12px; color: var(--fg); white-space: nowrap;
+    }
+    .fp-col-menu-item:hover { background: var(--active-highlight); }
+    .fp-col-check { display: inline-block; width: 16px; text-align: center; }
+    /* Progress toast (lives in #toast-container alongside other toasts) */
+    .fp-progress-toast {
+      width: 340px; background: var(--panel-bg); border: 1px solid #50fa7b; border-radius: 8px;
+      padding: 10px 12px;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg); box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      opacity: 0; transform: translateY(10px);
+      transition: opacity 200ms, transform 200ms;
+      pointer-events: auto;
+    }
+    .fp-progress-toast.visible { opacity: 1; transform: translateY(0); }
+    .fp-pt-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .fp-pt-kind { font-size: 14px; flex-shrink: 0; }
+    .fp-pt-filename {
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-weight: 500;
+    }
+    .fp-pt-cancel {
+      background: none; border: none; color: var(--dim-fg); cursor: pointer;
+      font-size: 14px; padding: 0 2px; line-height: 1;
+    }
+    .fp-pt-cancel:hover { color: var(--red); }
+    .fp-pt-bar-wrap {
+      height: 4px; background: var(--tab-border); border-radius: 2px; overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .fp-pt-bar {
+      height: 100%; background: var(--green); border-radius: 2px; width: 0%;
+      transition: width 150ms ease;
+    }
+    .fp-pt-details {
+      display: flex; justify-content: space-between;
+      font-size: 10px; color: var(--text-muted);
+    }
+    /* -- Global toast system -- */
+    #toast-container {
+      position: fixed; right: 16px; bottom: 16px; z-index: 5000;
+      display: flex; flex-direction: column-reverse; gap: 8px;
+      pointer-events: none;
+    }
+    .conch-toast {
+      width: 340px; background: var(--panel-bg); border: 1px solid var(--active-highlight);
+      border-radius: 8px; padding: 10px 12px;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg); box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      opacity: 0; transform: translateY(10px);
+      transition: opacity 200ms, transform 200ms;
+      pointer-events: auto;
+    }
+    .conch-toast.visible { opacity: 1; transform: translateY(0); }
+    .conch-toast-header { display: flex; align-items: center; gap: 8px; }
+    .conch-toast-icon { font-size: 14px; flex-shrink: 0; }
+    .conch-toast-title { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conch-toast-close {
+      background: none; border: none; color: var(--dim-fg); cursor: pointer;
+      font-size: 14px; padding: 0 2px; line-height: 1;
+    }
+    .conch-toast-close:hover { color: var(--fg); }
+    .conch-toast-body {
+      margin-top: 4px; font-size: 11px; color: var(--text-muted);
+      word-break: break-word; white-space: pre-wrap;
+    }
+    .conch-toast-success { border-color: var(--green); }
+    .conch-toast-success .conch-toast-icon { color: var(--green); }
+    .conch-toast-error { border-color: var(--red); }
+    .conch-toast-error .conch-toast-icon { color: var(--red); }
+    .conch-toast-warn { border-color: #f1fa8c; }
+    .conch-toast-warn .conch-toast-icon { color: #f1fa8c; }
+    .conch-toast-info { border-color: #8be9fd; }
+    .conch-toast-info .conch-toast-icon { color: #8be9fd; }
+
+    /* -- Plugin widgets -- */
+    .pw-horizontal { display: flex; gap: 6px; align-items: center; }
+    .pw-vertical { display: flex; flex-direction: column; gap: 4px; }
+    .pw-scroll-area { overflow-y: auto; }
+    .pw-heading { font-size: 14px; font-weight: 600; color: var(--fg); margin: 4px 0 2px; }
+    .pw-label { font-size: 12px; color: var(--text-secondary); }
+    .pw-style-secondary { color: var(--text-muted); }
+    .pw-style-muted { color: var(--dim-fg); }
+    .pw-style-accent { color: #bd93f9; }
+    .pw-style-warn { color: #f1fa8c; }
+    .pw-style-error { color: var(--red); }
+    .pw-text { font: 12px/1.4 "JetBrains Mono", monospace; color: var(--fg); margin: 0; white-space: pre-wrap; word-break: break-word; }
+    .pw-scroll-text { font: 11px/1.3 "JetBrains Mono", monospace; color: var(--text-secondary); overflow-y: auto; margin: 0; padding: 4px; background: #1a1b26; border-radius: 3px; }
+    .pw-kv { display: flex; gap: 8px; font-size: 12px; }
+    .pw-kv-key { color: var(--text-muted); flex-shrink: 0; }
+    .pw-kv-value { color: var(--fg); word-break: break-word; }
+    .pw-separator { border: none; border-top: 1px solid var(--tab-border); margin: 4px 0; }
+    .pw-spacer { }
+    .pw-icon-label { font-size: 12px; }
+    .pw-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 500; }
+    .pw-badge-info { background: var(--active-highlight); color: #8be9fd; }
+    .pw-badge-success { background: #2a4a2e; color: var(--green); }
+    .pw-badge-warn { background: #4a4528; color: #f1fa8c; }
+    .pw-badge-error { background: #4a2828; color: var(--red); }
+    .pw-progress { position: relative; height: 6px; background: var(--tab-border); border-radius: 3px; overflow: hidden; }
+    .pw-progress-bar { height: 100%; background: var(--green); border-radius: 3px; transition: width 150ms; }
+    .pw-progress-label { position: absolute; right: 4px; top: -1px; font-size: 9px; color: var(--text-muted); }
+    .pw-button {
+      padding: 4px 12px; border: 1px solid var(--active-highlight); border-radius: 4px;
+      background: var(--input-bg); color: var(--text-secondary); cursor: pointer; font-size: 12px;
+    }
+    .pw-button:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
+    .pw-button:disabled { opacity: 0.4; cursor: default; }
+    .pw-text-input, .pw-text-edit, .pw-combo-box {
+      padding: 4px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
+      border-radius: 4px; color: var(--fg); font: 12px "JetBrains Mono", monospace;
+      outline: none; width: 100%;
+    }
+    .pw-text-input:focus, .pw-text-edit:focus, .pw-combo-box:focus { border-color: var(--dim-fg); }
+    .pw-text-edit { resize: vertical; min-height: 40px; }
+    .pw-checkbox { font-size: 12px; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 4px; }
+    .pw-toolbar { display: flex; align-items: center; gap: 3px; padding: 3px 0; }
+    .pw-toolbar-btn { padding: 2px 6px; border: 1px solid transparent; border-radius: 3px; background: none; color: var(--text-muted); cursor: pointer; font-size: 11px; }
+    .pw-toolbar-btn:hover:not(:disabled) { background: var(--tab-border); color: var(--fg); }
+    .pw-toolbar-sep { width: 1px; height: 14px; background: var(--tab-border); }
+    .pw-toolbar-spacer { flex: 1; }
+    .pw-toolbar-input { flex: 1; min-width: 0; padding: 2px 6px; background: var(--input-bg); border: 1px solid var(--tab-border); border-radius: 3px; color: var(--fg); font: 11px "JetBrains Mono", monospace; outline: none; }
+    .pw-tree { font-size: 12px; }
+    .pw-tree-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; cursor: pointer; user-select: none; }
+    .pw-tree-row:hover { background: var(--input-bg); }
+    .pw-tree-row.selected { background: var(--active-highlight); }
+    .pw-tree-row.bold .pw-tree-label { font-weight: 600; }
+    .pw-tree-arrow { width: 12px; text-align: center; font-size: 9px; color: var(--dim-fg); cursor: pointer; flex-shrink: 0; }
+    .pw-tree-arrow-placeholder { width: 12px; flex-shrink: 0; }
+    .pw-tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pw-tree-badge { font-size: 10px; color: var(--dim-fg); flex-shrink: 0; }
+    .pw-tree-children { padding-left: 12px; }
+    .pw-table-wrap { overflow: auto; }
+    .pw-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .pw-table th { padding: 3px 6px; text-align: left; font-size: 10px; font-weight: 500; color: var(--dim-fg); background: var(--panel-bg); border-bottom: 1px solid var(--tab-border); white-space: nowrap; user-select: none; position: sticky; top: 0; z-index: 1; }
+    .pw-table td { padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+    .pw-table-row:hover td { background: var(--input-bg); }
+    .pw-table-row.selected td { background: var(--active-highlight); }
+    .pw-tabs-bar { display: flex; gap: 0; border-bottom: 1px solid var(--tab-border); }
+    .pw-tab-btn { padding: 4px 12px; border: none; border-bottom: 2px solid transparent; background: none; color: var(--text-muted); cursor: pointer; font-size: 11px; }
+    .pw-tab-btn:hover { color: var(--fg); }
+    .pw-tab-btn.active { color: var(--fg); border-bottom-color: #bd93f9; }
+    .pw-tabs-content { padding: 6px 0; }
+    .pw-unknown { color: var(--dim-fg); font-size: 11px; font-style: italic; padding: 4px; }
+    .pw-error { color: var(--red); font-size: 11px; padding: 4px; }
+    /* Plugin panel container */
+    .plugin-panel-content { padding: 6px 8px; overflow-y: auto; flex: 1; }
+    /* -- Plugin Manager -- */
+    .plugin-manager-dialog { width: 720px; max-width: 95vw; }
+    .pm-body { max-height: 50vh; overflow-y: auto; }
+    .pm-table { width: 100%; border-collapse: collapse; font-size: 12px; color: var(--text-secondary); }
+    .pm-table thead { position: sticky; top: 0; z-index: 1; }
+    .pm-table th {
+      padding: 6px 10px; text-align: left; font-weight: 500; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg);
+      background: var(--panel-bg); border-bottom: 1px solid var(--tab-border);
+    }
+    .pm-table td { padding: 6px 10px; border-bottom: 1px solid #2b2e3a; white-space: nowrap; }
+    .pm-row:hover td { background: var(--input-bg); }
+    .pm-col-status { width: 90px; }
+    .pm-col-name { font-weight: 500; }
+    .pm-col-version { color: var(--dim-fg); width: 60px; }
+    .pm-col-path { max-width: 160px; overflow: hidden; text-overflow: ellipsis; color: var(--dim-fg); font-size: 10px; }
+    .pm-th-path { width: 160px; }
+    .pm-col-action { width: 1%; white-space: nowrap; text-align: right; }
+    .pm-empty { padding: 24px; text-align: center; color: var(--dim-fg); font-size: 13px; }
+
+    /* -- Bottom panel & Status bar -- */
+    #bottom-panel {
+      height: 120px; min-height: 40px; max-height: 300px;
+      background: var(--panel-bg); border-top: 1px solid var(--tab-border);
+      display: flex; flex-direction: column; overflow: hidden;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+    }
+    #bottom-panel.hidden { display: none; }
+    #bottom-panel-header {
+      display: flex; align-items: center; padding: 4px 10px;
+      font-size: 10px; color: var(--dim-fg); text-transform: uppercase;
+      letter-spacing: 0.5px; flex-shrink: 0;
+      border-bottom: 1px solid var(--tab-border);
+    }
+    #bottom-panel-content { flex: 1; overflow-y: auto; padding: 4px 8px; }
+    #ssh-panel-wrap {
+      display: flex;
+      flex-shrink: 0;
+    }
+    #ssh-panel-wrap.hidden { display: none; }
+    #ssh-panel-resize {
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      flex-shrink: 0;
+      transition: background 150ms;
+    }
+    #ssh-panel-resize:hover,
+    #ssh-panel-resize.dragging { background: var(--dim-fg); }
+    #ssh-panel {
+      width: 260px;
+      min-width: 180px;
+      max-width: 500px;
+      background: var(--panel-bg);
+      border-left: 1px solid var(--tab-border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--text-secondary);
+    }
+    .ssh-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px 6px;
+      border-bottom: 1px solid var(--tab-border);
+    }
+    .ssh-panel-title { font-weight: 600; font-size: 13px; color: var(--fg); }
+    .ssh-panel-actions { display: flex; gap: 4px; }
+    .ssh-icon-btn {
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: 13px;
+      line-height: 1;
+    }
+    .ssh-icon-btn:hover { background: var(--tab-border); color: var(--fg); }
+    .ssh-quick-connect { padding: 6px 10px; }
+    .ssh-quick-connect input {
+      width: 100%; padding: 5px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
+      border-radius: 4px; color: var(--fg); font: 12px "JetBrains Mono", monospace;
+      outline: none;
+    }
+    .ssh-quick-connect input:focus { border-color: var(--dim-fg); }
+    .ssh-quick-connect input::placeholder { color: var(--dim-fg); }
+    .ssh-active-sessions { }
+    .ssh-section-header {
+      padding: 6px 10px 3px; font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.5px; color: var(--dim-fg);
+    }
+    .ssh-session-node {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 10px 3px 14px; cursor: default;
+    }
+    .ssh-session-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0;
+    }
+    .ssh-session-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ssh-panel-separator { height: 1px; background: var(--tab-border); margin: 6px 10px; }
+    .ssh-tunnels-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 10px 2px;
+    }
+    .ssh-section-header-inline {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg);
+    }
+    .ssh-icon-btn-sm { font-size: 11px; padding: 1px 5px; }
+    .ssh-tunnel-node {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 10px 3px 14px; cursor: pointer; user-select: none;
+    }
+    .ssh-tunnel-node:hover { background: var(--input-bg); }
+    .ssh-tunnel-label {
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ssh-tunnel-btn {
+      margin-left: auto; flex-shrink: 0;
+      padding: 1px 8px; border: 1px solid var(--active-highlight); border-radius: 3px;
+      background: transparent; color: var(--text-secondary); cursor: pointer;
+      font-size: 10px; line-height: 1.5; white-space: nowrap;
+      transition: background 100ms, border-color 100ms;
+    }
+    .ssh-tunnel-btn:hover { border-color: var(--dim-fg); background: var(--input-bg); }
+    .ssh-tunnel-btn:active { background: var(--tab-border); }
+    .ssh-tunnel-btn:disabled { opacity: 0.4; cursor: default; }
+    .ssh-tunnel-empty { padding: 4px 14px; font-size: 11px; color: var(--dim-fg); }
+    .ssh-tunnels-section { }
+    .ssh-server-list { flex: 1; overflow-y: auto; overflow-x: hidden; padding-bottom: 8px; }
+    .ssh-folder { }
+    .ssh-folder-header {
+      display: flex; align-items: center; gap: 4px;
+      padding: 4px 10px; cursor: pointer; user-select: none;
+    }
+    .ssh-folder-header:hover { background: var(--input-bg); }
+    .ssh-folder-arrow { font-size: 9px; width: 12px; text-align: center; color: var(--dim-fg); }
+    .ssh-folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ssh-folder-count { font-size: 10px; color: var(--dim-fg); }
+    .ssh-folder-entries { }
+    .ssh-server-node {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 10px 3px 22px; cursor: pointer; user-select: none;
+    }
+    .ssh-server-node:hover { background: var(--input-bg); }
+    .ssh-server-node.highlighted { background: var(--active-highlight); color: var(--fg); }
+    .ssh-server-node.dimmed { opacity: 0.6; }
+    .ssh-search-hint { padding: 8px 14px; font-size: 11px; color: var(--dim-fg); font-style: italic; }
+    .ssh-server-label {
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ssh-server-detail { font-size: 10px; color: var(--dim-fg); flex-shrink: 0; }
+    .ssh-context-menu {
+      position: fixed; z-index: 2000; background: var(--input-bg); border: 1px solid var(--active-highlight);
+      border-radius: 6px; padding: 4px 0; min-width: 140px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+    .ssh-context-menu-item {
+      padding: 5px 14px; cursor: pointer; font-size: 12px; color: var(--fg);
+    }
+    .ssh-context-menu-item:hover { background: var(--active-highlight); }
+    .ssh-auth-message { font-size: 13px; color: var(--fg); line-height: 1.5; margin-bottom: 8px; }
+    .ssh-auth-detail {
+      font: 12px/1.4 "JetBrains Mono", monospace; color: var(--cyan);
+      background: var(--input-bg); border: 1px solid var(--tab-border);
+      border-radius: 4px; padding: 8px 10px; margin-bottom: 8px;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .ssh-auth-question { font-size: 12px; color: var(--dim-fg); }
+    .ssh-context-menu-item.danger { color: var(--red); }
+    .ssh-context-menu-item.danger:hover { background: var(--red); color: var(--fg); }
+    .ssh-context-menu-sep { height: 1px; background: var(--tab-border); margin: 4px 0; }
+    /* -- Form overlay -- */
+    .ssh-overlay {
+      position: fixed; inset: 0; z-index: 3000;
+      background: rgba(0,0,0,0.5); display: flex;
+      align-items: center; justify-content: center;
+    }
+    .ssh-form {
+      background: var(--panel-bg); border: 1px solid var(--active-highlight);
+      border-radius: 10px; width: 460px; max-width: 90vw;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+    }
+    .ssh-form-small { width: 320px; }
+    .ssh-form-title {
+      padding: 14px 18px 10px; font-size: 15px; font-weight: 600;
+      border-bottom: 1px solid var(--tab-border);
+    }
+    .ssh-form-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+    .ssh-form-row { display: flex; gap: 10px; }
+    .ssh-form-label {
+      display: flex; flex-direction: column; gap: 3px;
+      font-size: 11px; color: var(--text-muted); font-weight: 500;
+    }
+    .ssh-form-label input,
+    .ssh-form-label select {
+      padding: 6px 8px; background: var(--input-bg); border: 1px solid var(--tab-border);
+      border-radius: 5px; color: var(--fg); font: 13px/1.3 "JetBrains Mono", monospace;
+      outline: none; width: 100%;
+    }
+    .ssh-form-label input:focus,
+    .ssh-form-label select:focus { border-color: var(--dim-fg); }
+    .ssh-form-label input::placeholder { color: var(--dim-fg); }
+    .ssh-form-label input[type="number"] { -moz-appearance: textfield; }
+    .ssh-form-label input[type="number"]::-webkit-inner-spin-button,
+    .ssh-form-label input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+    .ssh-form-label select {
+      -webkit-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236272a4'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 8px center;
+      padding-right: 24px; cursor: pointer;
+    }
+    .ssh-form-advanced {
+      border: 1px solid var(--tab-border); border-radius: 5px; padding: 0;
+    }
+    .ssh-form-advanced summary {
+      padding: 6px 10px; cursor: pointer; font-size: 11px;
+      color: var(--text-muted); user-select: none;
+    }
+    .ssh-form-advanced summary:hover { color: var(--fg); }
+    .ssh-form-advanced[open] summary { border-bottom: 1px solid var(--tab-border); margin-bottom: 8px; }
+    .ssh-form-advanced[open] { padding-bottom: 10px; }
+    .ssh-form-advanced .ssh-form-label { padding: 0 10px; }
+    .ssh-form-advanced .ssh-form-label + .ssh-form-label { margin-top: 8px; }
+    .ssh-form-buttons {
+      display: flex; justify-content: flex-end; gap: 8px;
+      padding: 10px 18px 14px; border-top: 1px solid var(--tab-border);
+    }
+    .ssh-form-btn {
+      padding: 6px 16px; border: 1px solid var(--tab-border); border-radius: 5px;
+      background: var(--input-bg); color: var(--text-secondary); cursor: pointer;
+      font: 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .ssh-form-btn:hover { background: var(--tab-border); color: var(--fg); }
+    .ssh-form-btn.primary { background: var(--dim-fg); color: var(--fg); border-color: var(--dim-fg); }
+    .ssh-form-btn.primary:hover { background: #7283b5; }
+    /* -- Tunnel manager -- */
+    .tunnel-manager-dialog { width: 680px; max-width: 95vw; }
+    .tunnel-manager-body { padding: 0; max-height: 50vh; overflow-y: auto; }
+    .tunnel-table-wrap { min-height: 60px; }
+    .tunnel-table {
+      width: 100%; border-collapse: collapse;
+      font-size: 12px; color: var(--text-secondary);
+    }
+    .tunnel-table thead { position: sticky; top: 0; z-index: 1; }
+    .tunnel-table th {
+      padding: 6px 10px; text-align: left; font-weight: 500;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--dim-fg); background: var(--panel-bg); border-bottom: 1px solid var(--tab-border);
+    }
+    .tunnel-table td {
+      padding: 6px 10px; border-bottom: 1px solid #2b2e3a;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 160px;
+    }
+    .tunnel-row:hover td { background: var(--input-bg); }
+    .tunnel-col-status { width: 100px; }
+    .tunnel-mono { font-family: "JetBrains Mono", monospace; font-size: 11px; }
+    .tunnel-dot {
+      display: inline-block; width: 7px; height: 7px;
+      border-radius: 50%; margin-right: 4px; vertical-align: middle;
+    }
+    .tunnel-dot.active { background: var(--green); }
+    .tunnel-dot.connecting { background: var(--yellow); }
+    .tunnel-dot.error { background: var(--red); }
+    .tunnel-dot.inactive { background: var(--dim-fg); }
+    .tunnel-actions { white-space: nowrap; text-align: right; width: 1%; }
+    .tunnel-action-btn {
+      padding: 3px 10px; margin-left: 4px; border: 1px solid var(--tab-border);
+      border-radius: 4px; background: var(--input-bg); color: var(--text-secondary);
+      cursor: pointer; font-size: 11px;
+    }
+    .tunnel-action-btn:hover { background: var(--tab-border); color: var(--fg); }
+    .tunnel-action-btn.danger { color: var(--red); }
+    .tunnel-action-btn.danger:hover { background: var(--red); color: var(--fg); }
+    .tunnel-action-btn.danger.confirm { background: var(--red); color: var(--fg); border-color: var(--red); }
+    .ssh-error-text {
+      color: var(--red); font-size: 13px; line-height: 1.5;
+      word-break: break-word; white-space: pre-wrap;
+    }
+    .tunnel-empty {
+      padding: 24px; text-align: center; color: var(--dim-fg); font-size: 13px;
+    }
+    .terminal-pane {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+    }
+    .terminal-pane.active {
+      display: block;
+    }
+    #status {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      padding: 10px 12px;
+      border: 1px solid #ff5555;
+      background: rgba(40, 42, 54, 0.95);
+      color: #ffb8b8;
+      font: 13px/1.4 monospace;
+      white-space: pre-wrap;
+      z-index: 1000;
+      display: none;
+    }
+    #app.tabs-visible + #status {
+      top: 50px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="drag-handle" data-tauri-drag-region></div>
+    <div id="tabbar"></div>
+    <div id="main-area">
+      <div id="files-panel-wrap">
+        <div id="files-panel"></div>
+        <div id="files-panel-resize"></div>
+      </div>
+      <div id="terminal-host"></div>
+      <div id="ssh-panel-wrap">
+        <div id="ssh-panel-resize"></div>
+        <div id="ssh-panel"></div>
+      </div>
+    </div>
+    <div id="bottom-panel" class="hidden">
+      <div id="bottom-panel-header">Output</div>
+      <div id="bottom-panel-content"></div>
+    </div>
+  </div>
+  <div id="status"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  <script src="utils.js"></script>
+  <script src="titlebar.js"></script>
+  <script src="toast.js"></script>
+  <script src="plugin-manager.js"></script>
+  <script src="plugin-widgets.js"></script>
+  <script src="files-panel.js"></script>
+  <script src="ssh-panel.js"></script>
+  <script src="tunnel-manager.js"></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    function showStatus(message) {
+      statusEl.style.display = 'block';
+      statusEl.textContent = message;
+      console.error(message);
+    }
+
+    window.addEventListener('error', (event) => {
+      showStatus('Frontend error: ' + event.message);
+    });
+
+    window.addEventListener('unhandledrejection', (event) => {
+      showStatus('Unhandled promise rejection: ' + String(event.reason));
+    });
+
+    // Theme is loaded dynamically from config — this is the fallback.
+    let theme = {
+      background: '#282a36', foreground: '#f8f8f2',
+      cursor: '#f8f8f2', cursorAccent: '#282a36',
+      selectionBackground: '#44475a', selectionForeground: '#f8f8f2',
+      black: '#21222c', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c',
+      blue: '#bd93f9', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
+      brightBlack: '#6272a4', brightRed: '#ff6e6e', brightGreen: '#69ff94',
+      brightYellow: '#ffffa5', brightBlue: '#d6acff', brightMagenta: '#ff92df',
+      brightCyan: '#a4ffff', brightWhite: '#ffffff',
+    };
+
+    (async function start() {
+      const tauri = window.__TAURI__;
+      if (!tauri || !tauri.core || !tauri.event) {
+        showStatus(
+          'Tauri API is unavailable in this webview.\n' +
+          'The app likely loaded from the wrong URL/context.'
+        );
+        return;
+      }
+
+      if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined' || typeof WebLinksAddon === 'undefined') {
+        showStatus(
+          'xterm.js assets failed to load.\n' +
+          'Check internet access or replace CDN assets with local files.'
+        );
+        return;
+      }
+
+      const { invoke } = tauri.core;
+      const { listen } = tauri.event;
+      const currentWindow = tauri.window && typeof tauri.window.getCurrentWindow === 'function'
+        ? tauri.window.getCurrentWindow()
+        : null;
+      const listenOnCurrentWindow = (eventName, handler) => {
+        if (currentWindow && typeof currentWindow.listen === 'function') {
+          return currentWindow.listen(eventName, handler);
+        }
+        return listen(eventName, handler);
+      };
+      const currentWindowLabel = await invoke('current_window_label');
+
+      // Load terminal config (font, cursor, scroll)
+      // Font fallback chain with good Unicode box-drawing/braille coverage.
+      const FONT_FALLBACKS = ', "Menlo", "DejaVu Sans Mono", "Consolas", "Liberation Mono", monospace';
+      let termFontFamily = '"JetBrains Mono", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+      let termFontSize = 14;
+      let termCursorStyle = 'block';
+      let termCursorBlink = true;
+      let termScrollSensitivity = 1;
+      try {
+        const tc = await invoke('get_terminal_config');
+        if (tc.font_family) {
+          termFontFamily = '"' + tc.font_family + '", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+        }
+        if (tc.font_size > 0) termFontSize = tc.font_size;
+        if (tc.cursor_style) termCursorStyle = tc.cursor_style;
+        termCursorBlink = tc.cursor_blink;
+        if (tc.scroll_sensitivity > 0) termScrollSensitivity = tc.scroll_sensitivity;
+      } catch (e) {
+        console.warn('Failed to load terminal config:', e);
+      }
+
+      // Load color theme from config
+      try {
+        const tc = await invoke('get_theme_colors');
+        theme = {
+          background: tc.background, foreground: tc.foreground,
+          cursor: tc.cursor_color, cursorAccent: tc.cursor_text,
+          selectionBackground: tc.selection_bg, selectionForeground: tc.selection_text,
+          black: tc.black, red: tc.red, green: tc.green, yellow: tc.yellow,
+          blue: tc.blue, magenta: tc.magenta, cyan: tc.cyan, white: tc.white,
+          brightBlack: tc.bright_black, brightRed: tc.bright_red,
+          brightGreen: tc.bright_green, brightYellow: tc.bright_yellow,
+          brightBlue: tc.bright_blue, brightMagenta: tc.bright_magenta,
+          brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
+        };
+        // Apply CSS custom properties from theme
+        const r = document.documentElement.style;
+        r.setProperty('--bg', tc.background);
+        r.setProperty('--fg', tc.foreground);
+        r.setProperty('--dim-fg', tc.dim_fg);
+        r.setProperty('--panel-bg', tc.panel_bg);
+        r.setProperty('--tab-bar-bg', tc.tab_bar_bg);
+        r.setProperty('--tab-border', tc.tab_border);
+        r.setProperty('--active-highlight', tc.active_highlight);
+        r.setProperty('--red', tc.red);
+        r.setProperty('--green', tc.green);
+        r.setProperty('--yellow', tc.yellow);
+        r.setProperty('--blue', tc.blue);
+        r.setProperty('--cyan', tc.cyan);
+        r.setProperty('--magenta', tc.magenta);
+        r.setProperty('--input-bg', tc.panel_bg);
+        r.setProperty('--hover-bg', tc.panel_bg);
+        document.body.style.background = tc.background;
+      } catch (e) {
+        console.warn('Failed to load theme colors:', e);
+      }
+
+      // Platform-aware titlebar setup.
+      let borderlessMode = false;
+      try {
+        const appCfg = await invoke('get_app_config');
+        if (appCfg.platform === 'windows' && appCfg.decorations !== 'none') {
+          // Windows: use VS Code-style custom titlebar with inline menus.
+          document.getElementById('app').classList.add('custom-titlebar');
+          // Titlebar init is deferred until handleMenuAction is defined (below).
+          window._initTitlebarPending = true;
+        } else if (appCfg.decorations === 'none' || appCfg.decorations === 'buttonless') {
+          borderlessMode = true;
+          document.getElementById('drag-handle').classList.add('visible');
+          // Also make the tab bar draggable in borderless mode.
+          document.getElementById('tabbar').setAttribute('data-tauri-drag-region', '');
+        }
+      } catch (_) {}
+
+      const appEl = document.getElementById('app');
+      const tabBarEl = document.getElementById('tabbar');
+      const terminalHostEl = document.getElementById('terminal-host');
+      const tabs = new Map();
+      let activeTabId = null;
+      let nextTabId = 1;
+      let nextTabLabel = 1;
+
+      function terminalMouseModeIsActive(term) {
+        const modes = term.modes;
+        if (!modes || typeof modes.mouseTrackingMode !== 'string') {
+          return false;
+        }
+        return modes.mouseTrackingMode !== 'none';
+      }
+
+      function setupTmuxRightClickBridge(term, terminalRoot) {
+        let rightButtonGestureActive = false;
+        const CORE_MOUSE_BUTTON_RIGHT = 2;
+        const CORE_MOUSE_ACTION_UP = 0;
+        const CORE_MOUSE_ACTION_DOWN = 1;
+        const CORE_MOUSE_ACTION_MOVE = 32;
+
+        function rightButtonIsInUse(event) {
+          if (rightButtonGestureActive) {
+            return true;
+          }
+          if (typeof event.button === 'number' && event.button === CORE_MOUSE_BUTTON_RIGHT) {
+            return true;
+          }
+          if (typeof event.buttons === 'number' && (event.buttons & CORE_MOUSE_BUTTON_RIGHT) !== 0) {
+            return true;
+          }
+          return false;
+        }
+
+        function suppressContextMenuForTerminalApps(event) {
+          if (!terminalMouseModeIsActive(term)) {
+            return;
+          }
+          if (!rightButtonIsInUse(event) && event.type !== 'contextmenu') {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+        }
+
+        function forwardRightMouseToXterm(event, action) {
+          if (!terminalMouseModeIsActive(term)) {
+            return;
+          }
+
+          // Intentionally use xterm internals here:
+          // - WebKit can fail to keep right-button drag state consistent.
+          // - tmux expects full right-button down/move/up reports to hover menus.
+          // This bypasses browser-level gesture quirks and feeds xterm mouse
+          // reports directly to the PTY pipeline.
+          const core = term && term._core;
+          const mouseService = core && core._mouseService;
+          const coreMouseService = core && core.coreMouseService;
+          const screenElement = core && core.screenElement;
+          if (!mouseService || !coreMouseService || !screenElement) {
+            return;
+          }
+          if (typeof mouseService.getMouseReportCoords !== 'function') {
+            return;
+          }
+          if (typeof coreMouseService.triggerMouseEvent !== 'function') {
+            return;
+          }
+
+          const pos = mouseService.getMouseReportCoords(event, screenElement);
+          if (!pos) {
+            return;
+          }
+
+          coreMouseService.triggerMouseEvent({
+            col: pos.col,
+            row: pos.row,
+            x: pos.x,
+            y: pos.y,
+            button: CORE_MOUSE_BUTTON_RIGHT,
+            action,
+            ctrl: event.ctrlKey,
+            alt: event.altKey,
+            shift: event.shiftKey,
+          });
+        }
+
+        const onWindowMouseUp = (event) => {
+          if (event.button === CORE_MOUSE_BUTTON_RIGHT) {
+            if (rightButtonGestureActive) {
+              forwardRightMouseToXterm(event, CORE_MOUSE_ACTION_UP);
+              suppressContextMenuForTerminalApps(event);
+            }
+            rightButtonGestureActive = false;
+          }
+        };
+        const onWindowBlur = () => {
+          rightButtonGestureActive = false;
+        };
+        const onWindowMouseMove = (event) => {
+          if (!rightButtonGestureActive) {
+            return;
+          }
+          forwardRightMouseToXterm(event, CORE_MOUSE_ACTION_MOVE);
+          suppressContextMenuForTerminalApps(event);
+        };
+        const onRootMouseDown = (event) => {
+          if (event.button === CORE_MOUSE_BUTTON_RIGHT) {
+            forwardRightMouseToXterm(event, CORE_MOUSE_ACTION_DOWN);
+            rightButtonGestureActive = true;
+            suppressContextMenuForTerminalApps(event);
+          }
+        };
+
+        window.addEventListener('mouseup', onWindowMouseUp, true);
+        window.addEventListener('blur', onWindowBlur);
+        window.addEventListener('mousemove', onWindowMouseMove, true);
+        terminalRoot.addEventListener('mousedown', onRootMouseDown, true);
+        terminalRoot.addEventListener('contextmenu', suppressContextMenuForTerminalApps, true);
+
+        return () => {
+          window.removeEventListener('mouseup', onWindowMouseUp, true);
+          window.removeEventListener('blur', onWindowBlur);
+          window.removeEventListener('mousemove', onWindowMouseMove, true);
+          terminalRoot.removeEventListener('mousedown', onRootMouseDown, true);
+          terminalRoot.removeEventListener('contextmenu', suppressContextMenuForTerminalApps, true);
+        };
+      }
+
+      function currentTab() {
+        return activeTabId === null ? null : tabs.get(activeTabId) || null;
+      }
+
+      function updateTabBarVisibility() {
+        appEl.classList.toggle('tabs-visible', tabs.size > 1);
+      }
+
+      function fitAndResizeTab(tab) {
+        if (!tab) {
+          return;
+        }
+        tab.fitAddon.fit();
+        if (!tab.spawned) {
+          return;
+        }
+        const dims = tab.fitAddon.proposeDimensions();
+        if (dims) {
+          const cmd = tab.type === 'ssh' ? 'ssh_resize' : 'resize_pty';
+          invoke(cmd, { tabId: tab.id, cols: dims.cols, rows: dims.rows }).catch(() => {});
+        }
+      }
+
+      function normalizeTabTitle(rawTitle, fallback) {
+        const cleaned = String(rawTitle || '').replace(/\s+/g, ' ').trim();
+        if (!cleaned) {
+          return fallback;
+        }
+        return cleaned;
+      }
+
+      function activateTab(tabId) {
+        if (!tabs.has(tabId)) {
+          return;
+        }
+        activeTabId = tabId;
+        for (const tab of tabs.values()) {
+          const active = tab.id === tabId;
+          tab.button.classList.toggle('active', active);
+          tab.root.classList.toggle('active', active);
+        }
+
+        const tab = tabs.get(tabId);
+        fitAndResizeTab(tab);
+        tab.term.focus();
+
+        // Notify files panel of tab change
+        if (window.filesPanel) window.filesPanel.onTabChanged(tab);
+      }
+
+      async function closeTab(tabId, options = {}) {
+        const notifyBackend = options.notifyBackend !== false;
+        const closeWindowWhenLast = options.closeWindowWhenLast !== false;
+        const tab = tabs.get(tabId);
+        if (!tab) {
+          return;
+        }
+
+        tabs.delete(tabId);
+        tab.cleanupMouseBridge();
+        tab.term.dispose();
+        tab.button.remove();
+        tab.root.remove();
+        updateTabBarVisibility();
+
+        if (notifyBackend && tab.spawned) {
+          const cmd = tab.type === 'ssh' ? 'ssh_disconnect' : 'close_pty';
+          invoke(cmd, { tabId }).catch(() => {});
+        }
+
+        if (activeTabId === tabId) {
+          activeTabId = null;
+          const next = tabs.values().next();
+          if (!next.done) {
+            activateTab(next.value.id);
+          }
+        }
+
+        if (tabs.size === 0 && closeWindowWhenLast) {
+          const windowApi = tauri.window;
+          if (windowApi && typeof windowApi.getCurrentWindow === 'function') {
+            const win = windowApi.getCurrentWindow();
+            // Use destroy() instead of close() — there is nothing left to
+            // confirm and close() can silently fail on Windows when native
+            // decorations are disabled.
+            win.destroy().catch((e) => {
+              showStatus('Failed to close window: ' + String(e));
+            });
+          }
+        }
+      }
+
+      async function createTab() {
+        const tabId = nextTabId++;
+        const label = 'Tab ' + nextTabLabel++;
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'tab-btn';
+        button.textContent = label;
+        button.classList.add('entering');
+
+        const root = document.createElement('div');
+        root.className = 'terminal-pane';
+
+        tabBarEl.appendChild(button);
+        terminalHostEl.appendChild(root);
+
+        const term = new Terminal({
+          theme,
+          fontFamily: termFontFamily,
+          fontSize: termFontSize,
+          cursorStyle: termCursorStyle,
+          cursorBlink: termCursorBlink,
+          scrollSensitivity: termScrollSensitivity,
+          allowProposedApi: true,
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(webLinksAddon);
+        if (typeof Unicode11Addon !== 'undefined') {
+          term.loadAddon(new Unicode11Addon.Unicode11Addon());
+          term.unicode.activeVersion = '11';
+        }
+        term.open(root);
+
+        const tab = {
+          id: tabId,
+          label,
+          type: 'local', // 'local' or 'ssh'
+          button,
+          root,
+          term,
+          fitAddon,
+          spawned: false,
+          cleanupMouseBridge: setupTmuxRightClickBridge(term, root),
+        };
+        tabs.set(tabId, tab);
+        updateTabBarVisibility();
+
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            button.classList.remove('entering');
+          });
+        });
+
+        button.addEventListener('click', () => activateTab(tabId));
+        term.onTitleChange((title) => {
+          const tabTitle = normalizeTabTitle(title, tab.label);
+          tab.button.textContent = tabTitle;
+          tab.button.title = tabTitle;
+        });
+        term.onData((data) => {
+          if (!tab.spawned) {
+            return;
+          }
+          const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+          invoke(cmd, { tabId, data }).catch((e) => {
+            console.error(cmd + ' error:', e);
+          });
+        });
+
+        activateTab(tabId);
+        const dims = fitAddon.proposeDimensions();
+        const cols = dims ? dims.cols : 80;
+        const rows = dims ? dims.rows : 24;
+
+        try {
+          await invoke('spawn_shell', { tabId, cols, rows });
+          tab.spawned = true;
+          fitAndResizeTab(tab);
+        } catch (e) {
+          term.writeln('\x1b[31mFailed to spawn shell: ' + e + '\x1b[0m');
+          await closeTab(tabId, { notifyBackend: false, closeWindowWhenLast: false });
+        }
+      }
+
+      // ---- SSH tab creation ----
+      async function createSshTab(opts) {
+        // opts: { serverId } or { spec, password? }
+        const tabId = nextTabId++;
+        const label = opts.spec || 'SSH';
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'tab-btn';
+        button.textContent = label;
+        button.classList.add('entering');
+
+        const root = document.createElement('div');
+        root.className = 'terminal-pane';
+
+        tabBarEl.appendChild(button);
+        terminalHostEl.appendChild(root);
+
+        const term = new Terminal({
+          theme,
+          fontFamily: termFontFamily,
+          fontSize: termFontSize,
+          cursorStyle: termCursorStyle,
+          cursorBlink: termCursorBlink,
+          scrollSensitivity: termScrollSensitivity,
+          allowProposedApi: true,
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(webLinksAddon);
+        if (typeof Unicode11Addon !== 'undefined') {
+          term.loadAddon(new Unicode11Addon.Unicode11Addon());
+          term.unicode.activeVersion = '11';
+        }
+        term.open(root);
+
+        const tab = {
+          id: tabId,
+          label,
+          type: 'ssh',
+          button,
+          root,
+          term,
+          fitAddon,
+          spawned: false,
+          cleanupMouseBridge: setupTmuxRightClickBridge(term, root),
+        };
+        tabs.set(tabId, tab);
+        updateTabBarVisibility();
+
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => button.classList.remove('entering'));
+        });
+
+        button.addEventListener('click', () => activateTab(tabId));
+        term.onTitleChange((title) => {
+          const tabTitle = normalizeTabTitle(title, tab.label);
+          tab.button.textContent = tabTitle;
+          tab.button.title = tabTitle;
+        });
+        term.onData((data) => {
+          if (!tab.spawned) return;
+          invoke('ssh_write', { tabId, data }).catch((e) => {
+            console.error('ssh_write error:', e);
+          });
+        });
+
+        activateTab(tabId);
+        const dims = fitAddon.proposeDimensions();
+        const cols = dims ? dims.cols : 80;
+        const rows = dims ? dims.rows : 24;
+
+        try {
+          if (opts.serverId) {
+            await invoke('ssh_connect', {
+              tabId, serverId: opts.serverId, cols, rows, password: opts.password || null,
+            });
+          } else if (opts.spec) {
+            await invoke('ssh_quick_connect', {
+              tabId, spec: opts.spec, cols, rows, password: opts.password || null,
+            });
+          }
+          tab.spawned = true;
+          tab.label = button.textContent || label;
+          fitAndResizeTab(tab);
+          // Refresh the SSH panel session list
+          if (window.sshPanel) window.sshPanel.refreshSessions();
+          // Notify files panel that this SSH tab is now connected
+          if (window.filesPanel) window.filesPanel.onTabChanged(tab);
+        } catch (e) {
+          term.writeln('\x1b[31mSSH connection failed: ' + e + '\x1b[0m');
+          term.writeln('\x1b[90mPress any key to close this tab.\x1b[0m');
+          term.onData(() => {
+            closeTab(tabId, { notifyBackend: false });
+          });
+        }
+      }
+
+      // ---- Files panel init ----
+      const filesPanelEl = document.getElementById('files-panel');
+      const filesPanelWrapEl = document.getElementById('files-panel-wrap');
+      const filesResizeEl = document.getElementById('files-panel-resize');
+      if (window.filesPanel) {
+        window.filesPanel.init({
+          invoke,
+          listen: listenOnCurrentWindow,
+          panelEl: filesPanelEl,
+          panelWrapEl: filesPanelWrapEl,
+          resizeHandleEl: filesResizeEl,
+          fitActiveTab: () => fitAndResizeTab(currentTab()),
+          getActiveTab: () => currentTab(),
+        });
+      }
+
+      // ---- SSH panel init ----
+      const sshPanelEl = document.getElementById('ssh-panel');
+      const sshPanelWrapEl = document.getElementById('ssh-panel-wrap');
+      const sshResizeEl = document.getElementById('ssh-panel-resize');
+      if (window.sshPanel) {
+        window.sshPanel.init({
+          invoke,
+          listen: listenOnCurrentWindow,
+          createSshTab,
+          panelEl: sshPanelEl,
+          panelWrapEl: sshPanelWrapEl,
+          resizeHandleEl: sshResizeEl,
+          fitActiveTab: () => fitAndResizeTab(currentTab()),
+          refocusTerminal: () => { const tab = currentTab(); if (tab) tab.term.focus(); },
+        });
+      }
+
+      // Save window layout on resize (debounced).
+      let windowResaveSaveTimer = null;
+      window.addEventListener('resize', () => {
+        if (windowResaveSaveTimer) clearTimeout(windowResaveSaveTimer);
+        windowResaveSaveTimer = setTimeout(() => {
+          invoke('save_window_layout', {
+            layout: {
+              ssh_panel_width: sshPanelEl.offsetWidth,
+              ssh_panel_visible: window.sshPanel ? !window.sshPanel.isHidden() : true,
+              files_panel_width: filesPanelEl.offsetWidth,
+              files_panel_visible: window.filesPanel ? !window.filesPanel.isHidden() : true,
+            },
+          }).catch(() => {});
+        }, 500);
+      });
+
+      // ---- Tunnel manager init ----
+      if (window.tunnelManager) {
+        window.tunnelManager.init({
+          invoke,
+          listen: listenOnCurrentWindow,
+          getServerData: () => window.sshPanel ? window.sshPanel.getServerData() : { folders: [], ungrouped: [], ssh_config: [] },
+        });
+      }
+
+      // ---- Plugin manager init ----
+      if (window.pluginManager) {
+        window.pluginManager.init({ invoke });
+      }
+
+      // ---- Plugin widget renderer init ----
+      if (window.pluginWidgets) {
+        window.pluginWidgets.init({
+          invoke,
+          listen: listenOnCurrentWindow,
+          writeToActivePty: (data) => {
+            const tab = currentTab();
+            if (!tab || !tab.spawned) return;
+            const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+            invoke(cmd, { tabId: tab.id, data }).catch(() => {});
+          },
+        });
+
+        // Listen for plugin panel registrations and create panel containers.
+        listenOnCurrentWindow('plugin-panel-registered', async (event) => {
+          const { handle, plugin, name, location } = event.payload;
+          // For now, add plugin panels as additional content in the right sidebar.
+          // Future: support left/bottom panel locations with tabbed UI.
+          const sshPanel = document.getElementById('ssh-panel');
+          if (!sshPanel) return;
+
+          // Create a container for this plugin's widgets.
+          let container = document.querySelector(`[data-plugin-handle="${handle}"]`);
+          if (!container) {
+            const sep = document.createElement('div');
+            sep.className = 'ssh-panel-separator';
+            sshPanel.appendChild(sep);
+
+            const header = document.createElement('div');
+            header.className = 'ssh-section-header';
+            header.textContent = name;
+            sshPanel.appendChild(header);
+
+            container = document.createElement('div');
+            container.className = 'plugin-panel-content';
+            container.dataset.pluginHandle = handle;
+            container.dataset.pluginName = plugin;
+            sshPanel.appendChild(container);
+          }
+
+          // Request initial render.
+          try {
+            const result = await invoke('request_plugin_render', { pluginName: plugin });
+            if (result) {
+              window.pluginWidgets.renderWidgets(container, result, plugin);
+            }
+          } catch (e) {
+            console.error('Initial plugin render failed:', e);
+          }
+        });
+      }
+
+      // ---- Drag and drop ----
+      // Prevent the webview from navigating on file drops.
+      terminalHostEl.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        terminalHostEl.classList.add('drag-over');
+      });
+      terminalHostEl.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        terminalHostEl.classList.remove('drag-over');
+      });
+      terminalHostEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        terminalHostEl.classList.remove('drag-over');
+        // HTML5 drop — may have files with path info
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          const paths = [];
+          for (const file of e.dataTransfer.files) {
+            // In Tauri webviews, File.path may be available
+            const p = file.path || file.name;
+            if (p) paths.push(p);
+          }
+          if (paths.length > 0) {
+            writePathsToTerminal(paths);
+          }
+        }
+      });
+
+      // Tauri drag-drop event (provides real filesystem paths).
+      if (currentWindow && typeof currentWindow.onDragDropEvent === 'function') {
+        currentWindow.onDragDropEvent((event) => {
+          if (event.payload.type === 'over') {
+            terminalHostEl.classList.add('drag-over');
+          } else if (event.payload.type === 'leave') {
+            terminalHostEl.classList.remove('drag-over');
+          } else if (event.payload.type === 'drop') {
+            terminalHostEl.classList.remove('drag-over');
+            const paths = event.payload.paths;
+            if (paths && paths.length > 0) {
+              writePathsToTerminal(paths);
+            }
+          }
+        });
+      }
+
+      function writePathsToTerminal(paths) {
+        const tab = currentTab();
+        if (!tab || !tab.spawned) return;
+        // Shell-escape paths with spaces by quoting them.
+        const escaped = paths.map((p) => {
+          if (/[\s"'\\$`!#&|;()<>]/.test(p)) {
+            return "'" + p.replace(/'/g, "'\\''") + "'";
+          }
+          return p;
+        });
+        const text = escaped.join(' ');
+        const cmd = tab.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
+        invoke(cmd, { tabId: tab.id, data: text }).catch((e) => {
+          console.error('drag-drop write error:', e);
+        });
+      }
+
+      await listenOnCurrentWindow('pty-output', (event) => {
+        const payload = event.payload || {};
+        const windowLabel = payload.window_label;
+        const tabId = payload.tab_id;
+        const data = payload.data;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
+          return;
+        }
+        if (typeof tabId !== 'number' || typeof data !== 'string') {
+          return;
+        }
+        const tab = tabs.get(tabId);
+        if (tab) {
+          tab.term.write(data);
+        }
+      });
+
+      await listenOnCurrentWindow('pty-exit', (event) => {
+        const payload = event.payload || {};
+        const windowLabel = payload.window_label;
+        const tabId = payload.tab_id;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
+          return;
+        }
+        if (typeof tabId !== 'number') {
+          return;
+        }
+        closeTab(tabId, { notifyBackend: false }).then(() => {
+          if (window.sshPanel) window.sshPanel.refreshSessions();
+        }).catch((e) => {
+          console.error('closeTab after pty-exit failed:', e);
+        });
+      });
+
+      // Shared menu action handler — used by both the native menu event
+      // listener and the custom titlebar menus.
+      function handleMenuAction(action) {
+        if (action === 'new-tab') {
+          createTab().catch((e) => showStatus('Failed to create tab: ' + String(e)));
+          return;
+        }
+        if (action === 'new-window') {
+          invoke('open_new_window').catch((e) => showStatus('Failed to open window: ' + String(e)));
+          return;
+        }
+        if (action === 'close-tab' && activeTabId !== null) {
+          closeTab(activeTabId).catch((e) => showStatus('Failed to close tab: ' + String(e)));
+          return;
+        }
+        if (action === 'toggle-left-panel' && window.filesPanel) {
+          window.filesPanel.togglePanel();
+          return;
+        }
+        if (action === 'toggle-right-panel' && window.sshPanel) {
+          window.sshPanel.togglePanel();
+          return;
+        }
+        if (action === 'focus-sessions' && window.sshPanel) {
+          window.sshPanel.focusQuickConnect();
+          return;
+        }
+        if (action === 'plugin-manager' && window.pluginManager) {
+          window.pluginManager.show();
+          return;
+        }
+        if (action === 'manage-tunnels' && window.tunnelManager) {
+          window.tunnelManager.show();
+          return;
+        }
+        // Zen mode — toggle all panels off/on.
+        if (action === 'zen-mode') {
+          const filesHidden = window.filesPanel && window.filesPanel.isHidden();
+          const sshHidden = window.sshPanel && window.sshPanel.isHidden();
+          const allHidden = filesHidden && sshHidden;
+          if (allHidden) {
+            if (window.filesPanel) window.filesPanel.togglePanel();
+            if (window.sshPanel) window.sshPanel.togglePanel();
+          } else {
+            if (window.filesPanel && !window.filesPanel.isHidden()) window.filesPanel.togglePanel();
+            if (window.sshPanel && !window.sshPanel.isHidden()) window.sshPanel.togglePanel();
+          }
+          return;
+        }
+        // Zoom.
+        if (action === 'zoom-in') {
+          document.body.style.zoom = (parseFloat(document.body.style.zoom || '1') + 0.1).toFixed(1);
+          return;
+        }
+        if (action === 'zoom-out') {
+          document.body.style.zoom = Math.max(0.5, parseFloat(document.body.style.zoom || '1') - 0.1).toFixed(1);
+          return;
+        }
+        if (action === 'zoom-reset') {
+          document.body.style.zoom = '1';
+          return;
+        }
+        // Toggle bottom panel (placeholder — no bottom panel content yet).
+        if (action === 'toggle-bottom-panel') {
+          const bp = document.getElementById('bottom-panel');
+          if (bp) bp.classList.toggle('hidden');
+          setTimeout(() => fitAndResizeTab(currentTab()), 50);
+          return;
+        }
+      }
+
+      await listenOnCurrentWindow('menu-action', (event) => {
+        const payload = event.payload || {};
+        const windowLabel = payload.window_label;
+        const action = payload.action;
+        if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) {
+          return;
+        }
+        handleMenuAction(action);
+      });
+
+      // Initialize custom titlebar now that handleMenuAction is available.
+      if (window._initTitlebarPending && window.titlebar) {
+        window.titlebar.init(handleMenuAction);
+        delete window._initTitlebarPending;
+      }
+
+      // Global Escape handler — close overlays or refocus terminal.
+      // Uses capture phase so it fires before xterm.js swallows the event.
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+
+        // Check for open overlays (dialogs, forms, context menus).
+        const overlay = document.querySelector('.ssh-overlay');
+        if (overlay) {
+          // The overlay's own Escape handler will handle dismissal.
+          // But if it didn't (e.g., event didn't reach it), remove it.
+          // We don't remove here — let the overlay's handler do it.
+          return;
+        }
+
+        // Close any open context menus.
+        const ctxMenu = document.querySelector('.ssh-context-menu');
+        if (ctxMenu) {
+          ctxMenu.remove();
+          e.preventDefault();
+          return;
+        }
+
+        // No overlays open — refocus the active terminal.
+        const tab = currentTab();
+        if (tab) {
+          tab.term.focus();
+        }
+      }, true); // capture phase
+
+      // Tab navigation: Cmd+1-9 to switch tabs.
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key >= '1' && e.key <= '9') {
+          e.preventDefault();
+          const idx = parseInt(e.key, 10) - 1;
+          const tabIds = Array.from(tabs.keys());
+          if (idx < tabIds.length) {
+            activateTab(tabIds[idx]);
+          }
+        }
+      });
+
+      // Hot-reload: re-fetch theme when config changes.
+      listenOnCurrentWindow('config-changed', async () => {
+        try {
+          const tc = await invoke('get_theme_colors');
+          // Re-apply CSS custom properties.
+          const r = document.documentElement.style;
+          r.setProperty('--bg', tc.background);
+          r.setProperty('--fg', tc.foreground);
+          r.setProperty('--dim-fg', tc.dim_fg);
+          r.setProperty('--panel-bg', tc.panel_bg);
+          r.setProperty('--tab-bar-bg', tc.tab_bar_bg);
+          r.setProperty('--tab-border', tc.tab_border);
+          r.setProperty('--active-highlight', tc.active_highlight);
+          r.setProperty('--red', tc.red);
+          r.setProperty('--green', tc.green);
+          r.setProperty('--yellow', tc.yellow);
+          r.setProperty('--blue', tc.blue);
+          r.setProperty('--cyan', tc.cyan);
+          r.setProperty('--magenta', tc.magenta);
+          document.body.style.background = tc.background;
+          // Update xterm.js theme for all tabs.
+          const newTheme = {
+            background: tc.background, foreground: tc.foreground,
+            cursor: tc.cursor_color, cursorAccent: tc.cursor_text,
+            selectionBackground: tc.selection_bg, selectionForeground: tc.selection_text,
+            black: tc.black, red: tc.red, green: tc.green, yellow: tc.yellow,
+            blue: tc.blue, magenta: tc.magenta, cyan: tc.cyan, white: tc.white,
+            brightBlack: tc.bright_black, brightRed: tc.bright_red,
+            brightGreen: tc.bright_green, brightYellow: tc.bright_yellow,
+            brightBlue: tc.bright_blue, brightMagenta: tc.bright_magenta,
+            brightCyan: tc.bright_cyan, brightWhite: tc.bright_white,
+          };
+          theme = newTheme;
+          for (const tab of tabs.values()) {
+            tab.term.options.theme = newTheme;
+          }
+          if (window.toast) window.toast.info('Config Reloaded', 'Theme and settings updated');
+        } catch (e) {
+          console.warn('Hot-reload failed:', e);
+        }
+      });
+
+      const resizeObserver = new ResizeObserver(() => {
+        fitAndResizeTab(currentTab());
+      });
+      resizeObserver.observe(terminalHostEl);
+
+      try {
+        await createTab();
+      } catch (e) {
+        showStatus('Failed to initialize first tab: ' + String(e));
+      }
+    })();
+  </script>
+</body>
+</html>

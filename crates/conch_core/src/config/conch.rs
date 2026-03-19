@@ -274,4 +274,5 @@ mod tests {
         let cfg: UiConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.font, UiFontConfig::default());
     }
+
 }
