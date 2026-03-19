@@ -294,12 +294,15 @@
 
     try {
       await invoke('tunnel_save', { tunnel });
-      // Start connecting immediately
-      invoke('tunnel_start', { tunnelId: tunnel.id }).catch((e) => {
-        window.toast.error('Tunnel Error', String(e));
-      });
-      // Show the manager with updated state after a brief delay
-      setTimeout(() => show(), 800);
+      // Re-show the manager immediately so the new tunnel is visible
+      await show();
+      // Start connecting in the background, then refresh to update status
+      invoke('tunnel_start', { tunnelId: tunnel.id })
+        .then(() => show())
+        .catch((e) => {
+          window.toast.error('Tunnel Error', String(e));
+          show();
+        });
     } catch (e) {
       window.toast.error('Save Failed', String(e));
       show();

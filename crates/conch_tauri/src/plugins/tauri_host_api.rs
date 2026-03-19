@@ -202,15 +202,24 @@ impl HostApi for TauriHostApi {
     }
 
     fn clipboard_set(&self, text: &str) {
-        // Use arboard if available, otherwise no-op.
-        // For now, emit an event for the frontend to handle.
-        let _ = self.app_handle.emit("plugin-clipboard-set", text.to_string());
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => {
+                if let Err(e) = cb.set_text(text) {
+                    log::warn!("[{}] clipboard set failed: {e}", self.name);
+                }
+            }
+            Err(e) => log::warn!("[{}] clipboard unavailable: {e}", self.name),
+        }
     }
 
     fn clipboard_get(&self) -> Option<String> {
-        // Clipboard get is synchronous and tricky from the backend.
-        // For now, return None — plugins should use the frontend clipboard API.
-        None
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => cb.get_text().ok(),
+            Err(e) => {
+                log::warn!("[{}] clipboard unavailable: {e}", self.name);
+                None
+            }
+        }
     }
 
     fn get_theme(&self) -> Option<String> {
