@@ -1136,6 +1136,32 @@
         }, 100);
       }
 
+      // Create a Terminal with all addons loaded. Must be called after the
+      // root element is attached to the DOM (WebGL addon needs a live canvas).
+      function initTerminal(root) {
+        const term = new Terminal({
+          theme,
+          fontFamily: termFontFamily,
+          fontSize: termFontSize,
+          cursorStyle: termCursorStyle,
+          cursorBlink: termCursorBlink,
+          scrollSensitivity: termScrollSensitivity,
+          allowProposedApi: true,
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.loadAddon(new WebLinksAddon.WebLinksAddon());
+        if (typeof Unicode11Addon !== 'undefined') {
+          term.loadAddon(new Unicode11Addon.Unicode11Addon());
+          term.unicode.activeVersion = '11';
+        }
+        term.open(root);
+        if (typeof WebglAddon !== 'undefined') {
+          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
+        }
+        return { term, fitAddon };
+      }
+
       function normalizeTabTitle(rawTitle, fallback) {
         const cleaned = String(rawTitle || '').replace(/\s+/g, ' ').trim();
         if (!cleaned) {
@@ -1236,35 +1262,12 @@
         tabBarEl.appendChild(button);
         terminalHostEl.appendChild(root);
 
-        const term = new Terminal({
-          theme,
-          fontFamily: termFontFamily,
-          fontSize: termFontSize,
-          cursorStyle: termCursorStyle,
-          cursorBlink: termCursorBlink,
-          scrollSensitivity: termScrollSensitivity,
-          allowProposedApi: true,
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-        term.loadAddon(fitAddon);
-        term.loadAddon(webLinksAddon);
-        if (typeof Unicode11Addon !== 'undefined') {
-          term.loadAddon(new Unicode11Addon.Unicode11Addon());
-          term.unicode.activeVersion = '11';
-        }
-        term.open(root);
-        // WebGL renderer has better glyph atlas management than the default
-        // canvas renderer, which suffers from texture corruption that causes
-        // box-drawing characters to appear as diamonds.
-        if (typeof WebglAddon !== 'undefined') {
-          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
-        }
+        const { term, fitAddon } = initTerminal(root);
 
         const tab = {
           id: tabId,
           label,
-          type: 'local', // 'local' or 'ssh'
+          type: 'local',
           hasCustomTitle: false,
           button,
           root,
@@ -1332,27 +1335,7 @@
         tabBarEl.appendChild(button);
         terminalHostEl.appendChild(root);
 
-        const term = new Terminal({
-          theme,
-          fontFamily: termFontFamily,
-          fontSize: termFontSize,
-          cursorStyle: termCursorStyle,
-          cursorBlink: termCursorBlink,
-          scrollSensitivity: termScrollSensitivity,
-          allowProposedApi: true,
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-        term.loadAddon(fitAddon);
-        term.loadAddon(webLinksAddon);
-        if (typeof Unicode11Addon !== 'undefined') {
-          term.loadAddon(new Unicode11Addon.Unicode11Addon());
-          term.unicode.activeVersion = '11';
-        }
-        term.open(root);
-        if (typeof WebglAddon !== 'undefined') {
-          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
-        }
+        const { term, fitAddon } = initTerminal(root);
 
         const tab = {
           id: tabId,
