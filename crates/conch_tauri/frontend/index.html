@@ -965,6 +965,10 @@
         }
       } catch (_) {}
 
+      // Track webview zoom level for menu-driven zoom in/out.
+      let currentZoom = 1.0;
+      invoke('get_zoom_level').then(z => { currentZoom = z; }).catch(() => {});
+
       const appEl = document.getElementById('app');
       const tabBarEl = document.getElementById('tabbar');
       const terminalHostEl = document.getElementById('terminal-host');
@@ -1671,17 +1675,20 @@
           }
           return;
         }
-        // Zoom.
+        // Zoom — uses native webview zoom via Tauri backend.
         if (action === 'zoom-in') {
-          document.body.style.zoom = (parseFloat(document.body.style.zoom || '1') + 0.1).toFixed(1);
+          currentZoom = Math.min(3.0, +(currentZoom + 0.1).toFixed(1));
+          invoke('set_zoom_level', { scaleFactor: currentZoom }).catch(() => {});
           return;
         }
         if (action === 'zoom-out') {
-          document.body.style.zoom = Math.max(0.5, parseFloat(document.body.style.zoom || '1') - 0.1).toFixed(1);
+          currentZoom = Math.max(0.5, +(currentZoom - 0.1).toFixed(1));
+          invoke('set_zoom_level', { scaleFactor: currentZoom }).catch(() => {});
           return;
         }
         if (action === 'zoom-reset') {
-          document.body.style.zoom = '1';
+          currentZoom = 1.0;
+          invoke('set_zoom_level', { scaleFactor: 1.0 }).catch(() => {});
           return;
         }
         // Toggle bottom panel (placeholder — no bottom panel content yet).

@@ -482,6 +482,22 @@ fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLayout) {
     let _ = config::save_persistent_state(&state);
 }
 
+#[tauri::command]
+fn set_zoom_level(window: tauri::WebviewWindow, scale_factor: f64) -> Result<(), String> {
+    window.set_zoom(scale_factor).map_err(|e| e.to_string())?;
+    let mut state = config::load_persistent_state().unwrap_or_default();
+    state.layout.zoom_factor = scale_factor as f32;
+    let _ = config::save_persistent_state(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_zoom_level() -> f64 {
+    let state = config::load_persistent_state().unwrap_or_default();
+    let z = state.layout.zoom_factor as f64;
+    if z > 0.0 { z } else { 1.0 }
+}
+
 fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     keyboard: &conch_core::config::KeyboardConfig,
@@ -707,7 +723,7 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
     let dec = if cfg!(target_os = "windows") { false } else { user_wants_dec };
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+    let new_win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Conch")
         .inner_size(w, h)
         .resizable(true)
@@ -715,6 +731,10 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         .theme(theme)
         .visible(false)
         .build()?;
+    let zoom = persisted.layout.zoom_factor;
+    if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
+        let _ = new_win.set_zoom(zoom as f64);
+    }
     Ok(())
 }
 
@@ -782,11 +802,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
             }
 
-            // Apply persisted window size, decorations, and theme.
+            // Apply persisted window size, decorations, theme, and zoom.
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
                 let _ = win.set_decorations(use_decorations);
                 let _ = win.set_theme(window_theme);
+                let zoom = persisted.layout.zoom_factor;
+                if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
+                    let _ = win.set_zoom(zoom as f64);
+                }
             }
 
             // Initialize plugin system and restore previously enabled plugins.
@@ -936,6 +960,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             app_ready,
+            set_zoom_level,
+            get_zoom_level,
             spawn_shell,
             write_to_pty,
             resize_pty,
