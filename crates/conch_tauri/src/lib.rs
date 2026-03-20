@@ -281,8 +281,21 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let toggle_left = MenuItem::with_id(app, MENU_TOGGLE_LEFT_PANEL_ID, "Toggle File Explorer", true, Some(&toggle_left_accel))?;
         let toggle_right_accel = config_key_to_accelerator(&keyboard.toggle_right_panel);
         let toggle_right = MenuItem::with_id(app, MENU_TOGGLE_RIGHT_PANEL_ID, "Toggle Sessions Panel", true, Some(&toggle_right_accel))?;
+        let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
+        let toggle_bottom = MenuItem::with_id(app, "view.toggle_bottom_panel", "Toggle Bottom Panel", true, Some(&toggle_bottom_accel))?;
         let focus_sessions = MenuItem::with_id(app, MENU_FOCUS_SESSIONS_ID, "Toggle & Focus Sessions", true, Some("CmdOrCtrl+/"))?;
-        let view_menu = Submenu::with_items(app, "View", true, &[&toggle_left, &toggle_right, &PredefinedMenuItem::separator(app)?, &focus_sessions])?;
+        let zen_accel = config_key_to_accelerator(&keyboard.zen_mode);
+        let zen_mode = MenuItem::with_id(app, MENU_ZEN_MODE_ID, "Zen Mode", true, Some(&zen_accel))?;
+        let zoom_in = MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
+        let zoom_out = MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+        let zoom_reset = MenuItem::with_id(app, MENU_ZOOM_RESET_ID, "Reset Zoom", true, Some("CmdOrCtrl+0"))?;
+        let view_menu = Submenu::with_items(app, "View", true, &[
+            &toggle_left, &toggle_right, &toggle_bottom,
+            &PredefinedMenuItem::separator(app)?,
+            &focus_sessions, &zen_mode,
+            &PredefinedMenuItem::separator(app)?,
+            &zoom_in, &zoom_out, &zoom_reset,
+        ])?;
 
         let window_menu = Submenu::with_items(app, "Window", true, &[
             &PredefinedMenuItem::minimize(app, None)?,
@@ -480,6 +493,22 @@ fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLayout) {
         state.layout.left_panel_visible = v;
     }
     let _ = config::save_persistent_state(&state);
+}
+
+#[tauri::command]
+fn set_zoom_level(window: tauri::WebviewWindow, scale_factor: f64) -> Result<(), String> {
+    window.set_zoom(scale_factor).map_err(|e| e.to_string())?;
+    let mut state = config::load_persistent_state().unwrap_or_default();
+    state.layout.zoom_factor = scale_factor as f32;
+    let _ = config::save_persistent_state(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_zoom_level() -> f64 {
+    let state = config::load_persistent_state().unwrap_or_default();
+    let z = state.layout.zoom_factor as f64;
+    if z > 0.0 { z } else { 1.0 }
 }
 
 fn build_app_menu<R: tauri::Runtime>(
@@ -707,7 +736,7 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
     let dec = if cfg!(target_os = "windows") { false } else { user_wants_dec };
     let theme = appearance_to_theme(&user_cfg.colors.appearance_mode);
 
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+    let new_win = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Conch")
         .inner_size(w, h)
         .resizable(true)
@@ -715,6 +744,10 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         .theme(theme)
         .visible(false)
         .build()?;
+    let zoom = persisted.layout.zoom_factor;
+    if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
+        let _ = new_win.set_zoom(zoom as f64);
+    }
     Ok(())
 }
 
@@ -782,11 +815,15 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to set app menu: {e}"))?;
             }
 
-            // Apply persisted window size, decorations, and theme.
+            // Apply persisted window size, decorations, theme, and zoom.
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(tauri::LogicalSize::new(initial_width, initial_height));
                 let _ = win.set_decorations(use_decorations);
                 let _ = win.set_theme(window_theme);
+                let zoom = persisted.layout.zoom_factor;
+                if zoom > 0.0 && (zoom - 1.0).abs() > f32::EPSILON {
+                    let _ = win.set_zoom(zoom as f64);
+                }
             }
 
             // Initialize plugin system and restore previously enabled plugins.
@@ -936,6 +973,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             app_ready,
+            set_zoom_level,
+            get_zoom_level,
             spawn_shell,
             write_to_pty,
             resize_pty,
