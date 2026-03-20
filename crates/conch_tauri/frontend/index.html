@@ -1802,6 +1802,13 @@
       });
       resizeObserver.observe(terminalHostEl);
 
+      // Preload the bundled Nerd Font so the canvas renderer can use it for
+      // glyph fallback.  CSS @font-face is lazy — without this the browser
+      // never downloads the font because no DOM text references it.
+      try {
+        await document.fonts.load(termFontSize + 'px "Symbols Nerd Font Mono"');
+      } catch (_) { /* font may already be loaded or missing — not fatal */ }
+
       try {
         await createTab();
       } catch (e) {
