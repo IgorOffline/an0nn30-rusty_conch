@@ -649,6 +649,73 @@ pub(crate) fn remote_move_server(
     }
 }
 
+/// Export servers and tunnels to a file chosen via native save dialog.
+/// If `server_ids` or `tunnel_ids` are provided, only those items are included.
+#[tauri::command]
+pub(crate) async fn remote_export(
+    app: tauri::AppHandle,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    server_ids: Option<Vec<String>>,
+    tunnel_ids: Option<Vec<String>>,
+) -> Result<String, String> {
+    let json = {
+        let state = remote.lock();
+        let payload = state.config.to_export_filtered(server_ids.as_deref(), tunnel_ids.as_deref());
+        serde_json::to_string_pretty(&payload).map_err(|e| format!("Export failed: {e}"))?
+    };
+
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .set_file_name("conch-connections.json")
+        .add_filter("JSON", &["json"])
+        .blocking_save_file();
+
+    match path {
+        Some(path) => {
+            std::fs::write(path.as_path().unwrap(), &json)
+                .map_err(|e| format!("Failed to write file: {e}"))?;
+            Ok("Exported successfully".to_string())
+        }
+        None => Err("Export cancelled".to_string()),
+    }
+}
+
+/// Import servers and tunnels from a file chosen via native open dialog.
+#[tauri::command]
+pub(crate) async fn remote_import(
+    app: tauri::AppHandle,
+    remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+
+    let path = match path {
+        Some(p) => p,
+        None => return Err("Import cancelled".to_string()),
+    };
+
+    let json = std::fs::read_to_string(path.as_path().unwrap())
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    let payload: config::ExportPayload =
+        serde_json::from_str(&json).map_err(|e| format!("Invalid import file: {e}"))?;
+    if payload.version != 1 {
+        return Err(format!("Unsupported export version: {}", payload.version));
+    }
+    let mut state = remote.lock();
+    let (servers, folders, tunnels) = state.config.merge_import(payload);
+    config::save_config(&state.config);
+    Ok(format!(
+        "Imported {servers} server(s), {folders} folder(s), {tunnels} tunnel(s)"
+    ))
+}
+
 /// Duplicate a server entry.
 #[tauri::command]
 pub(crate) fn remote_duplicate_server(

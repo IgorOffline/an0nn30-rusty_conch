@@ -686,6 +686,22 @@
     .ssh-form-btn:hover { background: var(--tab-border); color: var(--fg); }
     .ssh-form-btn.primary { background: var(--dim-fg); color: var(--fg); border-color: var(--dim-fg); }
     .ssh-form-btn.primary:hover { background: #7283b5; }
+    /* -- Export dialog -- */
+    .ssh-export-section { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--dim-fg); margin-bottom: 4px; }
+    .ssh-export-group { font-size: 11px; font-weight: 600; color: var(--dim-fg); margin: 8px 0 2px 0; }
+    .ssh-export-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; font-size: 12px; color: var(--fg); line-height: 14px; }
+    .ssh-export-item input[type="checkbox"],
+    .ssh-form-body input[type="checkbox"] {
+      -webkit-appearance: none; appearance: none; margin: 0;
+      width: 14px; height: 14px; flex-shrink: 0;
+      border: 1px solid var(--active-highlight); border-radius: 3px;
+      background: transparent; cursor: pointer;
+    }
+    .ssh-export-item input[type="checkbox"]:checked,
+    .ssh-form-body input[type="checkbox"]:checked {
+      background: var(--blue, #7aa2f7); border-color: var(--blue, #7aa2f7);
+    }
+    .ssh-export-dim { color: var(--dim-fg); font-size: 11px; }
     /* -- Tunnel manager -- */
     .tunnel-manager-dialog { width: 680px; max-width: 95vw; }
     .tunnel-manager-body { padding: 0; max-height: 50vh; overflow-y: auto; }
@@ -1608,6 +1624,14 @@
         }
         if (action === 'manage-tunnels' && window.tunnelManager) {
           window.tunnelManager.show();
+          return;
+        }
+        if (action === 'ssh-export' && window.sshPanel) {
+          window.sshPanel.exportConfig();
+          return;
+        }
+        if (action === 'ssh-import' && window.sshPanel) {
+          window.sshPanel.importConfig();
           return;
         }
         // Zen mode — toggle all panels off/on.

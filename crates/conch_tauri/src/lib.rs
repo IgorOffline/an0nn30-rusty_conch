@@ -57,6 +57,10 @@ const MENU_ACTION_ZOOM_OUT: &str = "zoom-out";
 const MENU_ACTION_ZOOM_RESET: &str = "zoom-reset";
 const MENU_ACTION_PLUGIN_MANAGER: &str = "plugin-manager";
 const MENU_ACTION_MANAGE_TUNNELS: &str = "manage-tunnels";
+const MENU_SSH_EXPORT_ID: &str = "file.ssh_export";
+const MENU_SSH_IMPORT_ID: &str = "file.ssh_import";
+const MENU_ACTION_SSH_EXPORT: &str = "ssh-export";
+const MENU_ACTION_SSH_IMPORT: &str = "ssh-import";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -260,7 +264,11 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let new_window = MenuItem::with_id(app, MENU_NEW_WINDOW_ID, "New Window", true, Some("CmdOrCtrl+Shift+N"))?;
         let separator = PredefinedMenuItem::separator(app)?;
         let close_window = PredefinedMenuItem::close_window(app, None)?;
-        let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &close_tab, &close_window])?;
+        let ssh_export = MenuItem::with_id(app, MENU_SSH_EXPORT_ID, "Export", true, None::<&str>)?;
+        let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import", true, None::<&str>)?;
+        let ssh_manager_menu = Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
+        let separator2 = PredefinedMenuItem::separator(app)?;
+        let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &close_tab, &close_window])?;
         let edit_menu = Submenu::with_items(app, "Edit", true, &[
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
@@ -495,11 +503,15 @@ fn build_app_menu<R: tauri::Runtime>(
     let separator = PredefinedMenuItem::separator(app)?;
     let close_window = PredefinedMenuItem::close_window(app, None)?;
 
+    let ssh_export = MenuItem::with_id(app, MENU_SSH_EXPORT_ID, "Export Connections", true, None::<&str>)?;
+    let ssh_import = MenuItem::with_id(app, MENU_SSH_IMPORT_ID, "Import Connections", true, None::<&str>)?;
+    let ssh_manager_menu = Submenu::with_items(app, "SSH Manager", true, &[&ssh_export, &ssh_import])?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
     let file_menu = Submenu::with_items(
         app,
         "File",
         true,
-        &[&new_tab, &new_window, &separator, &close_tab, &close_window],
+        &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &close_tab, &close_window],
     )?;
     let edit_menu = Submenu::with_items(
         app,
@@ -745,6 +757,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             config,
@@ -857,6 +870,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             MENU_MANAGE_TUNNELS_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_MANAGE_TUNNELS)
             }
+            MENU_SSH_EXPORT_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_SSH_EXPORT)
+            }
+            MENU_SSH_IMPORT_ID => {
+                emit_menu_action_to_focused_window(app, MENU_ACTION_SSH_IMPORT)
+            }
             MENU_NEW_WINDOW_ID => {
                 if let Err(e) = create_new_window(app) {
                     log::error!("Failed to create window from menu: {e}");
@@ -948,6 +967,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             remote::remote_set_folder_expanded,
             remote::remote_move_server,
             remote::remote_duplicate_server,
+            remote::remote_export,
+            remote::remote_import,
             remote::sftp_list_dir,
             remote::sftp_stat,
             remote::sftp_read_file,

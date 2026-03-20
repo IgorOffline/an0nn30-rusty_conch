@@ -19,6 +19,7 @@ conch_plugin = { workspace = true }
 conch_plugin_sdk = { workspace = true }
 tauri = { version = "2" }
 tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
 portable-pty = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }

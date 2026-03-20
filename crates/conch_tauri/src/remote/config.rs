@@ -194,6 +194,113 @@ pub fn save_config(config: &SshConfig) {
 }
 
 // ---------------------------------------------------------------------------
+// Export / Import
+// ---------------------------------------------------------------------------
+
+/// Portable export format — contains servers (with folders) and tunnels.
+/// Passwords and absolute key paths are intentionally excluded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportPayload {
+    pub version: u32,
+    pub folders: Vec<ServerFolder>,
+    pub ungrouped: Vec<ServerEntry>,
+    pub tunnels: Vec<SavedTunnel>,
+}
+
+impl SshConfig {
+    /// Create an export payload, optionally filtered to specific IDs.
+    pub fn to_export_filtered(
+        &self,
+        server_ids: Option<&[String]>,
+        tunnel_ids: Option<&[String]>,
+    ) -> ExportPayload {
+        let (folders, ungrouped) = match server_ids {
+            None => (self.folders.clone(), self.ungrouped.clone()),
+            Some(ids) => {
+                let ungrouped: Vec<ServerEntry> = self
+                    .ungrouped
+                    .iter()
+                    .filter(|s| ids.contains(&s.id))
+                    .cloned()
+                    .collect();
+                let folders: Vec<ServerFolder> = self
+                    .folders
+                    .iter()
+                    .filter_map(|f| {
+                        let entries: Vec<ServerEntry> = f
+                            .entries
+                            .iter()
+                            .filter(|s| ids.contains(&s.id))
+                            .cloned()
+                            .collect();
+                        if entries.is_empty() {
+                            None
+                        } else {
+                            Some(ServerFolder {
+                                id: f.id.clone(),
+                                name: f.name.clone(),
+                                expanded: f.expanded,
+                                entries,
+                            })
+                        }
+                    })
+                    .collect();
+                (folders, ungrouped)
+            }
+        };
+
+        let tunnels = match tunnel_ids {
+            None => self.tunnels.clone(),
+            Some(ids) => self
+                .tunnels
+                .iter()
+                .filter(|t| ids.contains(&t.id.to_string()))
+                .cloned()
+                .collect(),
+        };
+
+        ExportPayload {
+            version: 1,
+            folders,
+            ungrouped,
+            tunnels,
+        }
+    }
+
+    /// Merge an import payload into the current config.
+    /// Assigns new IDs to avoid collisions. Returns counts of imported items.
+    pub fn merge_import(&mut self, payload: ExportPayload) -> (usize, usize, usize) {
+        let mut servers = 0usize;
+        let mut folders = 0usize;
+        let mut tunnels = 0usize;
+
+        for mut folder in payload.folders {
+            folder.id = Uuid::new_v4().to_string();
+            for entry in &mut folder.entries {
+                entry.id = Uuid::new_v4().to_string();
+                servers += 1;
+            }
+            self.folders.push(folder);
+            folders += 1;
+        }
+
+        for mut entry in payload.ungrouped {
+            entry.id = Uuid::new_v4().to_string();
+            self.ungrouped.push(entry);
+            servers += 1;
+        }
+
+        for mut tunnel in payload.tunnels {
+            tunnel.id = Uuid::new_v4();
+            self.tunnels.push(tunnel);
+            tunnels += 1;
+        }
+
+        (servers, folders, tunnels)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ~/.ssh/config import
 // ---------------------------------------------------------------------------
 

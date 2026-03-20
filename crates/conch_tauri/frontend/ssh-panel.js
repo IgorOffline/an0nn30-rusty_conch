@@ -268,6 +268,111 @@
     await refreshTunnels();
   }
 
+  async function exportConfig() {
+    // Load current data for the selection form.
+    let data;
+    let tunnels;
+    try {
+      data = await invoke('remote_get_servers');
+      tunnels = await invoke('tunnel_get_all');
+    } catch (e) {
+      if (window.toast) window.toast.error('Export Failed', String(e));
+      return;
+    }
+
+    removeOverlay();
+    const overlay = document.createElement('div');
+    overlay.className = 'ssh-overlay';
+
+    // Build checkbox list HTML.
+    let serversHtml = '';
+    for (const folder of data.folders) {
+      serversHtml += `<div class="ssh-export-group">${esc(folder.name)}</div>`;
+      for (const s of folder.entries) {
+        serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+      }
+    }
+    if (data.ungrouped.length) {
+      serversHtml += `<div class="ssh-export-group">Ungrouped</div>`;
+      for (const s of data.ungrouped) {
+        serversHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(s.id)}" data-type="server" checked />${esc(s.label)} <span class="ssh-export-dim">(${esc(s.user)}@${esc(s.host)}:${s.port})</span></label>`;
+      }
+    }
+
+    let tunnelsHtml = '';
+    for (const t of tunnels) {
+      tunnelsHtml += `<label class="ssh-export-item"><input type="checkbox" value="${esc(t.id)}" data-type="tunnel" checked />${esc(t.label)} <span class="ssh-export-dim">(L${t.local_port} → ${esc(t.remote_host)}:${t.remote_port})</span></label>`;
+    }
+
+    const hasServers = data.folders.some(f => f.entries.length) || data.ungrouped.length;
+    const hasTunnels = tunnels.length > 0;
+
+    overlay.innerHTML = `
+      <div class="ssh-form" style="min-width:400px;max-height:80vh;display:flex;flex-direction:column;">
+        <div class="ssh-form-title">Export Connections</div>
+        <div class="ssh-form-body" style="overflow-y:auto;flex:1;">
+          <div style="margin-bottom:8px;">
+            <label style="cursor:pointer;"><input type="checkbox" id="exp-select-all" checked /> Select All</label>
+          </div>
+          ${hasServers ? '<div class="ssh-export-section">Servers</div>' + serversHtml : ''}
+          ${hasTunnels ? '<div class="ssh-export-section"' + (hasServers ? ' style="margin-top:12px;"' : '') + '>Tunnels</div>' + tunnelsHtml : ''}
+        </div>
+        <div class="ssh-form-buttons">
+          <button class="ssh-form-btn" id="exp-cancel">Cancel</button>
+          <button class="ssh-form-btn primary" id="exp-export">Export</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Select All toggle
+    const selectAll = overlay.querySelector('#exp-select-all');
+    const allBoxes = () => overlay.querySelectorAll('input[data-type]');
+    selectAll.addEventListener('change', () => {
+      allBoxes().forEach(cb => cb.checked = selectAll.checked);
+    });
+
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
+    const onKey = (e) => { if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('#exp-cancel').addEventListener('click', removeOverlay);
+
+    overlay.querySelector('#exp-export').addEventListener('click', async () => {
+      const serverIds = [...overlay.querySelectorAll('input[data-type="server"]:checked')].map(cb => cb.value);
+      const tunnelIds = [...overlay.querySelectorAll('input[data-type="tunnel"]:checked')].map(cb => cb.value);
+
+      if (serverIds.length === 0 && tunnelIds.length === 0) {
+        if (window.toast) window.toast.error('Export', 'Nothing selected');
+        return;
+      }
+
+      removeOverlay();
+      document.removeEventListener('keydown', onKey);
+      try {
+        await invoke('remote_export', { serverIds, tunnelIds });
+        if (window.toast) window.toast.info('Export', `Exported ${serverIds.length} server(s), ${tunnelIds.length} tunnel(s)`);
+      } catch (e) {
+        if (String(e) === 'Export cancelled') return;
+        console.error('Export failed:', e);
+        if (window.toast) window.toast.error('Export Failed', String(e));
+      }
+    });
+  }
+
+
+  async function importConfig() {
+    try {
+      const msg = await invoke('remote_import');
+      await refreshAll();
+      if (window.toast) window.toast.info('Import', msg);
+    } catch (e) {
+      if (String(e) === 'Import cancelled') return;
+      console.error('Import failed:', e);
+      if (window.toast) window.toast.error('Import Failed', String(e));
+    }
+  }
+
   async function refreshSessions() {
     try {
       const sessions = await invoke('remote_get_sessions');
@@ -1036,5 +1141,5 @@
 
   function getServerData() { return serverData; }
 
-  exports.sshPanel = { init, refreshAll, refreshSessions, togglePanel, focusQuickConnect, isHidden, getServerData };
+  exports.sshPanel = { init, refreshAll, refreshSessions, togglePanel, focusQuickConnect, isHidden, getServerData, exportConfig, importConfig };
 })(window);
