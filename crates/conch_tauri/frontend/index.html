@@ -821,6 +821,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
   <script src="utils.js"></script>
   <script src="titlebar.js"></script>
   <script src="toast.js"></script>
@@ -1253,6 +1254,12 @@
           term.unicode.activeVersion = '11';
         }
         term.open(root);
+        // WebGL renderer has better glyph atlas management than the default
+        // canvas renderer, which suffers from texture corruption that causes
+        // box-drawing characters to appear as diamonds.
+        if (typeof WebglAddon !== 'undefined') {
+          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
+        }
 
         const tab = {
           id: tabId,
@@ -1343,6 +1350,9 @@
           term.unicode.activeVersion = '11';
         }
         term.open(root);
+        if (typeof WebglAddon !== 'undefined') {
+          try { term.loadAddon(new WebglAddon.WebglAddon()); } catch (_) {}
+        }
 
         const tab = {
           id: tabId,
