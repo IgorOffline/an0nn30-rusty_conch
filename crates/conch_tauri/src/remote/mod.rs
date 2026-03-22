@@ -26,6 +26,7 @@ use conch_remote::ssh::{ChannelInput, SshCredentials};
 use conch_remote::transfer::{TransferProgress, TransferRegistry};
 use conch_remote::tunnel::{TunnelManager, TunnelStatus};
 
+use crate::vault_commands::VaultState;
 use crate::{PtyExitEvent, PtyOutputEvent};
 
 // ---------------------------------------------------------------------------
@@ -153,6 +154,17 @@ struct PasswordPromptEvent {
     message: String,
 }
 
+/// Emitted after a successful SSH connect where no vault account was linked,
+/// prompting the frontend to ask the user whether to save credentials.
+#[derive(Clone, Serialize)]
+struct VaultAutoSavePromptEvent {
+    server_id: String,
+    server_label: String,
+    host: String,
+    username: String,
+    auth_method: String,
+}
+
 /// Pending auth prompts waiting for frontend responses.
 pub(crate) struct PendingPrompts {
     host_key: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
@@ -233,6 +245,7 @@ pub(crate) async fn ssh_connect(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
     tab_id: u32,
     server_id: String,
     cols: u16,
@@ -270,8 +283,10 @@ pub(crate) async fn ssh_connect(
         pending_prompts: Arc::clone(&pending_prompts),
     });
 
-    // Build credentials from legacy ServerEntry fields during transition.
-    let credentials = credentials_from_server(&server, password);
+    // Try vault credentials first, fall back to legacy ServerEntry fields.
+    let used_vault = server.vault_account_id.is_some();
+    let credentials = try_vault_credentials(&vault, &server)
+        .unwrap_or_else(|| credentials_from_server(&server, password.clone()));
 
     let (ssh_handle, channel) =
         conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths)
@@ -326,6 +341,20 @@ pub(crate) async fn ssh_connect(
 
     spawn_output_forwarder(&app, &window_label, tab_id, output_rx);
 
+    // After successful connect: if no vault account was linked, offer to save.
+    if !used_vault {
+        let _ = app.emit(
+            "vault-auto-save-prompt",
+            VaultAutoSavePromptEvent {
+                server_id: server.id.clone(),
+                server_label: server.label.clone(),
+                host: server.host.clone(),
+                username: credentials.username.clone(),
+                auth_method: credentials.auth_method.clone(),
+            },
+        );
+    }
+
     Ok(())
 }
 
@@ -335,6 +364,7 @@ pub(crate) async fn ssh_quick_connect(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
     tab_id: u32,
     spec: String,
     cols: u16,
@@ -352,7 +382,7 @@ pub(crate) async fn ssh_quick_connect(
     let entry = ServerEntry {
         id: uuid::Uuid::new_v4().to_string(),
         label: format!("{user}@{host}:{port}"),
-        host,
+        host: host.clone(),
         port,
         user: Some(user.clone()),
         auth_method: Some(auth_method.clone()),
@@ -381,7 +411,7 @@ pub(crate) async fn ssh_quick_connect(
         pending_prompts: Arc::clone(&pending_prompts),
     });
 
-    let credentials = credentials_from_server(&entry, password);
+    let credentials = credentials_from_server(&entry, password.clone());
 
     let (ssh_handle, channel) =
         conch_remote::ssh::connect_and_open_shell(&entry, &credentials, callbacks, &paths).await?;
@@ -426,6 +456,24 @@ pub(crate) async fn ssh_quick_connect(
     });
 
     spawn_output_forwarder(&app, &window_label, tab_id, output_rx);
+
+    // After successful quick-connect: if a password was used, offer to save
+    // the credentials to the vault and create a persistent server entry.
+    if password.is_some() {
+        let _ = app.emit(
+            "vault-auto-save-prompt",
+            VaultAutoSavePromptEvent {
+                server_id: entry.id.clone(),
+                server_label: entry.label.clone(),
+                host,
+                username: user,
+                auth_method,
+            },
+        );
+    }
+
+    // Drop vault to satisfy the Send bound — we don't use it in quick-connect.
+    let _ = &vault;
 
     Ok(())
 }
@@ -1015,6 +1063,7 @@ pub(crate) fn transfer_cancel(
 pub(crate) async fn tunnel_start(
     app: tauri::AppHandle,
     remote: tauri::State<'_, Arc<Mutex<RemoteState>>>,
+    vault: tauri::State<'_, VaultState>,
     tunnel_id: String,
 ) -> Result<(), String> {
     let tunnel_uuid =
@@ -1054,7 +1103,9 @@ pub(crate) async fn tunnel_start(
         pending_prompts,
     });
 
-    let credentials = credentials_from_server(&server, None);
+    // Try vault credentials first, fall back to legacy fields.
+    let credentials = try_vault_credentials(&vault, &server)
+        .unwrap_or_else(|| credentials_from_server(&server, None));
 
     let result = mgr
         .start_tunnel(
@@ -1262,8 +1313,8 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build `SshCredentials` from legacy `ServerEntry` fields during the
-/// transition period before the vault is fully wired (Task 11).
+/// Build `SshCredentials` from legacy `ServerEntry` fields (fallback
+/// when no vault account is linked).
 fn credentials_from_server(server: &ServerEntry, password: Option<String>) -> SshCredentials {
     SshCredentials {
         username: server
@@ -1277,6 +1328,48 @@ fn credentials_from_server(server: &ServerEntry, password: Option<String>) -> Ss
         password,
         key_path: server.key_path.clone(),
     }
+}
+
+/// Build `SshCredentials` from a vault account.
+fn credentials_from_vault_account(account: &conch_vault::VaultAccount) -> SshCredentials {
+    match &account.auth {
+        conch_vault::AuthMethod::Password(pw) => SshCredentials {
+            username: account.username.clone(),
+            auth_method: "password".into(),
+            password: Some(pw.clone()),
+            key_path: None,
+        },
+        conch_vault::AuthMethod::Key { path, .. } => SshCredentials {
+            username: account.username.clone(),
+            auth_method: "key".into(),
+            password: None,
+            key_path: Some(path.display().to_string()),
+        },
+        conch_vault::AuthMethod::KeyAndPassword {
+            key_path, password, ..
+        } => SshCredentials {
+            username: account.username.clone(),
+            auth_method: "key".into(),
+            password: Some(password.clone()),
+            key_path: Some(key_path.display().to_string()),
+        },
+    }
+}
+
+/// Try to resolve credentials from the vault for a server entry.
+/// Returns `Some(SshCredentials)` if the server has a vault_account_id
+/// and the vault is unlocked with a matching account.
+fn try_vault_credentials(
+    vault: &VaultState,
+    server: &ServerEntry,
+) -> Option<SshCredentials> {
+    let account_id = server.vault_account_id?;
+    let mgr = vault.lock();
+    if mgr.is_locked() {
+        return None;
+    }
+    let account = mgr.get_account(account_id).ok()?;
+    Some(credentials_from_vault_account(&account))
 }
 
 fn parse_quick_connect(input: &str) -> (String, String, u16) {
@@ -1550,4 +1643,148 @@ mod tests {
         assert!(paths.known_hosts_file.to_str().unwrap().contains("known_hosts"));
         assert!(paths.config_dir.to_str().unwrap().contains("remote"));
     }
+
+    // ---------------------------------------------------------------------------
+    // Vault integration tests
+    // ---------------------------------------------------------------------------
+
+    /// Helper: create a vault, add an account, and return the account.
+    fn make_vault_account(
+        username: &str,
+        display_name: &str,
+        auth: conch_vault::AuthMethod,
+    ) -> conch_vault::VaultAccount {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+        let id = mgr
+            .add_account(display_name.into(), username.into(), auth)
+            .unwrap();
+        mgr.get_account(id).unwrap()
+    }
+
+    #[test]
+    fn credentials_from_vault_password_account() {
+        let account = make_vault_account(
+            "deploy",
+            "Deploy Account",
+            conch_vault::AuthMethod::Password("s3cret".into()),
+        );
+        let creds = credentials_from_vault_account(&account);
+        assert_eq!(creds.username, "deploy");
+        assert_eq!(creds.auth_method, "password");
+        assert_eq!(creds.password.as_deref(), Some("s3cret"));
+        assert!(creds.key_path.is_none());
+    }
+
+    #[test]
+    fn credentials_from_vault_key_account() {
+        let account = make_vault_account(
+            "admin",
+            "Admin Key",
+            conch_vault::AuthMethod::Key {
+                path: std::path::PathBuf::from("/home/admin/.ssh/id_ed25519"),
+                passphrase: None,
+            },
+        );
+        let creds = credentials_from_vault_account(&account);
+        assert_eq!(creds.username, "admin");
+        assert_eq!(creds.auth_method, "key");
+        assert!(creds.password.is_none());
+        assert_eq!(
+            creds.key_path.as_deref(),
+            Some("/home/admin/.ssh/id_ed25519")
+        );
+    }
+
+    #[test]
+    fn credentials_from_vault_key_and_password_account() {
+        let account = make_vault_account(
+            "root",
+            "Root Account",
+            conch_vault::AuthMethod::KeyAndPassword {
+                key_path: std::path::PathBuf::from("/root/.ssh/id_rsa"),
+                passphrase: Some("keypass".into()),
+                password: "srvpass".into(),
+            },
+        );
+        let creds = credentials_from_vault_account(&account);
+        assert_eq!(creds.username, "root");
+        assert_eq!(creds.auth_method, "key");
+        assert_eq!(creds.password.as_deref(), Some("srvpass"));
+        assert_eq!(creds.key_path.as_deref(), Some("/root/.ssh/id_rsa"));
+    }
+
+    #[test]
+    fn try_vault_credentials_returns_none_when_no_account_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+        let vault: VaultState = Arc::new(Mutex::new(mgr));
+
+        let server = make_server("test", "example.com", "root", 22);
+        assert!(server.vault_account_id.is_none());
+        assert!(try_vault_credentials(&vault, &server).is_none());
+    }
+
+    #[test]
+    fn try_vault_credentials_returns_creds_when_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+        let account_id = mgr
+            .add_account(
+                "Deploy".into(),
+                "deploy".into(),
+                conch_vault::AuthMethod::Password("pw123".into()),
+            )
+            .unwrap();
+        let vault: VaultState = Arc::new(Mutex::new(mgr));
+
+        let mut server = make_server("test", "example.com", "root", 22);
+        server.vault_account_id = Some(account_id);
+
+        let creds = try_vault_credentials(&vault, &server);
+        assert!(creds.is_some());
+        let creds = creds.unwrap();
+        assert_eq!(creds.username, "deploy");
+        assert_eq!(creds.auth_method, "password");
+        assert_eq!(creds.password.as_deref(), Some("pw123"));
+    }
+
+    #[test]
+    fn try_vault_credentials_returns_none_when_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = conch_vault::VaultManager::new(dir.path().join("vault.enc"));
+        mgr.create(b"test").unwrap();
+        let account_id = mgr
+            .add_account(
+                "Deploy".into(),
+                "deploy".into(),
+                conch_vault::AuthMethod::Password("pw123".into()),
+            )
+            .unwrap();
+        mgr.lock();
+        let vault: VaultState = Arc::new(Mutex::new(mgr));
+
+        let mut server = make_server("test", "example.com", "root", 22);
+        server.vault_account_id = Some(account_id);
+
+        assert!(try_vault_credentials(&vault, &server).is_none());
+    }
+
+    #[test]
+    fn auto_save_prompt_event_serializes() {
+        let event = VaultAutoSavePromptEvent {
+            server_id: "s1".into(),
+            server_label: "My Server".into(),
+            host: "example.com".into(),
+            username: "root".into(),
+            auth_method: "password".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"server_id\":\"s1\""));
+        assert!(json.contains("\"host\":\"example.com\""));
+    }
+
 }
