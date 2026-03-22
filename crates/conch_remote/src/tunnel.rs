@@ -277,12 +277,39 @@ async fn connect_for_tunnel(
             .authenticate_password(&credentials.username, &password)
             .await
             .map_err(|e| format!("Auth failed: {e}"))?
+    } else if credentials.auth_method == "key_and_password" {
+        let key_ok = crate::ssh::try_key_auth(
+            &mut session,
+            &credentials.username,
+            credentials.key_path.as_deref(),
+            &paths.default_key_paths,
+            credentials.key_passphrase.as_deref(),
+        )
+        .await?;
+
+        if key_ok {
+            let msg = format!(
+                "Password for {}@{}:{}",
+                credentials.username, server.host, server.port
+            );
+            let password = callbacks
+                .prompt_password(&msg)
+                .await
+                .ok_or_else(|| "Password prompt cancelled".to_string())?;
+            session
+                .authenticate_password(&credentials.username, &password)
+                .await
+                .map_err(|e| format!("Auth failed: {e}"))?
+        } else {
+            false
+        }
     } else {
         crate::ssh::try_key_auth(
             &mut session,
             &credentials.username,
             credentials.key_path.as_deref(),
             &paths.default_key_paths,
+            credentials.key_passphrase.as_deref(),
         )
         .await?
     };

@@ -147,8 +147,7 @@ pub fn load_vault_file(path: &Path, password: &[u8]) -> Result<(Vault, CachedKey
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher.decrypt(nonce, ciphertext)
         .map_err(|_| VaultError::WrongPassword)?;
-    let vault: Vault = bincode::deserialize(&plaintext)
-        .map_err(|e| VaultError::Serialization(e.to_string()))?;
+    let vault = deserialize_vault(&plaintext)?;
     Ok((vault, CachedKey { derived_key, salt }))
 }
 
@@ -375,6 +374,34 @@ mod tests {
         let (loaded, _cached) = load_vault_file(&path, password).unwrap();
         assert_eq!(loaded.accounts.len(), 1);
         assert_eq!(loaded.accounts[0].username, "testuser");
+    }
+
+    #[test]
+    fn load_vault_file_roundtrip_uses_deserialize_fallback() {
+        // Verify load_vault_file can round-trip: save a current-format vault,
+        // then load it back. This exercises the deserialize_vault() path
+        // inside load_vault_file (which previously used raw bincode::deserialize
+        // and would fail on legacy formats).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roundtrip.enc");
+        let vault = make_test_vault();
+        let password = b"roundtrip-password";
+
+        save_vault_file(&path, &vault, password).unwrap();
+        let (loaded, cached) = load_vault_file(&path, password).unwrap();
+
+        assert_eq!(loaded.version, vault.version);
+        assert_eq!(loaded.accounts.len(), vault.accounts.len());
+        assert_eq!(loaded.accounts[0].username, "testuser");
+        assert_eq!(loaded.accounts[0].display_name, "Test");
+        assert_eq!(loaded.generated_keys.len(), vault.generated_keys.len());
+
+        // Also verify the CachedKey can be reused for a subsequent save+load
+        let mut vault2 = loaded.clone();
+        vault2.accounts[0].username = "updated_user".into();
+        save_vault_file_with_key(&path, &vault2, &cached).unwrap();
+        let (reloaded, _) = load_vault_file(&path, password).unwrap();
+        assert_eq!(reloaded.accounts[0].username, "updated_user");
     }
 
     #[test]

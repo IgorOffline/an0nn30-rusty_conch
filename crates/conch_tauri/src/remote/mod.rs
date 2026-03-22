@@ -1138,7 +1138,8 @@ pub(crate) async fn tunnel_start(
             .cloned()
             .ok_or_else(|| format!("Tunnel '{tunnel_id}' not found"))?;
 
-        let server = find_server_for_tunnel(&state, &tunnel.session_key)
+        let server = find_server_by_entry_id(&state, tunnel.server_entry_id.as_deref())
+            .or_else(|| find_server_for_tunnel(&state, &tunnel.session_key))
             .ok_or_else(|| format!("No server configured for {}", tunnel.session_key))?;
 
         (
@@ -1259,6 +1260,21 @@ pub(crate) struct TunnelWithStatus {
     #[serde(flatten)]
     tunnel: SavedTunnel,
     status: Option<String>,
+}
+
+/// Look up a server by its entry ID (exact match).
+///
+/// When a tunnel has a `server_entry_id` we can resolve the correct server
+/// directly, avoiding ambiguity when multiple servers share the same
+/// host/port but differ by user or vault account.
+fn find_server_by_entry_id(state: &RemoteState, entry_id: Option<&str>) -> Option<ServerEntry> {
+    let id = entry_id?;
+    state
+        .config
+        .all_servers()
+        .chain(state.ssh_config_entries.iter())
+        .find(|s| s.id == id)
+        .cloned()
 }
 
 /// Find a server matching a tunnel's session_key.
@@ -1384,6 +1400,7 @@ fn credentials_from_server(server: &ServerEntry, password: Option<String>) -> Ss
             .unwrap_or_else(|| "key".to_string()),
         password,
         key_path: server.key_path.clone(),
+        key_passphrase: None,
     }
 }
 
@@ -1395,20 +1412,25 @@ fn credentials_from_vault_account(account: &conch_vault::VaultAccount) -> SshCre
             auth_method: "password".into(),
             password: Some(pw.clone()),
             key_path: None,
+            key_passphrase: None,
         },
-        conch_vault::AuthMethod::Key { path, .. } => SshCredentials {
+        conch_vault::AuthMethod::Key { path, passphrase } => SshCredentials {
             username: account.username.clone(),
             auth_method: "key".into(),
             password: None,
             key_path: Some(path.display().to_string()),
+            key_passphrase: passphrase.clone(),
         },
         conch_vault::AuthMethod::KeyAndPassword {
-            key_path, password, ..
+            key_path,
+            passphrase,
+            password,
         } => SshCredentials {
             username: account.username.clone(),
-            auth_method: "key".into(),
+            auth_method: "key_and_password".into(),
             password: Some(password.clone()),
             key_path: Some(key_path.display().to_string()),
+            key_passphrase: passphrase.clone(),
         },
     }
 }
@@ -1638,6 +1660,65 @@ mod tests {
     }
 
     #[test]
+    fn find_server_by_entry_id_exact() {
+        let mut server_a = make_server("prod-a", "host.example.com", "alice", 22);
+        server_a.id = "aaaaaaaa-1111-2222-3333-444444444444".to_string();
+        let mut server_b = make_server("prod-b", "host.example.com", "bob", 22);
+        server_b.id = "bbbbbbbb-1111-2222-3333-444444444444".to_string();
+
+        let state = test_state_with(SshConfig::default(), vec![server_a, server_b]);
+
+        // Should resolve to server_b by entry ID even though both share host/port.
+        let result = find_server_by_entry_id(
+            &state,
+            Some("bbbbbbbb-1111-2222-3333-444444444444"),
+        );
+        assert!(result.is_some(), "should find server by entry ID");
+        let server = result.unwrap();
+        assert_eq!(server.user.as_deref(), Some("bob"));
+        assert_eq!(server.label, "prod-b");
+    }
+
+    #[test]
+    fn find_server_by_entry_id_none_returns_none() {
+        let server = make_server("prod", "host.example.com", "admin", 22);
+        let state = test_state_with(SshConfig::default(), vec![server]);
+
+        assert!(
+            find_server_by_entry_id(&state, None).is_none(),
+            "None entry_id should return None"
+        );
+    }
+
+    #[test]
+    fn find_server_by_entry_id_missing_id_returns_none() {
+        let server = make_server("prod", "host.example.com", "admin", 22);
+        let state = test_state_with(SshConfig::default(), vec![server]);
+
+        assert!(
+            find_server_by_entry_id(&state, Some("nonexistent-id")).is_none(),
+            "unknown entry_id should return None"
+        );
+    }
+
+    #[test]
+    fn find_server_by_entry_id_prefers_config_servers() {
+        // Place server in SshConfig (not ssh_config_entries) and verify it's found.
+        let mut server = make_server("vault-host", "secure.example.com", "deploy", 22);
+        server.id = "cccccccc-1111-2222-3333-444444444444".to_string();
+        let mut cfg = SshConfig::default();
+        cfg.add_server(server);
+        let state = test_state_with(cfg, vec![]);
+
+        let result = find_server_by_entry_id(
+            &state,
+            Some("cccccccc-1111-2222-3333-444444444444"),
+        );
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().host, "secure.example.com");
+    }
+
+    #[test]
     fn resolve_imported_tunnel_keys_rewrites_user_mismatch() {
         let mut ssh_entry =
             make_server("candice-pve", "bastion.nexxuscraft.com", "root", 22);
@@ -1783,6 +1864,7 @@ mod tests {
         assert_eq!(creds.auth_method, "password");
         assert_eq!(creds.password.as_deref(), Some("s3cret"));
         assert!(creds.key_path.is_none());
+        assert!(creds.key_passphrase.is_none());
     }
 
     #[test]
@@ -1803,6 +1885,28 @@ mod tests {
             creds.key_path.as_deref(),
             Some("/home/admin/.ssh/id_ed25519")
         );
+        assert!(creds.key_passphrase.is_none());
+    }
+
+    #[test]
+    fn credentials_from_vault_key_with_passphrase_account() {
+        let account = make_vault_account(
+            "admin",
+            "Admin Key",
+            conch_vault::AuthMethod::Key {
+                path: std::path::PathBuf::from("/home/admin/.ssh/id_ed25519"),
+                passphrase: Some("mykeypass".into()),
+            },
+        );
+        let creds = credentials_from_vault_account(&account);
+        assert_eq!(creds.username, "admin");
+        assert_eq!(creds.auth_method, "key");
+        assert!(creds.password.is_none());
+        assert_eq!(
+            creds.key_path.as_deref(),
+            Some("/home/admin/.ssh/id_ed25519")
+        );
+        assert_eq!(creds.key_passphrase.as_deref(), Some("mykeypass"));
     }
 
     #[test]
@@ -1818,9 +1922,10 @@ mod tests {
         );
         let creds = credentials_from_vault_account(&account);
         assert_eq!(creds.username, "root");
-        assert_eq!(creds.auth_method, "key");
+        assert_eq!(creds.auth_method, "key_and_password");
         assert_eq!(creds.password.as_deref(), Some("srvpass"));
         assert_eq!(creds.key_path.as_deref(), Some("/root/.ssh/id_rsa"));
+        assert_eq!(creds.key_passphrase.as_deref(), Some("keypass"));
     }
 
     #[test]

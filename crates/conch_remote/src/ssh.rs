@@ -18,10 +18,12 @@ use crate::handler::ConchSshHandler;
 /// `connect_and_open_shell`.
 pub struct SshCredentials {
     pub username: String,
-    /// "key" or "password".
+    /// "key", "password", or "key_and_password".
     pub auth_method: String,
     pub password: Option<String>,
     pub key_path: Option<String>,
+    /// Passphrase for decrypting the private key (if any).
+    pub key_passphrase: Option<String>,
 }
 
 /// Expand a leading `~` or `~/` to the user's home directory.
@@ -113,12 +115,45 @@ pub async fn connect_and_open_shell(
                 .map_err(|e| format!("Auth failed: {e}"))?,
             None => return Err("Password entry cancelled".to_string()),
         }
+    } else if credentials.auth_method == "key_and_password" {
+        // Try key auth first, then password auth if the server requires both.
+        let key_ok = try_key_auth(
+            &mut session,
+            &credentials.username,
+            credentials.key_path.as_deref(),
+            &paths.default_key_paths,
+            credentials.key_passphrase.as_deref(),
+        )
+        .await?;
+
+        if key_ok {
+            // Server may also require password (e.g. 2FA). Try password too.
+            let pw = match &credentials.password {
+                Some(pw) => Some(pw.clone()),
+                None => {
+                    let msg =
+                        format!("Password for {}@{}", credentials.username, server.host);
+                    callbacks.prompt_password(&msg).await
+                }
+            };
+
+            match pw {
+                Some(pw) => session
+                    .authenticate_password(&credentials.username, &pw)
+                    .await
+                    .map_err(|e| format!("Auth failed: {e}"))?,
+                None => return Err("Password entry cancelled".to_string()),
+            }
+        } else {
+            false
+        }
     } else {
         try_key_auth(
             &mut session,
             &credentials.username,
             credentials.key_path.as_deref(),
             &paths.default_key_paths,
+            credentials.key_passphrase.as_deref(),
         )
         .await?
     };
@@ -201,6 +236,7 @@ pub(crate) async fn try_key_auth(
     user: &str,
     explicit_key_path: Option<&str>,
     default_key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
 ) -> Result<bool, String> {
     let key_paths: Vec<PathBuf> = if let Some(path) = explicit_key_path {
         vec![expand_tilde(path)]
@@ -213,7 +249,7 @@ pub(crate) async fn try_key_auth(
             continue;
         }
 
-        match russh_keys::load_secret_key(key_path, None) {
+        match russh_keys::load_secret_key(key_path, key_passphrase) {
             Ok(key) => {
                 match session
                     .authenticate_publickey(user, Arc::new(key))
