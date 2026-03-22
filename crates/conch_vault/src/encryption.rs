@@ -1,5 +1,5 @@
 use crate::error::VaultError;
-use crate::model::Vault;
+use crate::model::{Vault, VaultAccount, VaultSettings};
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -75,8 +75,7 @@ pub fn decrypt_vault(data: &[u8], password: &[u8]) -> Result<Vault, VaultError> 
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| VaultError::WrongPassword)?;
-    bincode::deserialize(&plaintext)
-        .map_err(|e| VaultError::Serialization(e.to_string()))
+    deserialize_vault(&plaintext)
 }
 
 pub fn generate_salt() -> [u8; SALT_LEN] {
@@ -153,6 +152,109 @@ pub fn load_vault_file(path: &Path, password: &[u8]) -> Result<(Vault, CachedKey
     Ok((vault, CachedKey { derived_key, salt }))
 }
 
+/// Legacy vault format (before `generated_keys` was added).
+/// Used for backward-compatible deserialization of existing vault files.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyVault {
+    version: u32,
+    accounts: Vec<VaultAccount>,
+    settings: VaultSettings,
+}
+
+impl From<LegacyVault> for Vault {
+    fn from(v: LegacyVault) -> Self {
+        Self {
+            version: v.version,
+            accounts: v.accounts,
+            generated_keys: Vec::new(),
+            settings: v.settings,
+        }
+    }
+}
+
+/// Legacy VaultSettings that included `os_keychain_enabled`.
+/// Used for backward-compatible deserialization of vault files written before
+/// keychain support was removed.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyVaultSettingsWithKeychain {
+    auto_lock_minutes: u16,
+    push_to_system_agent: bool,
+    os_keychain_enabled: bool,
+    auto_save_passwords: crate::model::AutoSave,
+}
+
+impl From<LegacyVaultSettingsWithKeychain> for VaultSettings {
+    fn from(s: LegacyVaultSettingsWithKeychain) -> Self {
+        Self {
+            auto_lock_minutes: s.auto_lock_minutes,
+            push_to_system_agent: s.push_to_system_agent,
+            auto_save_passwords: s.auto_save_passwords,
+        }
+    }
+}
+
+/// Vault format with `generated_keys` but the old `VaultSettings` (including
+/// `os_keychain_enabled`). Used for deserialization of vault files written
+/// before keychain support was removed.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyVaultWithKeychain {
+    version: u32,
+    accounts: Vec<VaultAccount>,
+    #[serde(default)]
+    generated_keys: Vec<crate::model::GeneratedKeyEntry>,
+    settings: LegacyVaultSettingsWithKeychain,
+}
+
+impl From<LegacyVaultWithKeychain> for Vault {
+    fn from(v: LegacyVaultWithKeychain) -> Self {
+        Self {
+            version: v.version,
+            accounts: v.accounts,
+            generated_keys: v.generated_keys,
+            settings: v.settings.into(),
+        }
+    }
+}
+
+/// Vault format without `generated_keys` but with the old `VaultSettings`
+/// (including `os_keychain_enabled`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyVaultNoKeysWithKeychain {
+    version: u32,
+    accounts: Vec<VaultAccount>,
+    settings: LegacyVaultSettingsWithKeychain,
+}
+
+impl From<LegacyVaultNoKeysWithKeychain> for Vault {
+    fn from(v: LegacyVaultNoKeysWithKeychain) -> Self {
+        Self {
+            version: v.version,
+            accounts: v.accounts,
+            generated_keys: Vec::new(),
+            settings: v.settings.into(),
+        }
+    }
+}
+
+/// Deserialize vault plaintext, trying the current format first, then falling
+/// back to legacy formats for backward compatibility.
+fn deserialize_vault(plaintext: &[u8]) -> Result<Vault, VaultError> {
+    bincode::deserialize::<Vault>(plaintext)
+        .or_else(|_| {
+            bincode::deserialize::<LegacyVaultWithKeychain>(plaintext)
+                .map(Vault::from)
+        })
+        .or_else(|_| {
+            bincode::deserialize::<LegacyVault>(plaintext)
+                .map(Vault::from)
+        })
+        .or_else(|_| {
+            bincode::deserialize::<LegacyVaultNoKeysWithKeychain>(plaintext)
+                .map(Vault::from)
+        })
+        .map_err(|e| VaultError::Serialization(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +271,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             }],
+            generated_keys: Vec::new(),
             settings: VaultSettings::default(),
         }
     }
@@ -221,6 +324,44 @@ mod tests {
         data[..8].copy_from_slice(b"BADMAGIC");
         let result = decrypt_vault(&data, b"password");
         assert!(matches!(result, Err(VaultError::Corrupted(_))));
+    }
+
+    #[test]
+    fn decrypt_legacy_vault_without_generated_keys() {
+        // Simulate a vault file written before the generated_keys field existed.
+        let legacy = LegacyVault {
+            version: 1,
+            accounts: vec![VaultAccount {
+                id: uuid::Uuid::new_v4(),
+                display_name: "Legacy".into(),
+                username: "olduser".into(),
+                auth: AuthMethod::Password("pw".into()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }],
+            settings: VaultSettings::default(),
+        };
+        let password = b"legacy-test";
+        // Encrypt the legacy format directly via bincode → AES-GCM.
+        let payload = bincode::serialize(&legacy).unwrap();
+        let salt = generate_salt();
+        let key = derive_key(password, &salt).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, payload.as_ref()).unwrap();
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC);
+        data.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        data.extend_from_slice(&salt);
+        data.extend_from_slice(&nonce_bytes);
+        data.extend_from_slice(&ciphertext);
+
+        let vault = decrypt_vault(&data, password).unwrap();
+        assert_eq!(vault.accounts.len(), 1);
+        assert_eq!(vault.accounts[0].username, "olduser");
+        assert!(vault.generated_keys.is_empty());
     }
 
     #[test]

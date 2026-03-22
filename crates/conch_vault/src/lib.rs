@@ -207,6 +207,51 @@ impl VaultManager {
         Ok(())
     }
 
+    // --- Generated key CRUD ---
+
+    /// List all generated key entries. Vault must be unlocked.
+    pub fn list_generated_keys(&self) -> Result<Vec<GeneratedKeyEntry>, VaultError> {
+        let guard = self.vault.lock();
+        let vault = guard.as_ref().ok_or(VaultError::Locked)?;
+        self.lock_manager.touch();
+        Ok(vault.generated_keys.clone())
+    }
+
+    /// Record metadata about a generated key. Returns the assigned UUID.
+    pub fn add_generated_key(
+        &self,
+        algorithm: String,
+        fingerprint: String,
+        comment: String,
+        private_path: std::path::PathBuf,
+        public_path: std::path::PathBuf,
+    ) -> Result<Uuid, VaultError> {
+        let mut guard = self.vault.lock();
+        let vault = guard.as_mut().ok_or(VaultError::Locked)?;
+        let id = Uuid::new_v4();
+        vault.generated_keys.push(GeneratedKeyEntry {
+            id,
+            algorithm,
+            fingerprint,
+            comment,
+            private_path,
+            public_path,
+            created_at: chrono::Utc::now(),
+        });
+        self.lock_manager.touch();
+        Ok(id)
+    }
+
+    /// Delete a generated key entry by ID. Returns true if found and removed.
+    pub fn delete_generated_key(&self, id: Uuid) -> Result<bool, VaultError> {
+        let mut guard = self.vault.lock();
+        let vault = guard.as_mut().ok_or(VaultError::Locked)?;
+        let len_before = vault.generated_keys.len();
+        vault.generated_keys.retain(|k| k.id != id);
+        self.lock_manager.touch();
+        Ok(vault.generated_keys.len() < len_before)
+    }
+
     /// Find accounts matching a username.
     pub fn find_accounts_by_username(&self, username: &str) -> Result<Vec<VaultAccount>, VaultError> {
         let guard = self.vault.lock();

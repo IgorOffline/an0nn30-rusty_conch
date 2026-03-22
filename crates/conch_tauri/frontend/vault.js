@@ -81,10 +81,6 @@
             <input type="password" id="vault-setup-pw-confirm" placeholder="Confirm master password"
                    spellcheck="false" autocomplete="off" />
           </label>
-          <label class="vault-checkbox-label">
-            <input type="checkbox" id="vault-setup-keychain" />
-            Store in system keychain for biometric unlock (Touch ID)
-          </label>
         </div>
         <div class="ssh-form-buttons">
           <button class="ssh-form-btn" id="vault-setup-cancel">Cancel</button>
@@ -116,7 +112,6 @@
     overlay.querySelector('#vault-setup-create').addEventListener('click', async () => {
       const pw = overlay.querySelector('#vault-setup-pw').value;
       const confirm = overlay.querySelector('#vault-setup-pw-confirm').value;
-      const enableKeychain = overlay.querySelector('#vault-setup-keychain').checked;
 
       if (!pw) {
         window.toast.warn('Vault', 'Master password is required.');
@@ -135,7 +130,7 @@
       }
 
       try {
-        await invoke('vault_create', { request: { password: pw, enable_keychain: enableKeychain } });
+        await invoke('vault_create', { request: { password: pw } });
         removeOverlay();
         document.removeEventListener('keydown', onKey, true);
         window.toast.success('Vault Created', 'Your credential vault is ready.');
@@ -150,7 +145,7 @@
   // Unlock dialog — master password input
   // ---------------------------------------------------------------------------
 
-  function showUnlockDialog(onSuccess) {
+  async function showUnlockDialog(onSuccess) {
     removeOverlay();
 
     const overlay = document.createElement('div');
@@ -201,6 +196,12 @@
         return;
       }
 
+      const btn = overlay.querySelector('#vault-unlock-submit');
+      const pwInput = overlay.querySelector('#vault-unlock-pw');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="vault-spinner"></span>Unlocking\u2026';
+      pwInput.disabled = true;
+
       try {
         await invoke('vault_unlock', { request: { password: pw } });
         removeOverlay();
@@ -208,9 +209,12 @@
         window.toast.success('Vault Unlocked', 'Credential vault is now unlocked.');
         if (onSuccess) onSuccess();
       } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Unlock';
+        pwInput.disabled = false;
         window.toast.error('Unlock Failed', String(e));
-        overlay.querySelector('#vault-unlock-pw').value = '';
-        overlay.querySelector('#vault-unlock-pw').focus();
+        pwInput.value = '';
+        pwInput.focus();
       }
     };
 
@@ -288,14 +292,41 @@
     const sidebar = document.createElement('div');
     sidebar.className = 'vault-sidebar';
 
+    // switchSection — swap content area without rebuilding the dialog.
+    async function switchSection(sectionId) {
+      currentSection = sectionId;
+
+      // Update sidebar active state.
+      sidebar.querySelectorAll('.vault-sidebar-item').forEach((el) => {
+        el.classList.toggle('active', el.dataset.section === sectionId);
+      });
+
+      // Rebuild just the content area.
+      const contentEl = document.getElementById('vault-content');
+      if (!contentEl) return;
+      contentEl.innerHTML = '';
+
+      if (sectionId === 'accounts') {
+        // Re-fetch accounts so additions/edits are reflected.
+        try {
+          accounts = await invoke('vault_list_accounts');
+          cachedAccounts = accounts;
+        } catch (_) {}
+        renderAccountsSection(contentEl, accounts);
+      } else if (sectionId === 'keys') {
+        await renderKeysSection(contentEl);
+      } else if (sectionId === 'settings') {
+        try { settings = await invoke('vault_get_settings'); } catch (_) {}
+        renderSettingsSection(contentEl, settings);
+      }
+    }
+
     for (const sec of VAULT_SECTIONS) {
       const item = document.createElement('div');
       item.className = 'vault-sidebar-item' + (sec.id === currentSection ? ' active' : '');
+      item.dataset.section = sec.id;
       item.textContent = sec.label;
-      item.addEventListener('click', () => {
-        currentSection = sec.id;
-        renderVaultDialog();
-      });
+      item.addEventListener('click', () => switchSection(sec.id));
       sidebar.appendChild(item);
     }
 
@@ -321,7 +352,7 @@
     if (currentSection === 'accounts') {
       renderAccountsSection(content, accounts);
     } else if (currentSection === 'keys') {
-      renderKeysSection(content);
+      await renderKeysSection(content);
     } else if (currentSection === 'settings') {
       renderSettingsSection(content, settings);
     }
@@ -459,20 +490,46 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Keys section (placeholder)
+  // Keys section
   // ---------------------------------------------------------------------------
 
-  function renderKeysSection(container) {
-    container.innerHTML = `
-      <div class="vault-section-header">
-        <h3>SSH Keys</h3>
-        <button class="ssh-form-btn primary vault-add-btn" id="vault-gen-key">Generate Key</button>
-      </div>
-      <div class="vault-empty">
-        SSH key management will list generated keys stored in the vault.
-        Use the Generate Key button or Tools &gt; Generate SSH Key to create a new key pair.
-      </div>
-    `;
+  async function renderKeysSection(container) {
+    let keys = [];
+    try {
+      keys = await invoke('vault_list_keys');
+    } catch (e) {
+      container.innerHTML = '<div class="vault-empty">Failed to load keys: ' + esc(String(e)) + '</div>';
+      return;
+    }
+
+    let html = '<div class="vault-section-header">';
+    html += '<h3>SSH Keys</h3>';
+    html += '<button class="ssh-form-btn primary vault-add-btn" id="vault-gen-key">Generate Key</button>';
+    html += '</div>';
+
+    if (keys.length === 0) {
+      html += '<div class="vault-empty">No generated keys yet. Use the Generate Key button to create a new key pair.</div>';
+    } else {
+      html += '<div class="vault-account-list">';
+      for (const key of keys) {
+        html += `
+          <div class="vault-account-row" data-id="${attr(key.id)}">
+            <div class="vault-account-avatar">&#128273;</div>
+            <div class="vault-account-info">
+              <div class="vault-account-name">${esc(key.algorithm)}</div>
+              <div class="vault-account-detail">${esc(key.fingerprint)}</div>
+              <div class="vault-account-detail">${esc(key.private_path)}</div>
+            </div>
+            <div class="vault-account-actions">
+              <button class="vault-row-btn vault-delete-btn danger" data-id="${attr(key.id)}" title="Delete">Delete</button>
+            </div>
+          </div>
+        `;
+      }
+      html += '</div>';
+    }
+
+    container.innerHTML = html;
 
     container.querySelector('#vault-gen-key').addEventListener('click', () => {
       if (window.keygen) {
@@ -480,6 +537,32 @@
       } else {
         window.toast.info('Coming Soon', 'Key generation dialog is not yet available.');
       }
+    });
+
+    container.querySelectorAll('.vault-delete-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (btn.dataset.confirm !== 'yes') {
+          btn.dataset.confirm = 'yes';
+          btn.textContent = 'Confirm?';
+          btn.classList.add('confirm');
+          setTimeout(() => {
+            if (btn.isConnected) {
+              btn.dataset.confirm = '';
+              btn.textContent = 'Delete';
+              btn.classList.remove('confirm');
+            }
+          }, 3000);
+          return;
+        }
+        const id = btn.dataset.id;
+        invoke('vault_delete_key', { id })
+          .then(() => {
+            window.toast.success('Deleted', 'Key entry removed from vault.');
+            renderVaultDialog();
+          })
+          .catch((err) => window.toast.error('Delete Failed', String(err)));
+      });
     });
   }
 
@@ -506,10 +589,6 @@
           <input type="checkbox" id="vault-setting-agent" ${settings.push_to_system_agent ? 'checked' : ''} />
           Push keys to system SSH agent on unlock
         </label>
-        <label class="vault-checkbox-label">
-          <input type="checkbox" id="vault-setting-keychain" ${settings.os_keychain_enabled ? 'checked' : ''} />
-          Enable OS keychain for biometric unlock
-        </label>
         <label class="ssh-form-label">Auto-Save Passwords
           <select id="vault-setting-autosave">
             ${autoSaveOptions.map((opt) =>
@@ -528,7 +607,6 @@
     container.querySelector('#vault-save-settings').addEventListener('click', async () => {
       const timeout = parseInt(container.querySelector('#vault-setting-timeout').value, 10);
       const agent = container.querySelector('#vault-setting-agent').checked;
-      const keychain = container.querySelector('#vault-setting-keychain').checked;
       const autoSave = container.querySelector('#vault-setting-autosave').value;
 
       if (!timeout || timeout < 1 || timeout > 1440) {
@@ -539,7 +617,6 @@
       const updated = {
         auto_lock_minutes: timeout,
         push_to_system_agent: agent,
-        os_keychain_enabled: keychain,
         auto_save_passwords: autoSave,
       };
 
@@ -556,10 +633,10 @@
   // Account form — create / edit
   // ---------------------------------------------------------------------------
 
-  function showAccountForm(existing) {
+  async function showAccountForm(existing) {
     removeOverlay();
 
-    const isEdit = existing != null;
+    const isEdit = existing != null && existing.id != null;
     const title = isEdit ? 'Edit Account' : 'New Account';
 
     const displayName = existing ? existing.display_name : '';
@@ -567,10 +644,30 @@
     const authType = existing ? existing.auth_type : 'password';
     const keyPath = existing ? (existing.key_path || '') : '';
 
+    // Fetch saved keys for the dropdown.
+    let savedKeys = [];
+    try { savedKeys = await invoke('vault_list_keys'); } catch (_) {}
+
     const overlay = document.createElement('div');
     overlay.className = 'ssh-overlay';
     overlay.id = 'vault-overlay';
     overlay.style.zIndex = '3100';
+
+    // Build key source options.
+    let keySourceOptions = '';
+    if (savedKeys.length > 0) {
+      keySourceOptions += '<option value="">-- Select a key --</option>';
+      for (const k of savedKeys) {
+        const label = k.algorithm + (k.comment ? ' — ' + k.comment : '');
+        const selected = keyPath && keyPath === k.private_path ? ' selected' : '';
+        keySourceOptions += '<option value="' + attr(k.private_path) + '"' + selected + '>' + esc(label) + '</option>';
+      }
+      keySourceOptions += '<option value="__custom__">Enter path manually\u2026</option>';
+    }
+    const hasSavedKeys = savedKeys.length > 0;
+    // If editing with an existing keyPath that doesn't match any saved key, show manual input.
+    const existingMatchesSaved = hasSavedKeys && savedKeys.some((k) => k.private_path === keyPath);
+    const showManualInput = !hasSavedKeys || (keyPath && !existingMatchesSaved);
 
     overlay.innerHTML = `
       <div class="ssh-form vault-account-form">
@@ -598,10 +695,23 @@
             </label>
           </div>
           <div id="vault-acct-key-fields" style="${authType === 'password' ? 'display:none' : ''}">
-            <label class="ssh-form-label">Key File Path
-              <input type="text" id="vault-acct-keypath" value="${attr(keyPath)}"
-                     placeholder="~/.ssh/id_ed25519" spellcheck="false" />
-            </label>
+            ${hasSavedKeys ? `
+              <label class="ssh-form-label">SSH Key
+                <select id="vault-acct-key-select">${keySourceOptions}</select>
+              </label>
+            ` : ''}
+            <div id="vault-acct-manual-key" style="${hasSavedKeys && !showManualInput ? 'display:none' : ''}">
+              <label class="ssh-form-label">Key File Path
+                <input type="text" id="vault-acct-keypath" value="${attr(showManualInput ? keyPath : '')}"
+                       placeholder="~/.ssh/id_ed25519" spellcheck="false" />
+              </label>
+              <a href="#" class="vault-browse-link" id="vault-acct-browse">Browse\u2026</a>
+            </div>
+            ${!hasSavedKeys ? `
+              <div class="vault-keygen-link">
+                No saved keys. <a href="#" id="vault-acct-generate">Generate a new SSH key</a>
+              </div>
+            ` : ''}
             <label class="ssh-form-label">Key Passphrase (optional)
               <input type="password" id="vault-acct-passphrase"
                      placeholder="${isEdit ? '(unchanged if empty)' : 'Enter passphrase'}"
@@ -628,6 +738,59 @@
       overlay.querySelector('#vault-acct-key-fields').style.display =
         val === 'password' ? 'none' : '';
     });
+
+    // Key select dropdown: toggle manual input vs saved key.
+    const keySelect = overlay.querySelector('#vault-acct-key-select');
+    const manualKeyDiv = overlay.querySelector('#vault-acct-manual-key');
+    const keyPathInput = overlay.querySelector('#vault-acct-keypath');
+    if (keySelect) {
+      keySelect.addEventListener('change', () => {
+        if (keySelect.value === '__custom__') {
+          manualKeyDiv.style.display = '';
+          keyPathInput.value = '';
+          keyPathInput.focus();
+        } else if (keySelect.value) {
+          manualKeyDiv.style.display = 'none';
+          keyPathInput.value = keySelect.value;
+        } else {
+          manualKeyDiv.style.display = 'none';
+          keyPathInput.value = '';
+        }
+      });
+      // Set initial path from selection if a saved key is pre-selected.
+      if (keySelect.value && keySelect.value !== '__custom__') {
+        keyPathInput.value = keySelect.value;
+      }
+    }
+
+    // Browse link — use Tauri file dialog via backend command.
+    const browseLink = overlay.querySelector('#vault-acct-browse');
+    if (browseLink) {
+      browseLink.addEventListener('click', async (e) => {
+        e.preventDefault();
+        try {
+          const selected = await invoke('vault_pick_key_file');
+          if (selected) {
+            keyPathInput.value = selected;
+            if (manualKeyDiv) manualKeyDiv.style.display = '';
+            if (keySelect) keySelect.value = '__custom__';
+          }
+        } catch (_) {
+          keyPathInput.focus();
+        }
+      });
+    }
+
+    // Generate key link.
+    const genLink = overlay.querySelector('#vault-acct-generate');
+    if (genLink) {
+      genLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (window.keygen) {
+          window.keygen.showKeygenDialog({ linkToVault: true });
+        }
+      });
+    }
 
     overlay.addEventListener('mousedown', (e) => {
       if (e.target === overlay) closeAccountForm(overlay);
@@ -709,7 +872,6 @@
 
         closeAccountForm(overlay);
         document.removeEventListener('keydown', onKey, true);
-        renderVaultDialog();
       } catch (e) {
         window.toast.error('Save Failed', String(e));
       }

@@ -285,8 +285,11 @@ pub(crate) async fn ssh_connect(
 
     // Try vault credentials first, fall back to legacy ServerEntry fields.
     let used_vault = server.vault_account_id.is_some();
-    let credentials = try_vault_credentials(&vault, &server)
-        .unwrap_or_else(|| credentials_from_server(&server, password.clone()));
+    let credentials = match try_vault_credentials(&vault, &server) {
+        Err(e) => return Err(e),
+        Ok(Some(creds)) => creds,
+        Ok(None) => credentials_from_server(&server, password.clone()),
+    };
 
     let (ssh_handle, channel) =
         conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths)
@@ -1155,8 +1158,11 @@ pub(crate) async fn tunnel_start(
     });
 
     // Try vault credentials first, fall back to legacy fields.
-    let credentials = try_vault_credentials(&vault, &server)
-        .unwrap_or_else(|| credentials_from_server(&server, None));
+    let credentials = match try_vault_credentials(&vault, &server) {
+        Err(e) => return Err(e),
+        Ok(Some(creds)) => creds,
+        Ok(None) => credentials_from_server(&server, None),
+    };
 
     let result = mgr
         .start_tunnel(
@@ -1408,19 +1414,23 @@ fn credentials_from_vault_account(account: &conch_vault::VaultAccount) -> SshCre
 }
 
 /// Try to resolve credentials from the vault for a server entry.
-/// Returns `Some(SshCredentials)` if the server has a vault_account_id
-/// and the vault is unlocked with a matching account.
+/// Returns `Ok(Some(SshCredentials))` if credentials were resolved,
+/// `Ok(None)` if the server has no vault_account_id,
+/// or `Err("VAULT_LOCKED")` if the server needs vault credentials but the vault is locked.
 fn try_vault_credentials(
     vault: &VaultState,
     server: &ServerEntry,
-) -> Option<SshCredentials> {
-    let account_id = server.vault_account_id?;
+) -> Result<Option<SshCredentials>, String> {
+    let account_id = match server.vault_account_id {
+        Some(id) => id,
+        None => return Ok(None),
+    };
     let mgr = vault.lock();
     if mgr.is_locked() {
-        return None;
+        return Err("VAULT_LOCKED".into());
     }
-    let account = mgr.get_account(account_id).ok()?;
-    Some(credentials_from_vault_account(&account))
+    let account = mgr.get_account(account_id).ok();
+    Ok(account.map(|a| credentials_from_vault_account(&a)))
 }
 
 fn parse_quick_connect(input: &str) -> (String, String, u16) {
@@ -1822,7 +1832,7 @@ mod tests {
 
         let server = make_server("test", "example.com", "root", 22);
         assert!(server.vault_account_id.is_none());
-        assert!(try_vault_credentials(&vault, &server).is_none());
+        assert!(try_vault_credentials(&vault, &server).unwrap().is_none());
     }
 
     #[test]
@@ -1842,7 +1852,7 @@ mod tests {
         let mut server = make_server("test", "example.com", "root", 22);
         server.vault_account_id = Some(account_id);
 
-        let creds = try_vault_credentials(&vault, &server);
+        let creds = try_vault_credentials(&vault, &server).unwrap();
         assert!(creds.is_some());
         let creds = creds.unwrap();
         assert_eq!(creds.username, "deploy");
@@ -1868,7 +1878,9 @@ mod tests {
         let mut server = make_server("test", "example.com", "root", 22);
         server.vault_account_id = Some(account_id);
 
-        assert!(try_vault_credentials(&vault, &server).is_none());
+        let result = try_vault_credentials(&vault, &server);
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "VAULT_LOCKED");
     }
 
     #[test]

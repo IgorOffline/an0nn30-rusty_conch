@@ -9,6 +9,8 @@ pub const VAULT_VERSION: u32 = 1;
 pub struct Vault {
     pub version: u32,
     pub accounts: Vec<VaultAccount>,
+    #[serde(default)]
+    pub generated_keys: Vec<GeneratedKeyEntry>,
     pub settings: VaultSettings,
 }
 
@@ -17,9 +19,22 @@ impl Default for Vault {
         Self {
             version: VAULT_VERSION,
             accounts: Vec::new(),
+            generated_keys: Vec::new(),
             settings: VaultSettings::default(),
         }
     }
+}
+
+/// Metadata for an SSH key generated through the vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedKeyEntry {
+    pub id: Uuid,
+    pub algorithm: String,
+    pub fingerprint: String,
+    pub comment: String,
+    pub private_path: PathBuf,
+    pub public_path: PathBuf,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,10 +89,10 @@ impl Drop for AuthMethod {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VaultSettings {
     pub auto_lock_minutes: u16,
     pub push_to_system_agent: bool,
-    pub os_keychain_enabled: bool,
     pub auto_save_passwords: AutoSave,
 }
 
@@ -86,7 +101,6 @@ impl Default for VaultSettings {
         Self {
             auto_lock_minutes: 15,
             push_to_system_agent: false,
-            os_keychain_enabled: false,
             auto_save_passwords: AutoSave::Ask,
         }
     }
@@ -115,8 +129,17 @@ mod tests {
         let settings = VaultSettings::default();
         assert_eq!(settings.auto_lock_minutes, 15);
         assert!(!settings.push_to_system_agent);
-        assert!(!settings.os_keychain_enabled);
         assert_eq!(settings.auto_save_passwords, AutoSave::Ask);
+    }
+
+    #[test]
+    fn vault_settings_backward_compat_ignores_unknown_fields() {
+        // Old vault files may contain os_keychain_enabled — serde(default) handles it.
+        let json = r#"{"auto_lock_minutes":10,"push_to_system_agent":true,"os_keychain_enabled":true,"auto_save_passwords":"Always"}"#;
+        let settings: VaultSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.auto_lock_minutes, 10);
+        assert!(settings.push_to_system_agent);
+        assert_eq!(settings.auto_save_passwords, AutoSave::Always);
     }
 
     #[test]

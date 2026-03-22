@@ -880,7 +880,17 @@
 
     /* -- Vault dialog -- */
     .vault-setup-dialog, .vault-unlock-dialog { width: 420px; max-width: 90vw; }
+    .vault-spinner {
+      display: inline-block; width: 16px; height: 16px;
+      border: 2px solid var(--text-secondary); border-top-color: transparent;
+      border-radius: 50%; animation: vault-spin 0.6s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+    @keyframes vault-spin { to { transform: rotate(360deg); } }
     .vault-account-form { width: 460px; max-width: 90vw; }
+    .vault-keygen-link { font-size: 12px; color: var(--text-secondary); margin: 4px 0 8px; }
+    .vault-keygen-link a { color: var(--fg); text-decoration: underline; cursor: pointer; }
+    .vault-browse-link { font-size: 12px; color: var(--text-secondary); cursor: pointer; text-decoration: underline; display: inline-block; margin: 2px 0 6px; }
     .vault-description {
       font-size: 12px; color: var(--text-secondary); line-height: 1.5;
       margin: 0 0 4px;
@@ -1617,15 +1627,33 @@
         const rows = dims ? dims.rows : 24;
 
         try {
-          if (opts.serverId) {
-            await invoke('ssh_connect', {
-              tabId, serverId: opts.serverId, cols, rows, password: opts.password || null,
-            });
-          } else if (opts.spec) {
-            await invoke('ssh_quick_connect', {
-              tabId, spec: opts.spec, cols, rows, password: opts.password || null,
-            });
+          const doConnect = async () => {
+            if (opts.serverId) {
+              await invoke('ssh_connect', {
+                tabId, serverId: opts.serverId, cols, rows, password: opts.password || null,
+              });
+            } else if (opts.spec) {
+              await invoke('ssh_quick_connect', {
+                tabId, spec: opts.spec, cols, rows, password: opts.password || null,
+              });
+            }
+          };
+
+          try {
+            await doConnect();
+          } catch (e) {
+            if (String(e).includes('VAULT_LOCKED') && window.vault) {
+              // Vault is locked — prompt user to unlock, then retry.
+              await new Promise((resolve, reject) => {
+                window.vault.ensureUnlocked(() => {
+                  doConnect().then(resolve, reject);
+                });
+              });
+            } else {
+              throw e;
+            }
           }
+
           tab.spawned = true;
           tab.label = button.textContent || label;
           fitAndResizeTab(tab);

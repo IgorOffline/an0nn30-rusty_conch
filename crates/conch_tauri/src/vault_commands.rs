@@ -1,4 +1,4 @@
-use conch_vault::{AuthMethod, VaultAccount, VaultManager, VaultSettings};
+use conch_vault::{AuthMethod, GeneratedKeyEntry, VaultAccount, VaultManager, VaultSettings};
 use conch_vault::keygen::{generate_key, save_key_to_disk, KeyGenOptions, KeyType};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,7 +15,6 @@ pub(crate) type VaultState = Arc<Mutex<VaultManager>>;
 #[derive(Deserialize)]
 pub(crate) struct CreateVaultRequest {
     pub password: String,
-    pub enable_keychain: bool,
 }
 
 #[derive(Deserialize)]
@@ -114,31 +113,31 @@ pub(crate) fn vault_status(vault: tauri::State<'_, VaultState>) -> VaultStatusRe
 }
 
 #[tauri::command]
-pub(crate) fn vault_create(
+pub(crate) async fn vault_create(
     vault: tauri::State<'_, VaultState>,
     request: CreateVaultRequest,
 ) -> Result<(), String> {
-    let mgr = vault.lock();
-    mgr.create(request.password.as_bytes()).map_err(|e| e.to_string())?;
-
-    if request.enable_keychain {
-        // Store derived key in OS keychain for biometric unlock.
-        // This is a best-effort operation.
-        if let Err(e) = conch_vault::keychain::store_master_key(request.password.as_bytes()) {
-            log::warn!("failed to store master key in keychain: {e}");
-        }
-    }
-
-    Ok(())
+    let vault = vault.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let mgr = vault.lock();
+        mgr.create(request.password.as_bytes()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub(crate) fn vault_unlock(
+pub(crate) async fn vault_unlock(
     vault: tauri::State<'_, VaultState>,
     request: UnlockVaultRequest,
 ) -> Result<(), String> {
-    let mgr = vault.lock();
-    mgr.unlock(request.password.as_bytes()).map_err(|e| e.to_string())
+    let vault = vault.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let mgr = vault.lock();
+        mgr.unlock(request.password.as_bytes()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -172,8 +171,10 @@ pub(crate) fn vault_add_account(
 ) -> Result<Uuid, String> {
     let auth = parse_auth_method(&request.auth_type, &request)?;
     let mgr = vault.lock();
-    mgr.add_account(request.display_name, request.username, auth)
-        .map_err(|e| e.to_string())
+    let id = mgr.add_account(request.display_name, request.username, auth)
+        .map_err(|e| e.to_string())?;
+    mgr.save().map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 #[tauri::command]
@@ -194,7 +195,9 @@ pub(crate) fn vault_update_account(
 
     let mgr = vault.lock();
     mgr.update_account(request.id, request.display_name, request.username, auth)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    mgr.save().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -203,7 +206,9 @@ pub(crate) fn vault_delete_account(
     id: Uuid,
 ) -> Result<bool, String> {
     let mgr = vault.lock();
-    mgr.delete_account(id).map_err(|e| e.to_string())
+    let removed = mgr.delete_account(id).map_err(|e| e.to_string())?;
+    mgr.save().map_err(|e| e.to_string())?;
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -220,11 +225,26 @@ pub(crate) fn vault_update_settings(
     settings: VaultSettings,
 ) -> Result<(), String> {
     let mgr = vault.lock();
-    mgr.update_settings(settings).map_err(|e| e.to_string())
+    mgr.update_settings(settings).map_err(|e| e.to_string())?;
+    mgr.save().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn vault_pick_key_file(
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_file(move |path| {
+        let _ = tx.send(path.map(|p| p.as_path().unwrap().display().to_string()));
+    });
+    rx.await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub(crate) fn vault_generate_key(
+    vault: tauri::State<'_, VaultState>,
     request: KeyGenRequest,
 ) -> Result<KeyGenResponse, String> {
     let key_type = match request.key_type.as_str() {
@@ -235,6 +255,7 @@ pub(crate) fn vault_generate_key(
         "rsa-4096" => KeyType::Rsa4096,
         other => return Err(format!("unknown key type: {other}")),
     };
+    let comment = request.comment.clone();
     let options = KeyGenOptions {
         key_type,
         comment: request.comment,
@@ -242,16 +263,77 @@ pub(crate) fn vault_generate_key(
     };
 
     let key = generate_key(&options).map_err(|e| e.to_string())?;
-    let save_path = PathBuf::from(&request.save_path);
+    let save_path = conch_remote::ssh::expand_tilde(&request.save_path);
     save_key_to_disk(&save_path, &key).map_err(|e| e.to_string())?;
+
+    let public_path = save_path.with_extension("pub");
+
+    // Record the generated key in the vault if it's unlocked.
+    let mgr = vault.lock();
+    if !mgr.is_locked() {
+        mgr.add_generated_key(
+            key.algorithm.clone(),
+            key.fingerprint.clone(),
+            comment,
+            save_path.clone(),
+            public_path.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        mgr.save().map_err(|e| e.to_string())?;
+    }
 
     Ok(KeyGenResponse {
         fingerprint: key.fingerprint,
         public_key: key.public_key,
         algorithm: key.algorithm,
         private_path: save_path.display().to_string(),
-        public_path: save_path.with_extension("pub").display().to_string(),
+        public_path: public_path.display().to_string(),
     })
+}
+
+#[derive(Serialize)]
+pub(crate) struct GeneratedKeyResponse {
+    pub id: Uuid,
+    pub algorithm: String,
+    pub fingerprint: String,
+    pub comment: String,
+    pub private_path: String,
+    pub public_path: String,
+    pub created_at: String,
+}
+
+impl From<GeneratedKeyEntry> for GeneratedKeyResponse {
+    fn from(k: GeneratedKeyEntry) -> Self {
+        Self {
+            id: k.id,
+            algorithm: k.algorithm,
+            fingerprint: k.fingerprint,
+            comment: k.comment,
+            private_path: k.private_path.display().to_string(),
+            public_path: k.public_path.display().to_string(),
+            created_at: k.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn vault_list_keys(
+    vault: tauri::State<'_, VaultState>,
+) -> Result<Vec<GeneratedKeyResponse>, String> {
+    let mgr = vault.lock();
+    let keys = mgr.list_generated_keys().map_err(|e| e.to_string())?;
+    Ok(keys.into_iter().map(GeneratedKeyResponse::from).collect())
+}
+
+#[tauri::command]
+pub(crate) fn vault_delete_key(
+    vault: tauri::State<'_, VaultState>,
+    id: Uuid,
+) -> Result<bool, String> {
+    let mgr = vault.lock();
+    let removed = mgr.delete_generated_key(id).map_err(|e| e.to_string())?;
+    mgr.save().map_err(|e| e.to_string())?;
+    Ok(removed)
 }
 
 /// Migrate legacy server entries (those with plain-text `user`/`key_path` fields

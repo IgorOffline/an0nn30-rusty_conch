@@ -1,77 +1,52 @@
-//! OS keychain integration for storing the vault master key.
-//! macOS: Keychain (Touch ID). Linux: Secret Service. Windows: deferred.
+//! OS keychain integration — REMOVED.
+//!
+//! Keychain/Touch ID functionality has been removed. These stubs remain so that
+//! the public API surface stays intact for any callers that haven't been cleaned
+//! up yet. Every function returns an error or `false`.
 
 use crate::error::VaultError;
 
-const SERVICE_NAME: &str = "conch-vault";
-const ACCOUNT_NAME: &str = "master-key";
-
-/// Store the derived encryption key in the OS keychain.
-pub fn store_master_key(key: &[u8]) -> Result<(), VaultError> {
-    let encoded = base64_encode(key);
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| VaultError::Keychain(e.to_string()))?;
-    entry
-        .set_password(&encoded)
-        .map_err(|e| VaultError::Keychain(e.to_string()))?;
-    log::info!("keychain: master key stored");
-    Ok(())
+/// Always returns an error — keychain storage has been removed.
+pub fn store_master_key(_key: &[u8]) -> Result<(), VaultError> {
+    Err(VaultError::Keychain("keychain support has been removed".into()))
 }
 
-/// Retrieve the derived encryption key from the OS keychain.
+/// Always returns an error — keychain retrieval has been removed.
 pub fn retrieve_master_key() -> Result<Vec<u8>, VaultError> {
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| VaultError::Keychain(e.to_string()))?;
-    let encoded = entry
-        .get_password()
-        .map_err(|e| VaultError::Keychain(e.to_string()))?;
-    base64_decode(&encoded)
+    Err(VaultError::Keychain("keychain support has been removed".into()))
 }
 
-/// Delete the master key from the OS keychain.
+/// Always returns an error — keychain deletion has been removed.
 pub fn delete_master_key() -> Result<(), VaultError> {
-    let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-        .map_err(|e| VaultError::Keychain(e.to_string()))?;
-    entry
-        .delete_credential()
-        .map_err(|e| VaultError::Keychain(e.to_string()))?;
-    log::info!("keychain: master key deleted");
-    Ok(())
+    Err(VaultError::Keychain("keychain support has been removed".into()))
 }
 
-/// Check if a master key is stored in the OS keychain.
+/// Always returns false — keychain support has been removed.
 pub fn has_master_key() -> bool {
-    let entry = match keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    entry.get_password().is_ok()
+    false
 }
 
-fn base64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-fn base64_decode(data: &str) -> Result<Vec<u8>, VaultError> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map_err(|e| VaultError::Keychain(format!("base64 decode error: {e}")))
-}
-
-// Note: keychain tests require actual OS keychain access and are not run in CI.
-// Manual test: run `cargo test -p conch_vault keychain -- --ignored` on a machine
-// with keychain access.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn base64_roundtrip() {
-        let data = b"test-key-material-32-bytes-long!";
-        let encoded = base64_encode(data);
-        let decoded = base64_decode(&encoded).unwrap();
-        assert_eq!(decoded, data);
+    fn store_returns_error() {
+        assert!(store_master_key(b"test").is_err());
+    }
+
+    #[test]
+    fn retrieve_returns_error() {
+        assert!(retrieve_master_key().is_err());
+    }
+
+    #[test]
+    fn delete_returns_error() {
+        assert!(delete_master_key().is_err());
+    }
+
+    #[test]
+    fn has_master_key_returns_false() {
+        assert!(!has_master_key());
     }
 }
