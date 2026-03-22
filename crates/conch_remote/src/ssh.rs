@@ -11,6 +11,19 @@ use crate::callbacks::{RemoteCallbacks, RemotePaths};
 use crate::config::ServerEntry;
 use crate::handler::ConchSshHandler;
 
+/// Credentials resolved from the vault (or legacy ServerEntry fields, or user prompt).
+///
+/// Decouples SSH connection logic from knowing about the vault — the caller
+/// resolves vault accounts into `SshCredentials` before calling
+/// `connect_and_open_shell`.
+pub struct SshCredentials {
+    pub username: String,
+    /// "key" or "password".
+    pub auth_method: String,
+    pub password: Option<String>,
+    pub key_path: Option<String>,
+}
+
 /// Expand a leading `~` or `~/` to the user's home directory.
 pub fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
@@ -32,9 +45,13 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 ///
 /// Returns the client handle and the shell channel. Auth prompts are sent
 /// through the `callbacks` trait implementation.
+///
+/// `credentials` provides the username, auth method, and optionally a
+/// pre-supplied password or key path. The caller resolves these from the
+/// vault or from legacy `ServerEntry` fields before calling this function.
 pub async fn connect_and_open_shell(
     server: &ServerEntry,
-    password: Option<String>,
+    credentials: &SshCredentials,
     callbacks: Arc<dyn RemoteCallbacks>,
     paths: &RemotePaths,
 ) -> Result<(client::Handle<ConchSshHandler>, russh::Channel<russh::client::Msg>), String> {
@@ -79,19 +96,19 @@ pub async fn connect_and_open_shell(
     };
 
     // Authenticate.
-    let authenticated = if server.auth_method == "password" {
-        // If password was provided, use it directly. Otherwise prompt via callbacks.
-        let pw = match &password {
+    let authenticated = if credentials.auth_method == "password" {
+        // If password was provided in credentials, use it. Otherwise prompt via callbacks.
+        let pw = match &credentials.password {
             Some(pw) => Some(pw.clone()),
             None => {
-                let msg = format!("Password for {}@{}", server.user, server.host);
+                let msg = format!("Password for {}@{}", credentials.username, server.host);
                 callbacks.prompt_password(&msg).await
             }
         };
 
         match pw {
             Some(pw) => session
-                .authenticate_password(&server.user, &pw)
+                .authenticate_password(&credentials.username, &pw)
                 .await
                 .map_err(|e| format!("Auth failed: {e}"))?,
             None => return Err("Password entry cancelled".to_string()),
@@ -99,8 +116,8 @@ pub async fn connect_and_open_shell(
     } else {
         try_key_auth(
             &mut session,
-            &server.user,
-            server.key_path.as_deref(),
+            &credentials.username,
+            credentials.key_path.as_deref(),
             &paths.default_key_paths,
         )
         .await?

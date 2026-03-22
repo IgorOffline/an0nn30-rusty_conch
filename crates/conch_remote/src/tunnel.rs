@@ -94,6 +94,7 @@ impl TunnelManager {
         &self,
         id: Uuid,
         server: &ServerEntry,
+        credentials: &crate::ssh::SshCredentials,
         local_port: u16,
         remote_host: String,
         remote_port: u16,
@@ -107,7 +108,7 @@ impl TunnelManager {
 
         log::info!("tunnel[{id}]: listening on 127.0.0.1:{local_port}");
 
-        let ssh_handle = connect_for_tunnel(server, callbacks, paths).await?;
+        let ssh_handle = connect_for_tunnel(server, credentials, callbacks, paths).await?;
 
         log::info!("tunnel[{id}]: SSH connection established");
 
@@ -218,6 +219,7 @@ impl TunnelManager {
 
 async fn connect_for_tunnel(
     server: &ServerEntry,
+    credentials: &crate::ssh::SshCredentials,
     callbacks: Arc<dyn RemoteCallbacks>,
     paths: &RemotePaths,
 ) -> Result<client::Handle<ConchSshHandler>, String> {
@@ -262,24 +264,24 @@ async fn connect_for_tunnel(
     };
 
     // Auth
-    let authenticated = if server.auth_method == "password" {
+    let authenticated = if credentials.auth_method == "password" {
         let msg = format!(
             "Password for {}@{}:{}",
-            server.user, server.host, server.port
+            credentials.username, server.host, server.port
         );
         let password = callbacks
             .prompt_password(&msg)
             .await
             .ok_or_else(|| "Password prompt cancelled".to_string())?;
         session
-            .authenticate_password(&server.user, &password)
+            .authenticate_password(&credentials.username, &password)
             .await
             .map_err(|e| format!("Auth failed: {e}"))?
     } else {
         crate::ssh::try_key_auth(
             &mut session,
-            &server.user,
-            server.key_path.as_deref(),
+            &credentials.username,
+            credentials.key_path.as_deref(),
             &paths.default_key_paths,
         )
         .await?
@@ -288,7 +290,7 @@ async fn connect_for_tunnel(
     if !authenticated {
         return Err(format!(
             "Authentication failed for {}@{}",
-            server.user, server.host
+            credentials.username, server.host
         ));
     }
 

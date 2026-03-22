@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use conch_remote::callbacks::{RemoteCallbacks, RemotePaths};
 use conch_remote::config::{ExportPayload, SavedTunnel, ServerEntry, ServerFolder, SshConfig};
 use conch_remote::handler::ConchSshHandler;
-use conch_remote::ssh::ChannelInput;
+use conch_remote::ssh::{ChannelInput, SshCredentials};
 use conch_remote::transfer::{TransferProgress, TransferRegistry};
 use conch_remote::tunnel::{TunnelManager, TunnelStatus};
 
@@ -270,8 +270,12 @@ pub(crate) async fn ssh_connect(
         pending_prompts: Arc::clone(&pending_prompts),
     });
 
+    // Build credentials from legacy ServerEntry fields during transition.
+    let credentials = credentials_from_server(&server, password);
+
     let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&server, password, callbacks, &paths).await?;
+        conch_remote::ssh::connect_and_open_shell(&server, &credentials, callbacks, &paths)
+            .await?;
 
     // Set up the channel I/O loop.
     let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -290,7 +294,7 @@ pub(crate) async fn ssh_connect(
                 input_tx,
                 ssh_handle: Arc::new(ssh_handle),
                 host: server.host.clone(),
-                user: server.user.clone(),
+                user: credentials.username.clone(),
                 port: server.port,
             },
         );
@@ -350,9 +354,10 @@ pub(crate) async fn ssh_quick_connect(
         label: format!("{user}@{host}:{port}"),
         host,
         port,
-        user,
-        auth_method,
+        user: Some(user.clone()),
+        auth_method: Some(auth_method.clone()),
         key_path: None,
+        vault_account_id: None,
         proxy_command: None,
         proxy_jump: None,
     };
@@ -376,8 +381,10 @@ pub(crate) async fn ssh_quick_connect(
         pending_prompts: Arc::clone(&pending_prompts),
     });
 
+    let credentials = credentials_from_server(&entry, password);
+
     let (ssh_handle, channel) =
-        conch_remote::ssh::connect_and_open_shell(&entry, password, callbacks, &paths).await?;
+        conch_remote::ssh::connect_and_open_shell(&entry, &credentials, callbacks, &paths).await?;
 
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -392,7 +399,7 @@ pub(crate) async fn ssh_quick_connect(
                 input_tx,
                 ssh_handle: Arc::new(ssh_handle),
                 host: entry.host.clone(),
-                user: entry.user.clone(),
+                user: credentials.username.clone(),
                 port: entry.port,
             },
         );
@@ -1047,10 +1054,13 @@ pub(crate) async fn tunnel_start(
         pending_prompts,
     });
 
+    let credentials = credentials_from_server(&server, None);
+
     let result = mgr
         .start_tunnel(
             tunnel_uuid,
             &server,
+            &credentials,
             tunnel_def.local_port,
             tunnel_def.remote_host.clone(),
             tunnel_def.remote_port,
@@ -1151,7 +1161,8 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
         .all_servers()
         .chain(state.ssh_config_entries.iter())
     {
-        if SavedTunnel::make_session_key(&s.user, &s.host, s.port) == session_key {
+        let user = s.user.as_deref().unwrap_or("root");
+        if SavedTunnel::make_session_key(user, &s.host, s.port) == session_key {
             return Some(s.clone());
         }
     }
@@ -1186,9 +1197,10 @@ fn find_server_for_tunnel(state: &RemoteState, session_key: &str) -> Option<Serv
         label: session_key.to_string(),
         host,
         port,
-        user,
-        auth_method: "key".to_string(),
+        user: Some(user),
+        auth_method: Some("key".to_string()),
         key_path: None,
+        vault_account_id: None,
         proxy_command: None,
         proxy_jump: None,
     })
@@ -1205,7 +1217,7 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
         .config
         .all_servers()
         .chain(state.ssh_config_entries.iter())
-        .map(|s| SavedTunnel::make_session_key(&s.user, &s.host, s.port))
+        .map(|s| SavedTunnel::make_session_key(s.user.as_deref().unwrap_or("root"), &s.host, s.port))
         .collect();
 
     // Snapshot entries for matching (avoid borrow conflict).
@@ -1233,7 +1245,7 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
 
             if let Some(entry) = matched {
                 let new_key =
-                    SavedTunnel::make_session_key(&entry.user, &entry.host, entry.port);
+                    SavedTunnel::make_session_key(entry.user.as_deref().unwrap_or("root"), &entry.host, entry.port);
                 log::info!(
                     "resolve_imported_tunnel_keys: '{}' -> '{}' via server '{}'",
                     tunnel.session_key,
@@ -1249,6 +1261,23 @@ fn resolve_imported_tunnel_keys(state: &mut RemoteState, existing_ids: &[uuid::U
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build `SshCredentials` from legacy `ServerEntry` fields during the
+/// transition period before the vault is fully wired (Task 11).
+fn credentials_from_server(server: &ServerEntry, password: Option<String>) -> SshCredentials {
+    SshCredentials {
+        username: server
+            .user
+            .clone()
+            .unwrap_or_else(|| "root".to_string()),
+        auth_method: server
+            .auth_method
+            .clone()
+            .unwrap_or_else(|| "key".to_string()),
+        password,
+        key_path: server.key_path.clone(),
+    }
+}
 
 fn parse_quick_connect(input: &str) -> (String, String, u16) {
     let parts: Vec<&str> = input.splitn(2, '@').collect();
@@ -1339,9 +1368,10 @@ mod tests {
             label: label.to_string(),
             host: host.to_string(),
             port,
-            user: user.to_string(),
-            auth_method: "key".to_string(),
+            user: Some(user.to_string()),
+            auth_method: Some("key".to_string()),
             key_path: None,
+            vault_account_id: None,
             proxy_command: None,
             proxy_jump: None,
         }
@@ -1417,6 +1447,7 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             label: "minecraft-local".to_string(),
             session_key: "dustin@bastion.nexxuscraft.com:22".to_string(),
+            server_entry_id: None,
             local_port: 25565,
             remote_host: "10.0.1.31".to_string(),
             remote_port: 25580,
@@ -1440,6 +1471,7 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             label: "test tunnel".to_string(),
             session_key: "admin@bastion:22".to_string(),
+            server_entry_id: None,
             local_port: 8080,
             remote_host: "localhost".to_string(),
             remote_port: 80,
@@ -1464,6 +1496,7 @@ mod tests {
             id: tunnel_id,
             label: "existing tunnel".to_string(),
             session_key: "admin@bastion:22".to_string(),
+            server_entry_id: None,
             local_port: 8080,
             remote_host: "localhost".to_string(),
             remote_port: 80,
@@ -1486,6 +1519,7 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             label: "good tunnel".to_string(),
             session_key: "admin@bastion.example.com:22".to_string(),
+            server_entry_id: None,
             local_port: 9090,
             remote_host: "localhost".to_string(),
             remote_port: 443,
