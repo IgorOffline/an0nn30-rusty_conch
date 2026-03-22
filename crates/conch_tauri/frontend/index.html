@@ -1839,7 +1839,7 @@
         }
       });
 
-      // Hot-reload: re-fetch theme when config changes.
+      // Re-fetch theme when settings are applied.
       listenOnCurrentWindow('config-changed', async () => {
         try {
           const tc = await invoke('get_theme_colors');
@@ -1877,9 +1877,8 @@
           for (const tab of tabs.values()) {
             tab.term.options.theme = newTheme;
           }
-          if (window.toast) window.toast.info('Config Reloaded', 'Theme and settings updated');
         } catch (e) {
-          console.warn('Hot-reload failed:', e);
+          console.warn('Theme reload failed:', e);
         }
       });
 

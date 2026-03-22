@@ -12,7 +12,6 @@ pub(crate) mod remote;
 pub(crate) mod settings;
 pub(crate) mod theme;
 pub(crate) mod utf8_stream;
-mod watcher;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -866,9 +865,6 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                         .ok();
                 }
             }
-
-            // Start config/theme file watcher for hot-reload.
-            watcher::start(app.handle().clone());
 
             // Start IPC socket listener.
             let _ipc_guard = ipc::start(app.handle().clone());
