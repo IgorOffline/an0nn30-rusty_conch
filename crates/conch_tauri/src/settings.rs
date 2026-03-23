@@ -44,7 +44,7 @@ pub(crate) fn save_settings(
         needs_restart(&old_config, &new_config)
     };
 
-    // Update in-memory config first (before disk write) to avoid watcher race.
+    // Update in-memory config before disk write.
     {
         let mut cfg = state.config.lock();
         *cfg = new_config.clone();

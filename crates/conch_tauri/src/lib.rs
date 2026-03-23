@@ -931,7 +931,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
             }
 
-            // Start config/theme file watcher for hot-reload.
+            // Start theme file watcher for hot-reload.
             watcher::start(app.handle().clone());
 
             // Start IPC socket listener.
