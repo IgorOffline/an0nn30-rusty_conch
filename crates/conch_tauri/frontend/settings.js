@@ -213,6 +213,217 @@
     container.appendChild(row);
   }
 
+  // --- Theme preview helpers ---
+
+  function buildThemePreview() {
+    const box = document.createElement('div');
+    box.className = 'tp-container';
+    box.style.cssText = [
+      'border-radius:6px',
+      'padding:14px',
+      'margin:8px 0 12px 0',
+      'font-family:"SF Mono","Fira Code","Cascadia Code",monospace',
+      'font-size:12px',
+      'line-height:1.5',
+      'border:1px solid var(--tab-border)',
+    ].join(';');
+
+    function span(cls, text) {
+      const s = document.createElement('span');
+      if (cls) s.className = cls;
+      s.textContent = text;
+      return s;
+    }
+
+    function line(...nodes) {
+      const d = document.createElement('div');
+      for (const n of nodes) {
+        if (typeof n === 'string') d.appendChild(document.createTextNode(n));
+        else d.appendChild(n);
+      }
+      return d;
+    }
+
+    // "PREVIEW" label
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:9px;letter-spacing:0.1em;margin-bottom:8px;opacity:0.5;text-transform:uppercase';
+    label.textContent = 'PREVIEW';
+    label.className = 'tp-fg';
+    box.appendChild(label);
+
+    // Prompt line
+    box.appendChild(line(
+      span('tp-green tp-bold', 'user@conch'),
+      span('tp-fg', ':'),
+      span('tp-blue tp-bold', '~/projects'),
+      span('tp-fg', ' $ '),
+      span('tp-fg', 'ls -la'),
+    ));
+
+    // total line
+    box.appendChild(line(span('tp-fg', 'total 42')));
+
+    // File listing entries: [permissions, links, user, group, size, date, name]
+    const entries = [
+      // [perm, links, user, group, size, date, name, nameClass]
+      ['drwxr-xr-x', '5', 'user', 'staff', '160', 'Mar 20 10:01', '.', 'tp-blue tp-bold'],
+      ['drwxr-xr-x', '8', 'user', 'staff', '256', 'Mar 19 09:00', '..', 'tp-blue tp-bold'],
+      ['-rw-r--r--', '1', 'user', 'staff', '1234', 'Mar 20 10:01', '.gitignore', 'tp-yellow'],
+      ['-rw-r--r--', '1', 'user', 'staff', '890', 'Mar 20 10:01', '.env', 'tp-yellow'],
+      ['drwxr-xr-x', '3', 'user', 'staff', '96', 'Mar 20 10:01', 'src', 'tp-blue tp-bold'],
+      ['-rwxr-xr-x', '1', 'user', 'staff', '8192', 'Mar 20 10:01', 'build.sh', 'tp-red tp-bold'],
+      ['-rw-r--r--', '1', 'user', 'staff', '512', 'Mar 20 10:01', 'config.toml', 'tp-green'],
+      ['-rw-r--r--', '1', 'user', 'staff', '256', 'Mar 20 10:01', 'README.md', 'tp-fg'],
+    ];
+
+    for (const [perm, links, user, group, size, date, name, nameClass] of entries) {
+      box.appendChild(line(
+        span('tp-dim', perm + ' '),
+        span('tp-cyan', links + ' '),
+        span('tp-dim', user + ' ' + group + ' '),
+        span('tp-cyan', size.padStart(6) + ' '),
+        span('tp-dim', date + ' '),
+        span(nameClass, name),
+      ));
+    }
+
+    // echo command line
+    box.appendChild(line(
+      span('tp-green tp-bold', 'user@conch'),
+      span('tp-fg', ':'),
+      span('tp-blue tp-bold', '~/projects'),
+      span('tp-fg', ' $ '),
+      span('tp-magenta', 'echo'),
+      span('tp-fg', ' '),
+      span('tp-yellow', '"hello world"'),
+    ));
+
+    // output line
+    box.appendChild(line(span('tp-fg', 'hello world')));
+
+    // cursor prompt line
+    const cursorLine = line(
+      span('tp-green tp-bold', 'user@conch'),
+      span('tp-fg', ':'),
+      span('tp-blue tp-bold', '~/projects'),
+      span('tp-fg', ' $ '),
+    );
+    const cursor = document.createElement('span');
+    cursor.className = 'tp-cursor';
+    cursor.textContent = ' ';
+    cursor.style.cssText = 'display:inline-block;width:0.6em;height:1em;vertical-align:text-bottom';
+    cursorLine.appendChild(cursor);
+    box.appendChild(cursorLine);
+
+    // Swatch divider
+    const dividerEl = document.createElement('div');
+    dividerEl.className = 'tp-swatch-divider';
+    dividerEl.style.cssText = 'margin:8px 0 6px 0;border-top:1px solid var(--tab-border)';
+    box.appendChild(dividerEl);
+
+    // Normal swatches row
+    const normalRow = document.createElement('div');
+    normalRow.style.cssText = 'display:flex;gap:4px;margin-bottom:4px';
+    const normalClasses = ['tp-sw-black','tp-sw-red','tp-sw-green','tp-sw-yellow','tp-sw-blue','tp-sw-magenta','tp-sw-cyan','tp-sw-white'];
+    for (const cls of normalClasses) {
+      const sw = document.createElement('div');
+      sw.className = cls;
+      sw.style.cssText = 'width:16px;height:16px;border-radius:3px;flex-shrink:0';
+      normalRow.appendChild(sw);
+    }
+    box.appendChild(normalRow);
+
+    // Bright swatches row
+    const brightRow = document.createElement('div');
+    brightRow.style.cssText = 'display:flex;gap:4px';
+    const brightClasses = ['tp-sw-bright-black','tp-sw-bright-red','tp-sw-bright-green','tp-sw-bright-yellow','tp-sw-bright-blue','tp-sw-bright-magenta','tp-sw-bright-cyan','tp-sw-bright-white'];
+    for (const cls of brightClasses) {
+      const sw = document.createElement('div');
+      sw.className = cls;
+      sw.style.cssText = 'width:16px;height:16px;border-radius:3px;flex-shrink:0';
+      brightRow.appendChild(sw);
+    }
+    box.appendChild(brightRow);
+
+    return box;
+  }
+
+  function updateThemePreview(container, tc) {
+    if (!tc) return;
+
+    // Container background and border
+    container.style.background = tc.background || '';
+    container.style.borderColor = tc.tab_border || '';
+
+    // Text color classes
+    const colorMap = {
+      '.tp-fg':      tc.foreground,
+      '.tp-dim':     tc.dim_fg,
+      '.tp-green':   tc.green,
+      '.tp-blue':    tc.blue,
+      '.tp-cyan':    tc.cyan,
+      '.tp-red':     tc.red,
+      '.tp-yellow':  tc.yellow,
+      '.tp-magenta': tc.magenta,
+    };
+    for (const [sel, color] of Object.entries(colorMap)) {
+      if (!color) continue;
+      for (const el of container.querySelectorAll(sel)) {
+        el.style.color = color;
+      }
+    }
+
+    // Bold elements
+    for (const el of container.querySelectorAll('.tp-bold')) {
+      el.style.fontWeight = 'bold';
+    }
+
+    // Cursor block
+    const cursorEl = container.querySelector('.tp-cursor');
+    if (cursorEl) {
+      cursorEl.style.background = tc.cursor_color || tc.foreground || '';
+      cursorEl.style.color = tc.cursor_text || tc.background || '';
+    }
+
+    // Normal swatches
+    const normalSwatches = [
+      ['.tp-sw-black',   tc.black],
+      ['.tp-sw-red',     tc.red],
+      ['.tp-sw-green',   tc.green],
+      ['.tp-sw-yellow',  tc.yellow],
+      ['.tp-sw-blue',    tc.blue],
+      ['.tp-sw-magenta', tc.magenta],
+      ['.tp-sw-cyan',    tc.cyan],
+      ['.tp-sw-white',   tc.white],
+    ];
+    for (const [sel, color] of normalSwatches) {
+      if (!color) continue;
+      const el = container.querySelector(sel);
+      if (el) el.style.background = color;
+    }
+
+    // Bright swatches
+    const brightSwatches = [
+      ['.tp-sw-bright-black',   tc.bright_black],
+      ['.tp-sw-bright-red',     tc.bright_red],
+      ['.tp-sw-bright-green',   tc.bright_green],
+      ['.tp-sw-bright-yellow',  tc.bright_yellow],
+      ['.tp-sw-bright-blue',    tc.bright_blue],
+      ['.tp-sw-bright-magenta', tc.bright_magenta],
+      ['.tp-sw-bright-cyan',    tc.bright_cyan],
+      ['.tp-sw-bright-white',   tc.bright_white],
+    ];
+    for (const [sel, color] of brightSwatches) {
+      if (!color) continue;
+      const el = container.querySelector(sel);
+      if (el) el.style.background = color;
+    }
+
+    // Swatch divider border
+    const divider = container.querySelector('.tp-swatch-divider');
+    if (divider) divider.style.borderTopColor = tc.active_highlight || '';
+  }
+
   // --- Appearance section ---
 
   function renderAppearance(c) {
@@ -237,6 +448,16 @@
       pendingSettings.colors.theme = themeSelect.value;
     });
     addRow(c, 'Theme', 'Color theme for the terminal and UI', themeSelect);
+
+    // Theme preview box
+    const previewBox = buildThemePreview();
+    c.appendChild(previewBox);
+    invoke('get_theme_colors').then(tc => updateThemePreview(previewBox, tc)).catch(() => {});
+    themeSelect.addEventListener('change', () => {
+      invoke('preview_theme_colors', { name: themeSelect.value })
+        .then(tc => updateThemePreview(previewBox, tc))
+        .catch(() => {});
+    });
 
     // Appearance Mode toggle group
     const modes = ['Dark', 'Light', 'System'];
