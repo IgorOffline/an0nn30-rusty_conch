@@ -234,21 +234,11 @@
   function buildThemePreview() {
     const box = document.createElement('div');
     box.className = 'tp-container';
-    box.style.cssText = [
-      'border-radius:6px',
-      'padding:14px',
-      'margin:8px 0 12px 0',
-      'font-family:"SF Mono","Fira Code","Cascadia Code",monospace',
-      'font-size:12px',
-      'line-height:1.5',
-      'border:1px solid var(--tab-border)',
-    ].join(';');
 
     // "PREVIEW" label
     const label = document.createElement('div');
-    label.style.cssText = 'font-size:9px;letter-spacing:0.1em;margin-bottom:8px;text-transform:uppercase';
     label.textContent = 'PREVIEW';
-    label.className = 'tp-dim';
+    label.className = 'tp-label tp-dim';
     box.appendChild(label);
 
     // Prompt line
@@ -311,36 +301,32 @@
     const cursor = document.createElement('span');
     cursor.className = 'tp-cursor';
     cursor.textContent = ' ';
-    cursor.style.cssText = 'display:inline-block;width:0.6em;height:1em;vertical-align:text-bottom';
     cursorLine.appendChild(cursor);
     box.appendChild(cursorLine);
 
     // Swatch divider
     const dividerEl = document.createElement('div');
     dividerEl.className = 'tp-swatch-divider';
-    dividerEl.style.cssText = 'margin:8px 0 6px 0;border-top:1px solid var(--tab-border)';
     box.appendChild(dividerEl);
 
     // Normal swatches row
     const normalRow = document.createElement('div');
-    normalRow.style.cssText = 'display:flex;gap:4px;margin-bottom:4px';
+    normalRow.className = 'tp-swatch-row tp-swatch-row--normal';
     const normalClasses = ['tp-sw-black','tp-sw-red','tp-sw-green','tp-sw-yellow','tp-sw-blue','tp-sw-magenta','tp-sw-cyan','tp-sw-white'];
     for (const cls of normalClasses) {
       const sw = document.createElement('div');
-      sw.className = cls;
-      sw.style.cssText = 'width:16px;height:16px;border-radius:3px;flex-shrink:0';
+      sw.className = cls + ' tp-swatch';
       normalRow.appendChild(sw);
     }
     box.appendChild(normalRow);
 
     // Bright swatches row
     const brightRow = document.createElement('div');
-    brightRow.style.cssText = 'display:flex;gap:4px';
+    brightRow.className = 'tp-swatch-row';
     const brightClasses = ['tp-sw-bright-black','tp-sw-bright-red','tp-sw-bright-green','tp-sw-bright-yellow','tp-sw-bright-blue','tp-sw-bright-magenta','tp-sw-bright-cyan','tp-sw-bright-white'];
     for (const cls of brightClasses) {
       const sw = document.createElement('div');
-      sw.className = cls;
-      sw.style.cssText = 'width:16px;height:16px;border-radius:3px;flex-shrink:0';
+      sw.className = cls + ' tp-swatch';
       brightRow.appendChild(sw);
     }
     box.appendChild(brightRow);
