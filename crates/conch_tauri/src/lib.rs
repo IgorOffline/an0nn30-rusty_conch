@@ -12,6 +12,7 @@ pub(crate) mod remote;
 pub(crate) mod settings;
 pub(crate) mod theme;
 pub(crate) mod utf8_stream;
+pub(crate) mod updater;
 pub(crate) mod vault_commands;
 mod watcher;
 
