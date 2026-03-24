@@ -20,5 +20,21 @@ fn main() {
         }
     }
 
+    // Embed git commit hash and build date for the About dialog.
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+    {
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rustc-env=CONCH_GIT_HASH={hash}");
+    }
+    if let Ok(output) = std::process::Command::new("date")
+        .args(["-u", "+%B %d, %Y"])
+        .output()
+    {
+        let date = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rustc-env=CONCH_BUILD_DATE={date}");
+    }
+
     tauri_build::build();
 }

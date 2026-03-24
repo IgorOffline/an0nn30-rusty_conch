@@ -75,6 +75,7 @@ const MENU_ACTION_VAULT_OPEN: &str = "vault-open";
 const MENU_ACTION_KEYGEN_OPEN: &str = "keygen-open";
 const MENU_ACTION_VAULT_LOCK: &str = "vault-lock";
 const MENU_CHECK_UPDATES_ID: &str = "check-for-updates";
+const MENU_ABOUT_ID: &str = "about-conch";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -339,7 +340,7 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
             let app_name = app.package_info().name.clone();
             let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
             let app_menu = Submenu::with_items(app, app_name, true, &[
-                &PredefinedMenuItem::about(app, None, None)?,
+                &MenuItem::with_id(app, MENU_ABOUT_ID, "About Conch", true, None::<&str>)?,
                 &PredefinedMenuItem::separator(app)?,
                 &settings,
                 &check_updates,
@@ -375,6 +376,18 @@ fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json::Value {
         "zen_mode_shortcut": cfg.conch.keyboard.zen_mode,
         "decorations": dec,
         "platform": std::env::consts::OS,
+    })
+}
+
+/// Return build/version info for the About dialog.
+#[tauri::command]
+fn get_about_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("CONCH_GIT_HASH").unwrap_or("dev"),
+        "build_date": option_env!("CONCH_BUILD_DATE").unwrap_or("unknown"),
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
     })
 }
 
@@ -709,7 +722,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             app_name,
             true,
             &[
-                &PredefinedMenuItem::about(app, None, None)?,
+                &MenuItem::with_id(app, MENU_ABOUT_ID, "About Conch", true, None::<&str>)?,
                 &PredefinedMenuItem::separator(app)?,
                 &settings,
                 &check_updates,
@@ -1072,6 +1085,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             MENU_CHECK_UPDATES_ID => {
                 emit_menu_action_to_focused_window(app, "check-for-updates")
             }
+            MENU_ABOUT_ID => {
+                emit_menu_action_to_focused_window(app, "about")
+            }
             MENU_NEW_WINDOW_ID => {
                 if let Err(e) = create_new_window(app) {
                     log::error!("Failed to create window from menu: {e}");
@@ -1144,6 +1160,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             get_theme_colors,
             get_terminal_config,
             get_app_config,
+            get_about_info,
             get_home_dir,
             open_new_window,
             rebuild_menu,

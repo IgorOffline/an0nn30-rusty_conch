@@ -2016,6 +2016,10 @@
           setTimeout(() => fitAndResizeTab(currentTab()), 50);
           return;
         }
+        if (action === 'about') {
+          showAboutDialog();
+          return;
+        }
         if (action === 'check-for-updates') {
           invoke('check_for_update').then(info => {
             if (info) {
@@ -2139,6 +2143,87 @@
 
         buttons.appendChild(laterBtn);
         buttons.appendChild(restartBtn);
+        dialog.appendChild(buttons);
+
+        overlay.appendChild(dialog);
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+      }
+
+      async function showAboutDialog() {
+        let info;
+        try { info = await invoke('get_about_info'); } catch (_) { info = {}; }
+        const ver = info.version || '?';
+        const commit = info.commit || '?';
+        const buildDate = info.build_date || 'unknown';
+        const platform = (info.platform || '?') + ' ' + (info.arch || '');
+
+        const overlay = document.createElement('div');
+        overlay.className = 'ssh-overlay';
+        overlay.id = 'about-overlay';
+
+        const dialog = document.createElement('div');
+        dialog.className = 'ssh-form';
+        dialog.style.width = '460px';
+
+        const title = document.createElement('div');
+        title.className = 'ssh-form-title';
+        title.textContent = 'About Conch';
+        dialog.appendChild(title);
+
+        const body = document.createElement('div');
+        body.style.cssText = 'padding:20px 24px;color:var(--fg);font-size:13px;line-height:1.7';
+
+        const icon = document.createElement('img');
+        icon.src = 'icons/terminal.png';
+        icon.style.cssText = 'width:64px;height:64px;margin-bottom:12px;display:block';
+        body.appendChild(icon);
+
+        const heading = document.createElement('div');
+        heading.style.cssText = 'font-size:18px;font-weight:700;margin-bottom:4px';
+        heading.textContent = 'Conch ' + window.utils.esc(ver);
+        body.appendChild(heading);
+
+        const build = document.createElement('div');
+        build.style.cssText = 'color:var(--text-secondary);font-size:12px;margin-bottom:16px';
+        build.textContent = 'Build #' + window.utils.esc(commit) + ', built on ' + window.utils.esc(buildDate);
+        body.appendChild(build);
+
+        const runtime = document.createElement('div');
+        runtime.style.cssText = 'color:var(--text-secondary);font-size:12px;margin-bottom:16px';
+        runtime.textContent = 'Platform: ' + window.utils.esc(platform);
+        body.appendChild(runtime);
+
+        const license = document.createElement('div');
+        license.style.cssText = 'color:var(--text-secondary);font-size:11px;line-height:1.6';
+        license.innerHTML = 'Licensed under <a href="#" style="color:var(--blue)" onclick="event.preventDefault();if(window.__TAURI__&&window.__TAURI__.shell)window.__TAURI__.shell.open(\'https://www.apache.org/licenses/LICENSE-2.0\')">Apache License 2.0</a><br>'
+          + 'Icons: <a href="#" style="color:var(--blue)" onclick="event.preventDefault();if(window.__TAURI__&&window.__TAURI__.shell)window.__TAURI__.shell.open(\'https://github.com/snwh/paper-icon-theme\')">Paper Icon Theme</a> by Sam Hewitt (<a href="#" style="color:var(--blue)" onclick="event.preventDefault();if(window.__TAURI__&&window.__TAURI__.shell)window.__TAURI__.shell.open(\'https://creativecommons.org/licenses/by-sa/4.0/\')">CC BY-SA 4.0</a>)<br><br>'
+          + 'Copyright \u00A9 2026 Dustin Watts and contributors';
+        body.appendChild(license);
+
+        dialog.appendChild(body);
+
+        const buttons = document.createElement('div');
+        buttons.className = 'ssh-form-buttons';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ssh-form-btn';
+        closeBtn.textContent = 'Close';
+        closeBtn.addEventListener('click', () => overlay.remove());
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'ssh-form-btn primary';
+        copyBtn.textContent = 'Copy Info';
+        copyBtn.addEventListener('click', () => {
+          const text = 'Conch ' + ver + '\nBuild #' + commit + ', built on ' + buildDate + '\nPlatform: ' + platform;
+          navigator.clipboard.writeText(text).then(() => {
+            window.toast.success('Copied', 'Build info copied to clipboard.');
+          });
+          overlay.remove();
+        });
+
+        buttons.appendChild(closeBtn);
+        buttons.appendChild(copyBtn);
         dialog.appendChild(buttons);
 
         overlay.appendChild(dialog);
