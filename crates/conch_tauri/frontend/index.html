@@ -878,6 +878,20 @@
     }
     @keyframes shortcut-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
+    /* -- Theme preview -- */
+    .tp-container {
+      border-radius: 6px; padding: 14px; margin: 8px 0 12px 0;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 12px; line-height: 1.5;
+      border: 1px solid var(--tab-border);
+    }
+    .tp-label { font-size: 9px; letter-spacing: 0.1em; margin-bottom: 8px; text-transform: uppercase; }
+    .tp-cursor { display: inline-block; width: 0.6em; height: 1em; vertical-align: text-bottom; }
+    .tp-swatch-divider { margin: 8px 0 6px 0; border-top: 1px solid var(--tab-border); }
+    .tp-swatch-row { display: flex; gap: 4px; }
+    .tp-swatch-row--normal { margin-bottom: 4px; }
+    .tp-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
+
     /* -- Vault dialog -- */
     .vault-setup-dialog, .vault-unlock-dialog { width: 420px; max-width: 90vw; }
     .vault-spinner {

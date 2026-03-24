@@ -26,7 +26,18 @@ pub(crate) struct ThemeColors {
 
 fn darken(hex: &str, amount: i32) -> String {
     let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 { return format!("#{hex}"); }
+    // Expand 3-char shorthand (#fff -> ffffff)
+    let hex = if hex.len() == 3 {
+        let b: Vec<u8> = hex.bytes().collect();
+        format!(
+            "{0}{0}{1}{1}{2}{2}",
+            b[0] as char, b[1] as char, b[2] as char
+        )
+    } else if hex.len() < 6 {
+        return format!("#{hex}");
+    } else {
+        hex.to_string()
+    };
     let r = i32::from_str_radix(&hex[0..2], 16).unwrap_or(0);
     let g = i32::from_str_radix(&hex[2..4], 16).unwrap_or(0);
     let b = i32::from_str_radix(&hex[4..6], 16).unwrap_or(0);
@@ -40,9 +51,8 @@ fn lighten(hex: &str, amount: i32) -> String {
     darken(hex, -amount)
 }
 
-pub(crate) fn resolve_theme_colors(config: &UserConfig) -> ThemeColors {
-    let scheme = conch_core::color_scheme::resolve_theme(&config.colors.theme);
-
+/// Resolve theme colors from a pre-loaded ColorScheme (no config needed).
+pub(crate) fn resolve_theme_colors_from_scheme(scheme: &conch_core::color_scheme::ColorScheme) -> ThemeColors {
     let bg = &scheme.primary.background;
     let fg = &scheme.primary.foreground;
     let cursor = scheme.cursor.as_ref();
@@ -77,5 +87,77 @@ pub(crate) fn resolve_theme_colors(config: &UserConfig) -> ThemeColors {
         tab_border: lighten(bg, 18),
         input_bg: lighten(bg, 10),
         active_highlight: lighten(bg, 28),
+    }
+}
+
+pub(crate) fn resolve_theme_colors(config: &UserConfig) -> ThemeColors {
+    let scheme = conch_core::color_scheme::resolve_theme(&config.colors.theme);
+    resolve_theme_colors_from_scheme(&scheme)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conch_core::color_scheme::ColorScheme;
+
+    #[test]
+    fn resolve_from_scheme_uses_primary_colors() {
+        let scheme = ColorScheme::default(); // Dracula
+        let tc = resolve_theme_colors_from_scheme(&scheme);
+        assert_eq!(tc.background, "#282a36");
+        assert_eq!(tc.foreground, "#f8f8f2");
+    }
+
+    #[test]
+    fn resolve_from_scheme_derives_panel_colors() {
+        let scheme = ColorScheme::default();
+        let tc = resolve_theme_colors_from_scheme(&scheme);
+        // panel_bg should be darker than background
+        assert_ne!(tc.panel_bg, tc.background);
+        // tab_bar_bg should be darker than panel_bg
+        assert_ne!(tc.tab_bar_bg, tc.panel_bg);
+        // input_bg should be lighter than background
+        assert_ne!(tc.input_bg, tc.background);
+    }
+
+    #[test]
+    fn resolve_from_scheme_maps_ansi_colors() {
+        let scheme = ColorScheme::default();
+        let tc = resolve_theme_colors_from_scheme(&scheme);
+        assert_eq!(tc.red, "#ff5555");
+        assert_eq!(tc.green, "#50fa7b");
+        assert_eq!(tc.bright_red, "#ff6e6e");
+        assert_eq!(tc.bright_green, "#69ff94");
+    }
+
+    #[test]
+    fn resolve_from_scheme_handles_cursor_colors() {
+        let scheme = ColorScheme::default(); // has cursor colors
+        let tc = resolve_theme_colors_from_scheme(&scheme);
+        assert_eq!(tc.cursor_text, "#282a36");
+        assert_eq!(tc.cursor_color, "#f8f8f2");
+    }
+
+    #[test]
+    fn resolve_from_scheme_fallback_when_no_cursor() {
+        let mut scheme = ColorScheme::default();
+        scheme.cursor = None;
+        let tc = resolve_theme_colors_from_scheme(&scheme);
+        // Falls back to bg/fg
+        assert_eq!(tc.cursor_text, scheme.primary.background);
+        assert_eq!(tc.cursor_color, scheme.primary.foreground);
+    }
+
+    #[test]
+    fn darken_expands_three_char_hex() {
+        // #fff should expand to #ffffff then darken by 10
+        let result = darken("#fff", 10);
+        assert_eq!(result, "#f5f5f5");
+    }
+
+    #[test]
+    fn lighten_expands_three_char_hex() {
+        let result = lighten("#000", 10);
+        assert_eq!(result, "#0a0a0a");
     }
 }
