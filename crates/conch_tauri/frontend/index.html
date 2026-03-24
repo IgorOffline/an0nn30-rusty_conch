@@ -2154,8 +2154,9 @@
         let info;
         try { info = await invoke('get_about_info'); } catch (_) { info = {}; }
         const ver = info.version || '?';
-        const commit = info.commit || '?';
-        const buildDate = info.build_date || 'unknown';
+        const commit = (info.commit || 'dev').substring(0, 7);
+        const rawDate = info.build_date || '';
+        const buildDate = rawDate ? new Date(rawDate).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : 'unknown';
         const platform = (info.platform || '?') + ' ' + (info.arch || '');
 
         const overlay = document.createElement('div');

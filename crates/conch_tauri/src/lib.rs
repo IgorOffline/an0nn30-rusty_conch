@@ -380,12 +380,13 @@ fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json::Value {
 }
 
 /// Return build/version info for the About dialog.
+/// Build metadata is embedded at compile time by vergen-git2.
 #[tauri::command]
 fn get_about_info() -> serde_json::Value {
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "commit": option_env!("CONCH_GIT_HASH").unwrap_or("dev"),
-        "build_date": option_env!("CONCH_BUILD_DATE").unwrap_or("unknown"),
+        "commit": option_env!("VERGEN_GIT_SHA").unwrap_or("dev"),
+        "build_date": option_env!("VERGEN_GIT_COMMIT_TIMESTAMP").unwrap_or("unknown"),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
     })
