@@ -444,18 +444,24 @@
       if (t === pendingSettings.colors.theme) opt.selected = true;
       themeSelect.appendChild(opt);
     }
-    themeSelect.addEventListener('change', () => {
-      pendingSettings.colors.theme = themeSelect.value;
-    });
     addRow(c, 'Theme', 'Color theme for the terminal and UI', themeSelect);
 
     // Theme preview box
     const previewBox = buildThemePreview();
     c.appendChild(previewBox);
-    invoke('get_theme_colors').then(tc => updateThemePreview(previewBox, tc)).catch(() => {});
+
+    // Initialize preview from pending selection (not persisted config)
+    let previewSeq = 0;
+    invoke('preview_theme_colors', { name: pendingSettings.colors.theme })
+      .then(tc => updateThemePreview(previewBox, tc))
+      .catch(() => {});
+
+    // Single change handler: update pending + preview with race guard
     themeSelect.addEventListener('change', () => {
+      pendingSettings.colors.theme = themeSelect.value;
+      const seq = ++previewSeq;
       invoke('preview_theme_colors', { name: themeSelect.value })
-        .then(tc => updateThemePreview(previewBox, tc))
+        .then(tc => { if (seq === previewSeq) updateThemePreview(previewBox, tc); })
         .catch(() => {});
     });
 
