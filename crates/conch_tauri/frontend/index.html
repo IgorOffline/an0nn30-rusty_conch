@@ -1425,7 +1425,8 @@
         });
         const fitAddon = new FitAddon.FitAddon();
         term.loadAddon(fitAddon);
-        term.loadAddon(new WebLinksAddon.WebLinksAddon((_event, uri) => {
+        term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
+          if (!event.metaKey && !event.ctrlKey) return;
           if (tauri.shell && tauri.shell.open) {
             tauri.shell.open(uri);
           } else {
