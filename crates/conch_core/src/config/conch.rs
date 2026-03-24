@@ -139,6 +139,10 @@ pub struct UiConfig {
     pub font_size: f32,
     pub font: UiFontConfig,
     pub native_menu_bar: bool,
+    /// Where toast notifications appear: "bottom" or "top".
+    pub notification_position: String,
+    /// Use native OS notifications when the app is not focused.
+    pub native_notifications: bool,
 }
 
 impl Default for UiConfig {
@@ -148,6 +152,8 @@ impl Default for UiConfig {
             font_size: 13.0,
             font: UiFontConfig::default(),
             native_menu_bar: true,
+            notification_position: "bottom".into(),
+            native_notifications: true,
         }
     }
 }
@@ -275,6 +281,25 @@ mod tests {
         let toml_str = r#"native_menu_bar = true"#;
         let cfg: UiConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.font, UiFontConfig::default());
+    }
+
+    #[test]
+    fn notification_position_defaults_to_bottom() {
+        let cfg = UiConfig::default();
+        assert_eq!(cfg.notification_position, "bottom");
+    }
+
+    #[test]
+    fn native_notifications_defaults_to_true() {
+        let cfg = UiConfig::default();
+        assert!(cfg.native_notifications);
+    }
+
+    #[test]
+    fn ui_config_serde_default_fills_notification_fields() {
+        let cfg: UiConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.notification_position, "bottom");
+        assert!(cfg.native_notifications);
     }
 
     #[test]

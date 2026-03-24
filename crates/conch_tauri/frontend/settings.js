@@ -472,6 +472,37 @@
 
     addDivider(c);
 
+    // Sub-group: Notifications
+    addSectionLabel(c, 'Notifications');
+
+    // Notification position toggle
+    const posOptions = ['Bottom', 'Top'];
+    const posGroup = document.createElement('div');
+    posGroup.className = 'settings-toggle-group';
+    for (const pos of posOptions) {
+      const btn = document.createElement('button');
+      btn.className = 'settings-toggle';
+      if ((pendingSettings.conch.ui.notification_position || 'bottom').toLowerCase() === pos.toLowerCase()) btn.classList.add('active');
+      btn.textContent = pos;
+      btn.addEventListener('click', () => {
+        pendingSettings.conch.ui.notification_position = pos.toLowerCase();
+        for (const b of posGroup.querySelectorAll('.settings-toggle')) {
+          b.classList.toggle('active', b.textContent === pos);
+        }
+      });
+      posGroup.appendChild(btn);
+    }
+    addRow(c, 'Notification Position', 'Where toast notifications appear on screen', posGroup);
+
+    // Native notifications toggle
+    const nativeSwitch = makeSwitch(
+      pendingSettings.conch.ui.native_notifications !== false,
+      (val) => { pendingSettings.conch.ui.native_notifications = val; }
+    );
+    addRow(c, 'Native notifications', 'Use system notifications when the app is not focused', nativeSwitch);
+
+    addDivider(c);
+
     // Sub-group: Window
     addSectionLabel(c, 'Window');
 
@@ -1221,10 +1252,10 @@
       const result = await invoke('save_settings', { settings: pendingSettings });
       close();
       if (result && result.restart_required) {
-        window.toast && window.toast.show('Some changes require a restart to take effect', 'info', 5000);
+        if (window.toast) window.toast.warn('Restart Required', 'Some changes require a restart to take effect.');
       }
     } catch (e) {
-      window.toast && window.toast.show('Failed to save settings: ' + e, 'error');
+      if (window.toast) window.toast.error('Settings Error', 'Failed to save settings: ' + e);
     }
   }
 

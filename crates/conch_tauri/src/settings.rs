@@ -118,6 +118,17 @@ pub(crate) fn needs_restart(old: &UserConfig, new: &UserConfig) -> bool {
         return true;
     }
 
+    // UI chrome fonts
+    if old.conch.ui.font.small != new.conch.ui.font.small {
+        return true;
+    }
+    if old.conch.ui.font.list != new.conch.ui.font.list {
+        return true;
+    }
+    if old.conch.ui.font.normal != new.conch.ui.font.normal {
+        return true;
+    }
+
     // Plugins
     if old.conch.plugins.enabled != new.conch.plugins.enabled {
         return true;
@@ -197,6 +208,14 @@ mod tests {
         let a = UserConfig::default();
         let mut b = UserConfig::default();
         b.conch.plugins.enabled = false;
+        assert!(needs_restart(&a, &b));
+    }
+
+    #[test]
+    fn changed_ui_font_needs_restart() {
+        let a = UserConfig::default();
+        let mut b = UserConfig::default();
+        b.conch.ui.font.small = 10.0;
         assert!(needs_restart(&a, &b));
     }
 

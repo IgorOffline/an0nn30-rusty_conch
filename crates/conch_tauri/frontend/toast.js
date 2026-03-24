@@ -1,28 +1,76 @@
 // Global toast notification system.
-// Matches the transfer progress toast visual style.
+// Supports configurable position (top/bottom) and native OS notifications
+// when the app is out of focus.
 
 (function (exports) {
   'use strict';
 
   let toastContainer = null;
+  let position = 'bottom'; // 'top' or 'bottom'
+  let nativeNotificationsEnabled = true;
 
   function ensureContainer() {
     if (toastContainer) return;
     toastContainer = document.createElement('div');
     toastContainer.id = 'toast-container';
+    applyPosition();
     document.body.appendChild(toastContainer);
+  }
+
+  function applyPosition() {
+    if (!toastContainer) return;
+    if (position === 'top') {
+      toastContainer.style.bottom = '';
+      toastContainer.style.top = '16px';
+      toastContainer.style.flexDirection = 'column';
+    } else {
+      toastContainer.style.top = '';
+      toastContainer.style.bottom = '16px';
+      toastContainer.style.flexDirection = 'column-reverse';
+    }
+  }
+
+  /**
+   * Configure toast behavior.
+   * @param {Object} opts
+   * @param {'top'|'bottom'} [opts.position] — Where toasts appear
+   * @param {boolean} [opts.nativeNotifications] — Use native OS notifications when unfocused
+   */
+  function configure(opts) {
+    if (opts.position && (opts.position === 'top' || opts.position === 'bottom')) {
+      position = opts.position;
+      applyPosition();
+    }
+    if (typeof opts.nativeNotifications === 'boolean') {
+      nativeNotificationsEnabled = opts.nativeNotifications;
+    }
   }
 
   /**
    * Show a toast notification.
+   * If native notifications are enabled and the window is not focused,
+   * sends a native OS notification instead of an in-app toast.
    * @param {Object} opts
    * @param {string} opts.title    — Bold header text
    * @param {string} [opts.body]   — Optional detail text below the title
    * @param {'info'|'success'|'error'|'warn'} [opts.level='info']
    * @param {number} [opts.duration=4000] — Auto-dismiss ms (0 = sticky)
-   * @returns {HTMLElement} the toast element (for manual removal)
+   * @param {Object} [opts.action] — Action button {label, callback}
+   * @param {boolean} [opts.forceInApp=false] — Always show in-app (skip native)
+   * @returns {HTMLElement|null} the toast element (null if sent as native notification)
    */
   function show(opts) {
+    // Try native notification if window is not focused
+    if (!opts.forceInApp && nativeNotificationsEnabled && !document.hasFocus()) {
+      if (sendNativeNotification(opts.title, opts.body)) {
+        return null;
+      }
+    }
+
+    return showInApp(opts);
+  }
+
+  function showInApp(opts) {
     ensureContainer();
 
     const level = opts.level || 'info';
@@ -73,6 +121,22 @@
     return toast;
   }
 
+  function sendNativeNotification(title, body) {
+    try {
+      const tauri = window.__TAURI__;
+      if (tauri && tauri.notification) {
+        tauri.notification.sendNotification({
+          title: title || 'Conch',
+          body: body || '',
+        });
+        return true;
+      }
+    } catch (_) {
+      // Fall through to in-app toast
+    }
+    return false;
+  }
+
   function dismiss(toast) {
     if (!toast || !toast.parentNode) return;
     clearTimeout(toast._timeout);
@@ -88,5 +152,5 @@
 
   const esc = window.utils.esc;
 
-  exports.toast = { show, dismiss, info, success, error, warn };
+  exports.toast = { show, showInApp, dismiss, configure, info, success, error, warn };
 })(window);

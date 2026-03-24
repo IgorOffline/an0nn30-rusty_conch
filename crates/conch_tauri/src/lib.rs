@@ -376,6 +376,8 @@ fn get_app_config(state: tauri::State<'_, TauriState>) -> serde_json::Value {
         "zen_mode_shortcut": cfg.conch.keyboard.zen_mode,
         "decorations": dec,
         "platform": std::env::consts::OS,
+        "notification_position": cfg.conch.ui.notification_position,
+        "native_notifications": cfg.conch.ui.native_notifications,
     })
 }
 
@@ -889,6 +891,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             config: Mutex::new(config),
