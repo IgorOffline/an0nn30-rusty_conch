@@ -27,6 +27,7 @@ use remote::RemoteState;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_updater::UpdaterExt;
 
 /// Convert the user's appearance mode to a Tauri window theme.
 fn appearance_to_theme(mode: &conch_core::config::AppearanceMode) -> Option<tauri::Theme> {
@@ -73,6 +74,7 @@ const MENU_VAULT_LOCK_ID: &str = "tools.lock_vault";
 const MENU_ACTION_VAULT_OPEN: &str = "vault-open";
 const MENU_ACTION_KEYGEN_OPEN: &str = "keygen-open";
 const MENU_ACTION_VAULT_LOCK: &str = "vault-lock";
+const MENU_CHECK_UPDATES_ID: &str = "check-for-updates";
 
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -335,10 +337,12 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         #[cfg(target_os = "macos")]
         {
             let app_name = app.package_info().name.clone();
+            let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
             let app_menu = Submenu::with_items(app, app_name, true, &[
                 &PredefinedMenuItem::about(app, None, None)?,
                 &PredefinedMenuItem::separator(app)?,
                 &settings,
+                &check_updates,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::hide(app, None)?,
                 &PredefinedMenuItem::hide_others(app, None)?,
@@ -351,8 +355,10 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         #[cfg(not(target_os = "macos"))]
         {
             let separator3 = PredefinedMenuItem::separator(app)?;
+            let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
+            let help_menu = Submenu::with_items(app, "Help", true, &[&check_updates])?;
             let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &settings, &separator3, &close_tab, &close_window])?;
-            return Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &new_tools, &window_menu]);
+            return Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &new_tools, &window_menu, &help_menu]);
         }
     }
 
@@ -697,6 +703,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     #[cfg(target_os = "macos")]
     {
         let app_name = app.package_info().name.clone();
+        let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
         let app_menu = Submenu::with_items(
             app,
             app_name,
@@ -705,6 +712,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
                 &PredefinedMenuItem::about(app, None, None)?,
                 &PredefinedMenuItem::separator(app)?,
                 &settings,
+                &check_updates,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::hide(app, None)?,
                 &PredefinedMenuItem::hide_others(app, None)?,
@@ -721,13 +729,15 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     #[cfg(not(target_os = "macos"))]
     {
         let separator3 = PredefinedMenuItem::separator(app)?;
+        let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
+        let help_menu = Submenu::with_items(app, "Help", true, &[&check_updates])?;
         let file_menu = Submenu::with_items(
             app,
             "File",
             true,
             &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &settings, &separator3, &close_tab, &close_window],
         )?;
-        Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu])
+        Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu, &help_menu])
     }
 }
 
@@ -863,6 +873,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
             config: Mutex::new(config),
@@ -870,6 +882,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         .manage(Arc::clone(&remote_state))
         .manage(Arc::clone(&plugin_state))
         .manage(Arc::clone(&vault_state))
+        .manage(updater::PendingUpdate::new())
         .setup(move |app| {
             let kb_config = config::load_user_config()
                 .map(|c| c.conch.keyboard)
@@ -988,6 +1001,36 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 }
             }
 
+            // Auto-check for updates on startup (macOS/Windows only)
+            if cfg!(not(target_os = "linux")) {
+                let check_enabled = conch_core::config::load_user_config()
+                    .map(|c| c.conch.check_for_updates)
+                    .unwrap_or(true);
+                if check_enabled {
+                    let app_handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        let update = match app_handle.updater() {
+                            Ok(u) => u.check().await,
+                            Err(e) => { log::warn!("Startup updater init failed: {e}"); return; }
+                        };
+                        match update {
+                            Ok(Some(update)) => {
+                                let info = updater::UpdateInfo {
+                                    version: update.version.clone(),
+                                    body: update.body.clone(),
+                                };
+                                let pending = app_handle.state::<updater::PendingUpdate>();
+                                *pending.0.lock() = Some(update);
+                                let _ = app_handle.emit("update-available", &info);
+                            }
+                            Ok(None) => log::debug!("No updates available"),
+                            Err(e) => log::warn!("Startup update check failed: {e}"),
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1025,6 +1068,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             }
             MENU_VAULT_LOCK_ID => {
                 emit_menu_action_to_focused_window(app, MENU_ACTION_VAULT_LOCK)
+            }
+            MENU_CHECK_UPDATES_ID => {
+                emit_menu_action_to_focused_window(app, "check-for-updates")
             }
             MENU_NEW_WINDOW_ID => {
                 if let Err(e) = create_new_window(app) {
@@ -1175,6 +1221,9 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             vault_commands::vault_list_keys,
             vault_commands::vault_delete_key,
             vault_commands::vault_migrate_legacy,
+            updater::check_for_update,
+            updater::install_update,
+            updater::restart_app,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("Tauri error: {e}"))?;
