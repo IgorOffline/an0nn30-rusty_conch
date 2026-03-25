@@ -8,7 +8,9 @@
    */
   function renderTree(tree, getPaneEl) {
     if (tree.type === 'leaf') {
-      return getPaneEl(tree.paneId);
+      var el = getPaneEl(tree.paneId);
+      el.style.flex = '1';
+      return el;
     }
 
     const container = document.createElement('div');
