@@ -1352,6 +1352,8 @@
           pane.term.focus();
           const tab = tabs.get(pane.tabId);
           if (tab) tab.focusedPaneId = paneId;
+          // Notify files panel so SFTP routing follows the focused pane.
+          if (window.filesPanel) window.filesPanel.onTabChanged(pane);
         }
       }
 
@@ -2017,10 +2019,14 @@
         // Re-render (preserves existing pane elements).
         rebuildTreeDOM(tab);
 
-        // Refocus.
+        // Refocus — handle both active and background tab cases.
         if (focusedPaneId === paneId) {
           const firstId = window.splitTree.firstLeaf(tab.treeRoot);
           setFocusedPane(firstId);
+        } else if (tab.focusedPaneId === paneId) {
+          // Background tab had this pane focused — update to a valid pane
+          // so activateTab doesn't restore a stale ID.
+          tab.focusedPaneId = window.splitTree.firstLeaf(tab.treeRoot);
         }
       }
 
