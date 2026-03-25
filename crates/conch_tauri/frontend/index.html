@@ -187,7 +187,7 @@
       flex: 1 1 0;
       min-width: 0;
       max-width: none;
-      padding: 0 12px;
+      padding: 0 4px 0 12px;
       border: 1px solid var(--tab-border);
       border-left-width: 0;
       border-bottom: none;
@@ -195,11 +195,10 @@
       background: var(--input-bg);
       color: var(--text-secondary);
       font-size: var(--ui-font-small); line-height: 1.1; font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
-      text-align: center;
       cursor: pointer;
       white-space: nowrap;
       overflow: hidden;
-      text-overflow: ellipsis;
+      display: flex; align-items: center; gap: 4px;
       opacity: 1;
       transform: translateY(0) scaleY(1);
       transform-origin: top center;
@@ -217,6 +216,12 @@
       opacity: 0;
       transform: translateY(-8px) scaleY(0.88);
     }
+    .tab-btn-label { flex: 1; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+    .tab-btn-close {
+      flex-shrink: 0; border: none; background: none; color: var(--text-muted);
+      cursor: pointer; padding: 2px 4px; border-radius: 3px; font-size: 11px; line-height: 1;
+    }
+    .tab-btn-close:hover { background: var(--active-highlight); color: var(--fg); }
     .tab-btn.active {
       background: var(--bg);
       color: var(--fg);
@@ -1482,7 +1487,7 @@
           const newLabel = 'Tab ' + n;
           tab.label = newLabel;
           if (!tab.hasCustomTitle) {
-            tab.button.textContent = newLabel;
+            setTabLabel(tab.button, newLabel);
             tab.button.title = newLabel;
           }
           n++;
@@ -1552,14 +1557,40 @@
         }
       }
 
+      function makeTabButton(label, onClose) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'tab-btn';
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'tab-btn-label';
+        labelSpan.textContent = label;
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'tab-btn-close';
+        closeBtn.textContent = '\u2715';
+        closeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          onClose();
+        });
+        button.appendChild(labelSpan);
+        button.appendChild(closeBtn);
+        button._labelSpan = labelSpan;
+        return button;
+      }
+
+      function setTabLabel(button, text) {
+        if (button._labelSpan) button._labelSpan.textContent = text;
+        else button.textContent = text;
+      }
+
+      function getTabLabel(button) {
+        return button._labelSpan ? button._labelSpan.textContent : button.textContent;
+      }
+
       async function createTab() {
         const tabId = nextTabId++;
         const label = 'Tab ' + nextTabLabel++;
 
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'tab-btn';
-        button.textContent = label;
+        const button = makeTabButton(label, () => closeTab(tabId));
         button.classList.add('entering');
 
         const root = document.createElement('div');
@@ -1595,7 +1626,7 @@
         term.onTitleChange((title) => {
           const tabTitle = normalizeTabTitle(title, tab.label);
           tab.hasCustomTitle = true;
-          tab.button.textContent = tabTitle;
+          setTabLabel(tab.button, tabTitle);
           tab.button.title = tabTitle;
         });
         term.onData((data) => {
@@ -1629,10 +1660,7 @@
         const tabId = nextTabId++;
         const label = opts.spec || 'SSH';
 
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'tab-btn';
-        button.textContent = label;
+        const button = makeTabButton(label, () => closeTab(tabId));
         button.classList.add('entering');
 
         const root = document.createElement('div');
@@ -1665,7 +1693,7 @@
         term.onTitleChange((title) => {
           const tabTitle = normalizeTabTitle(title, tab.label);
           tab.hasCustomTitle = true;
-          tab.button.textContent = tabTitle;
+          setTabLabel(tab.button, tabTitle);
           tab.button.title = tabTitle;
         });
         term.onData((data) => {
@@ -1709,7 +1737,7 @@
           }
 
           tab.spawned = true;
-          tab.label = button.textContent || label;
+          tab.label = getTabLabel(button) || label;
           fitAndResizeTab(tab);
           // Refresh the SSH panel session list
           if (window.sshPanel) window.sshPanel.refreshSessions();
