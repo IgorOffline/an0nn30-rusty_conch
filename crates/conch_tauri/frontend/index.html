@@ -2611,6 +2611,19 @@
         }
       });
 
+      // Pane navigation: Cmd+Alt+Arrow (Mac) / Ctrl+Alt+Arrow (other) to move focus between split panes.
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.altKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          const dir = e.key.replace('Arrow', '').toLowerCase();
+          const tab = tabs.get(activeTabId);
+          if (!tab || focusedPaneId == null) return;
+          const adj = window.splitPane.findAdjacentPane(focusedPaneId, dir, tab.containerEl);
+          if (adj != null) setFocusedPane(adj);
+        }
+      }, true); // capture phase
+
       // Re-fetch theme when settings are applied.
       listenOnCurrentWindow('config-changed', async () => {
         try {
