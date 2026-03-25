@@ -2800,6 +2800,15 @@
         }
       }, true); // capture phase
 
+      // Rename tab: F2 (capture phase so it fires before xterm.js consumes it).
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'F2' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          renameActiveTab();
+        }
+      }, true);
+
       // Re-fetch theme when settings are applied.
       listenOnCurrentWindow('config-changed', async () => {
         try {
