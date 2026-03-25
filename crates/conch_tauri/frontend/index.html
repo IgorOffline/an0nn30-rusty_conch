@@ -1912,6 +1912,48 @@
         containerEl.appendChild(rendered);
       }
 
+      function closePane(paneId) {
+        const pane = panes.get(paneId);
+        if (!pane) return;
+
+        const tab = tabs.get(pane.tabId);
+        if (!tab) return;
+
+        // If this is the last pane in the tab, close the tab.
+        if (window.splitTree.leafCount(tab.treeRoot) <= 1) {
+          closeTab(tab.id);
+          return;
+        }
+
+        // Terminate the backend session (only if still running).
+        if (pane.spawned) {
+          if (pane.type === 'ssh') {
+            invoke('ssh_disconnect', { paneId }).catch(() => {});
+          } else {
+            invoke('close_pty', { paneId }).catch(() => {});
+          }
+        }
+
+        // Dispose xterm and observers.
+        if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
+        if (pane.resizeObserver) pane.resizeObserver.disconnect();
+        pane.term.dispose();
+        pane.root.remove();
+        panes.delete(paneId);
+
+        // Remove from tree and simplify.
+        tab.treeRoot = window.splitTree.removeLeaf(tab.treeRoot, paneId);
+
+        // Re-render (preserves existing pane elements).
+        rebuildTreeDOM(tab);
+
+        // Refocus.
+        if (focusedPaneId === paneId) {
+          const firstId = window.splitTree.firstLeaf(tab.treeRoot);
+          setFocusedPane(firstId);
+        }
+      }
+
       async function splitPane(direction) {
         const pane = currentPane();
         if (!pane) return;
@@ -2205,14 +2247,13 @@
         const paneId = payload.pane_id;
         if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) return;
         if (typeof paneId !== 'number') return;
-        // For now, close the tab that contains this pane
         const pane = panes.get(paneId);
         if (!pane) return;
-        closeTab(pane.tabId, { notifyBackend: false }).then(() => {
-          if (window.sshPanel) window.sshPanel.refreshSessions();
-        }).catch((e) => {
-          console.error('closeTab after pty-exit failed:', e);
-        });
+        // Mark as not spawned so closePane skips the redundant backend disconnect
+        // (backend already exited — that's why we received pty-exit).
+        pane.spawned = false;
+        closePane(paneId);
+        if (window.sshPanel) window.sshPanel.refreshSessions();
       });
 
       // Shared menu action handler — used by both the native menu event
