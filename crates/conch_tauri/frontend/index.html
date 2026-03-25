@@ -2343,6 +2343,18 @@
           invoke('set_zoom_level', { scaleFactor: 1.0 }).catch(() => {});
           return;
         }
+        if (action === 'split-vertical') {
+          splitPane('vertical').catch((e) => showStatus('Split failed: ' + String(e)));
+          return;
+        }
+        if (action === 'split-horizontal') {
+          splitPane('horizontal').catch((e) => showStatus('Split failed: ' + String(e)));
+          return;
+        }
+        if (action === 'close-pane' && focusedPaneId != null) {
+          closePane(focusedPaneId);
+          return;
+        }
         // Toggle bottom panel (placeholder — no bottom panel content yet).
         if (action === 'toggle-bottom-panel') {
           const bp = document.getElementById('bottom-panel');
