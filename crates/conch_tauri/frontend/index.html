@@ -788,6 +788,44 @@
     .terminal-pane.active {
       display: block;
     }
+    /* --- Split pane layout --- */
+    .tab-tree-root {
+      position: absolute;
+      inset: 0;
+      display: none;
+    }
+    .tab-tree-root.active {
+      display: flex;
+    }
+    .split-container {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .split-divider {
+      flex-shrink: 0;
+      background: var(--border);
+      z-index: 1;
+    }
+    .split-divider.vertical {
+      width: 4px;
+      cursor: col-resize;
+    }
+    .split-divider.horizontal {
+      height: 4px;
+      cursor: row-resize;
+    }
+    .split-divider:hover {
+      background: var(--blue);
+    }
+    .terminal-pane.focused {
+      border-top: 2px solid var(--blue);
+    }
+    .terminal-pane:not(.focused) {
+      border-top: 2px solid transparent;
+    }
     #status {
       position: fixed;
       top: 12px;
