@@ -76,9 +76,9 @@ const MENU_ACTION_KEYGEN_OPEN: &str = "keygen-open";
 const MENU_ACTION_VAULT_LOCK: &str = "vault-lock";
 const MENU_CHECK_UPDATES_ID: &str = "check-for-updates";
 const MENU_ABOUT_ID: &str = "about-conch";
-const MENU_SPLIT_VERTICAL_ID: &str = "shell.split_vertical";
-const MENU_SPLIT_HORIZONTAL_ID: &str = "shell.split_horizontal";
-const MENU_CLOSE_PANE_ID: &str = "shell.close_pane";
+const MENU_SPLIT_VERTICAL_ID: &str = "view.split_vertical";
+const MENU_SPLIT_HORIZONTAL_ID: &str = "view.split_horizontal";
+const MENU_CLOSE_PANE_ID: &str = "view.close_pane";
 const MENU_ACTION_SPLIT_VERTICAL: &str = "split-vertical";
 const MENU_ACTION_SPLIT_HORIZONTAL: &str = "split-horizontal";
 const MENU_ACTION_CLOSE_PANE: &str = "close-pane";
@@ -326,25 +326,20 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
         let zoom_in = MenuItem::with_id(app, MENU_ZOOM_IN_ID, "Zoom In", true, Some("CmdOrCtrl+="))?;
         let zoom_out = MenuItem::with_id(app, MENU_ZOOM_OUT_ID, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
         let zoom_reset = MenuItem::with_id(app, MENU_ZOOM_RESET_ID, "Reset Zoom", true, Some("CmdOrCtrl+0"))?;
-        let view_menu = Submenu::with_items(app, "View", true, &[
-            &toggle_left, &toggle_right, &toggle_bottom,
-            &PredefinedMenuItem::separator(app)?,
-            &focus_sessions, &zen_mode,
-            &PredefinedMenuItem::separator(app)?,
-            &zoom_in, &zoom_out, &zoom_reset,
-        ])?;
-
-        // Shell menu — split pane actions
         let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
         let split_v = MenuItem::with_id(app, MENU_SPLIT_VERTICAL_ID, "Split Pane Vertically", true, Some(&split_v_accel))?;
         let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
         let split_h = MenuItem::with_id(app, MENU_SPLIT_HORIZONTAL_ID, "Split Pane Horizontally", true, Some(&split_h_accel))?;
         let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
         let close_pane_item = MenuItem::with_id(app, MENU_CLOSE_PANE_ID, "Close Pane", true, Some(&close_pane_accel))?;
-        let shell_menu = Submenu::with_items(app, "Shell", true, &[
-            &split_v, &split_h,
+        let view_menu = Submenu::with_items(app, "View", true, &[
+            &toggle_left, &toggle_right, &toggle_bottom,
             &PredefinedMenuItem::separator(app)?,
-            &close_pane_item,
+            &split_v, &split_h, &close_pane_item,
+            &PredefinedMenuItem::separator(app)?,
+            &focus_sessions, &zen_mode,
+            &PredefinedMenuItem::separator(app)?,
+            &zoom_in, &zoom_out, &zoom_reset,
         ])?;
 
         let window_menu = Submenu::with_items(app, "Window", true, &[
@@ -369,7 +364,7 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::quit(app, None)?,
             ])?;
-            return Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &shell_menu, &view_menu, &new_tools, &window_menu]);
+            return Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &new_tools, &window_menu]);
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -378,7 +373,7 @@ fn build_app_menu_with_plugins<R: tauri::Runtime>(
             let check_updates = MenuItem::with_id(app, MENU_CHECK_UPDATES_ID, "Check for Updates\u{2026}", true, None::<&str>)?;
             let help_menu = Submenu::with_items(app, "Help", true, &[&check_updates])?;
             let file_menu = Submenu::with_items(app, "File", true, &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &settings, &separator3, &close_tab, &close_window])?;
-            return Menu::with_items(app, &[&file_menu, &edit_menu, &shell_menu, &view_menu, &new_tools, &window_menu, &help_menu]);
+            return Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &new_tools, &window_menu, &help_menu]);
         }
     }
 
@@ -679,6 +674,12 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     let zoom_reset = MenuItem::with_id(app, MENU_ZOOM_RESET_ID, "Reset Zoom", true, Some("CmdOrCtrl+0"))?;
     let toggle_bottom_accel = config_key_to_accelerator(&keyboard.toggle_bottom_panel);
     let toggle_bottom = MenuItem::with_id(app, "view.toggle_bottom_panel", "Toggle Bottom Panel", true, Some(&toggle_bottom_accel))?;
+    let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
+    let split_v = MenuItem::with_id(app, MENU_SPLIT_VERTICAL_ID, "Split Pane Vertically", true, Some(&split_v_accel))?;
+    let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
+    let split_h = MenuItem::with_id(app, MENU_SPLIT_HORIZONTAL_ID, "Split Pane Horizontally", true, Some(&split_h_accel))?;
+    let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
+    let close_pane_item = MenuItem::with_id(app, MENU_CLOSE_PANE_ID, "Close Pane", true, Some(&close_pane_accel))?;
     let view_menu = Submenu::with_items(
         app,
         "View",
@@ -686,24 +687,13 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         &[
             &toggle_left, &toggle_right, &toggle_bottom,
             &PredefinedMenuItem::separator(app)?,
+            &split_v, &split_h, &close_pane_item,
+            &PredefinedMenuItem::separator(app)?,
             &focus_sessions, &zen_mode,
             &PredefinedMenuItem::separator(app)?,
             &zoom_in, &zoom_out, &zoom_reset,
         ],
     )?;
-
-    // Shell menu — split pane actions
-    let split_v_accel = config_key_to_accelerator(&keyboard.split_vertical);
-    let split_v = MenuItem::with_id(app, MENU_SPLIT_VERTICAL_ID, "Split Pane Vertically", true, Some(&split_v_accel))?;
-    let split_h_accel = config_key_to_accelerator(&keyboard.split_horizontal);
-    let split_h = MenuItem::with_id(app, MENU_SPLIT_HORIZONTAL_ID, "Split Pane Horizontally", true, Some(&split_h_accel))?;
-    let close_pane_accel = config_key_to_accelerator(&keyboard.close_pane);
-    let close_pane_item = MenuItem::with_id(app, MENU_CLOSE_PANE_ID, "Close Pane", true, Some(&close_pane_accel))?;
-    let shell_menu = Submenu::with_items(app, "Shell", true, &[
-        &split_v, &split_h,
-        &PredefinedMenuItem::separator(app)?,
-        &close_pane_item,
-    ])?;
 
     let settings = MenuItem::with_id(app, MENU_SETTINGS_ID, "Settings\u{2026}", true, Some("CmdOrCtrl+Comma"))?;
     let manage_tunnels = MenuItem::with_id(
@@ -781,7 +771,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         )?;
         return Menu::with_items(
             app,
-            &[&app_menu, &file_menu, &edit_menu, &shell_menu, &view_menu, &tools_menu, &window_menu],
+            &[&app_menu, &file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu],
         );
     }
 
@@ -796,7 +786,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             true,
             &[&new_tab, &new_window, &separator, &ssh_manager_menu, &separator2, &settings, &separator3, &close_tab, &close_window],
         )?;
-        Menu::with_items(app, &[&file_menu, &edit_menu, &shell_menu, &view_menu, &tools_menu, &window_menu, &help_menu])
+        Menu::with_items(app, &[&file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu, &help_menu])
     }
 }
 
