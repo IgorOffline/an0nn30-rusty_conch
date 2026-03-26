@@ -273,6 +273,14 @@ impl PluginBus {
     /// Send a query to a plugin (async version).
     ///
     /// Times out after 5 seconds, matching the blocking variant.
+    ///
+    /// # Runtime requirement
+    ///
+    /// This method uses [`tokio::task::spawn_blocking`] internally to avoid
+    /// blocking the async executor while waiting for the response. It must
+    /// be called from within a Tokio runtime — calling it from a non-Tokio
+    /// async executor will panic. For non-async (blocking) contexts, use
+    /// [`query_blocking`](Self::query_blocking) instead.
     pub async fn query(
         &self,
         target: &str,
