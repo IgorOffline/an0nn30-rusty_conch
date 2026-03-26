@@ -172,7 +172,7 @@ pub(crate) struct PendingPrompts {
 }
 
 impl PendingPrompts {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             host_key: HashMap::new(),
             password: HashMap::new(),
@@ -200,6 +200,8 @@ pub(crate) struct SshSession {
     pub host: String,
     pub user: String,
     pub port: u16,
+    /// Handle to abort the channel loop task on cleanup.
+    pub abort_handle: Option<tokio::task::AbortHandle>,
 }
 
 /// Shared state for all remote operations.
@@ -341,6 +343,7 @@ pub(crate) async fn ssh_connect(
                 host: server.host.clone(),
                 user: credentials.username.clone(),
                 port: server.port,
+                abort_handle: None,
             },
         );
     }
@@ -350,7 +353,7 @@ pub(crate) async fn ssh_connect(
     let key_for_loop = key.clone();
     let wl = window_label.clone();
     let app_handle = app.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
 
         // Clean up session and decrement connection ref count.
@@ -376,6 +379,14 @@ pub(crate) async fn ssh_connect(
             );
         }
     });
+
+    // Store the abort handle so the channel loop can be cancelled on window close.
+    {
+        let mut state = remote_clone.lock();
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.abort_handle = Some(task.abort_handle());
+        }
+    }
 
     spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
 
@@ -480,6 +491,7 @@ pub(crate) async fn ssh_quick_connect(
                 host: entry.host.clone(),
                 user: credentials.username.clone(),
                 port: entry.port,
+                abort_handle: None,
             },
         );
     }
@@ -488,7 +500,7 @@ pub(crate) async fn ssh_quick_connect(
     let key_for_loop = key.clone();
     let wl = window_label.clone();
     let app_handle = app.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let exited_naturally = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
         if let Some(session) = state.sessions.remove(&key_for_loop) {
@@ -511,6 +523,14 @@ pub(crate) async fn ssh_quick_connect(
             );
         }
     });
+
+    // Store the abort handle so the channel loop can be cancelled on window close.
+    {
+        let mut state = remote_clone.lock();
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.abort_handle = Some(task.abort_handle());
+        }
+    }
 
     spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
 
@@ -642,6 +662,7 @@ pub(crate) async fn ssh_open_channel(
                 host,
                 user,
                 port,
+                abort_handle: None,
             },
         );
     }
@@ -651,7 +672,7 @@ pub(crate) async fn ssh_open_channel(
     let wl = window_label.clone();
     let conn_id = connection_id.clone();
     let app_handle = app.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let exited = conch_remote::ssh::channel_loop(channel, input_rx, output_tx).await;
         let mut state = remote_for_loop.lock();
         state.sessions.remove(&key_for_loop);
@@ -673,6 +694,14 @@ pub(crate) async fn ssh_open_channel(
             );
         }
     });
+
+    // Store the abort handle so the channel loop can be cancelled on window close.
+    {
+        let mut state = remote_clone.lock();
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.abort_handle = Some(task.abort_handle());
+        }
+    }
 
     spawn_output_forwarder(&app, &window_label, pane_id, output_rx);
     Ok(())
