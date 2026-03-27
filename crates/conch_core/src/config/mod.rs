@@ -31,9 +31,23 @@ use serde::{Deserialize, Serialize};
 /// Write data to a file atomically: write to a temporary file first,
 /// then rename to the target path. This prevents corruption from
 /// partial writes due to crashes or power loss.
+///
+/// If the target file already exists, its permissions are copied to the
+/// temporary file before the rename so that restricted modes (e.g. 0600)
+/// are preserved.
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, data)?;
+
+    // Preserve permissions from the existing file if present.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, meta.permissions());
+        }
+    }
+
     fs::rename(&tmp, path)?;
     Ok(())
 }

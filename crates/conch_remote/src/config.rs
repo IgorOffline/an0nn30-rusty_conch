@@ -14,6 +14,16 @@ use uuid::Uuid;
 fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, data)?;
+
+    // Preserve permissions from the existing file if present.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, meta.permissions());
+        }
+    }
+
     fs::rename(&tmp, path)?;
     Ok(())
 }
