@@ -438,6 +438,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             commands::get_about_info,
             commands::get_home_dir,
             windows::open_new_window,
+            windows::open_settings_window,
             commands::rebuild_menu,
             settings::get_all_settings,
             settings::save_settings,
