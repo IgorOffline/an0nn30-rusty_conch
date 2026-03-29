@@ -254,8 +254,8 @@ pub(crate) fn rebuild_menu(
 
     let plugin_items = plugin_state.lock().menu_items.read().clone();
 
-    // On Windows the custom titlebar handles menus; skip native menu.
-    if cfg!(target_os = "windows") {
+    // On Windows/Linux the custom titlebar handles menus; skip native menu.
+    if cfg!(target_os = "windows") || cfg!(target_os = "linux") {
         return Ok(());
     }
     let new_menu = menu::build_app_menu_with_plugins(&app, &kb, &plugin_items)
