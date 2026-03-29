@@ -77,7 +77,8 @@ pub(crate) fn create_new_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
         conch_core::config::WindowDecorations::None
             | conch_core::config::WindowDecorations::Buttonless
     );
-    let dec = if cfg!(target_os = "windows") {
+    let use_custom_titlebar = cfg!(target_os = "windows") || cfg!(target_os = "linux");
+    let dec = if use_custom_titlebar {
         false
     } else {
         user_wants_dec

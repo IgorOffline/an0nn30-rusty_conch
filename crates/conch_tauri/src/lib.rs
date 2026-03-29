@@ -72,10 +72,12 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
         conch_core::config::WindowDecorations::None
             | conch_core::config::WindowDecorations::Buttonless
     );
-    // On Windows we always disable native decorations so we can render a
-    // VS Code-style custom titlebar with inline menus.  On other platforms
-    // we respect the user's decoration setting.
-    let use_decorations = if cfg!(target_os = "windows") {
+    // On Windows and Linux we disable native decorations so we can render a
+    // VS Code-style custom titlebar with inline menus.  On Linux this avoids
+    // the foreign-looking GTK menu bar on non-GNOME desktops (KDE, etc.).
+    // On macOS we respect the user's decoration setting.
+    let use_custom_titlebar = cfg!(target_os = "windows") || cfg!(target_os = "linux");
+    let use_decorations = if use_custom_titlebar {
         false
     } else {
         user_wants_decorations
@@ -103,10 +105,10 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             let the_menu = menu::build_app_menu(&app.handle(), &kb_config)
                 .map_err(|e| anyhow::anyhow!("Failed to build app menu: {e}"))?;
 
-            if cfg!(target_os = "windows") {
-                // On Windows we use a custom titlebar with JS-driven menus
-                // and accelerators.  Don't attach the native menu — it can
-                // steal focus and interfere with shortcut handling.
+            if cfg!(target_os = "windows") || cfg!(target_os = "linux") {
+                // On Windows/Linux we use a custom titlebar with JS-driven
+                // menus and accelerators.  Don't attach the native menu — it
+                // can steal focus and interfere with shortcut handling.
             } else {
                 app.handle()
                     .set_menu(the_menu)
@@ -137,8 +139,8 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
 
                 // Rebuild the menu after a short delay to let plugin threads
                 // run setup() and register their menu items.
-                // On Windows, skip native menu rebuild (custom titlebar handles it).
-                if !cfg!(target_os = "windows") {
+                // On Windows/Linux, skip native menu rebuild (custom titlebar handles it).
+                if !(cfg!(target_os = "windows") || cfg!(target_os = "linux")) {
                     let menu_handle = app.handle().clone();
                     let menu_kb = kb_config.clone();
                     let menu_ps = Arc::clone(&plugin_state);

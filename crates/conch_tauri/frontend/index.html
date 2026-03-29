@@ -1279,8 +1279,9 @@
       let borderlessMode = false;
       try {
         const appCfg = await invoke('get_app_config');
-        if (appCfg.platform === 'windows' && appCfg.decorations !== 'none') {
-          // Windows: use VS Code-style custom titlebar with inline menus.
+        if ((appCfg.platform === 'windows' || appCfg.platform === 'linux') && appCfg.decorations !== 'none') {
+          // Windows/Linux: use VS Code-style custom titlebar with inline menus.
+          // On Linux this avoids the foreign-looking GTK menu bar on non-GNOME desktops.
           document.getElementById('app').classList.add('custom-titlebar');
           // Titlebar init is deferred until handleMenuAction is defined (below).
           window._initTitlebarPending = true;
