@@ -33,6 +33,7 @@ export const COMMANDS = {
   LIST_THEMES: 'list_themes',
   PREVIEW_THEME_COLORS: 'preview_theme_colors',
   SAVE_SETTINGS: 'save_settings',
+  LIST_SYSTEM_FONTS: 'list_system_fonts',
 
   // SSH
   SSH_CONNECT: 'ssh_connect',

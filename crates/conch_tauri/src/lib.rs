@@ -439,6 +439,7 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
             settings::save_settings,
             settings::list_themes,
             settings::preview_theme_colors,
+            fonts::list_system_fonts,
             remote::ssh_commands::ssh_connect,
             remote::ssh_commands::ssh_quick_connect,
             remote::ssh_commands::ssh_write,
