@@ -505,11 +505,43 @@
     }
     #bottom-panel.hidden { display: none; }
     #bottom-panel-header {
-      display: flex; align-items: center; padding: 4px 10px;
-      font-size: var(--ui-font-small); color: var(--dim-fg); text-transform: uppercase;
-      letter-spacing: 0.5px; flex-shrink: 0;
-      border-bottom: 1px solid var(--tab-border);
+      display: flex; align-items: center; flex-shrink: 0;
+      border-bottom: 1px solid var(--tab-border); padding: 0;
     }
+    #bottom-panel-tabs {
+      display: flex; flex: 1; overflow-x: auto; min-width: 0;
+    }
+    .bottom-tab {
+      padding: 5px 14px; cursor: pointer; border: none; background: none;
+      color: var(--text-muted); font-size: var(--ui-font-small);
+      border-bottom: 2px solid transparent; white-space: nowrap;
+    }
+    .bottom-tab:hover { color: var(--fg); }
+    .bottom-tab.active { color: var(--fg); border-bottom-color: var(--blue); }
+    #bottom-panel-actions {
+      display: flex; align-items: center; gap: 4px; padding: 0 8px; flex-shrink: 0;
+    }
+    .bottom-panel-action-btn {
+      border: none; background: none; color: var(--text-muted); cursor: pointer;
+      font-size: var(--ui-font-small); padding: 2px 6px; border-radius: 3px;
+    }
+    .bottom-panel-action-btn:hover { color: var(--fg); background: var(--active-highlight); }
+    .notif-entry {
+      display: flex; align-items: flex-start; gap: 8px; padding: 3px 0;
+      font-size: var(--ui-font-small); border-bottom: 1px solid var(--tab-border);
+    }
+    .notif-time { color: var(--text-muted); flex-shrink: 0; font-family: "JetBrains Mono", monospace; }
+    .notif-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 4px;
+    }
+    .notif-dot-info { background: var(--cyan); }
+    .notif-dot-success { background: var(--green); }
+    .notif-dot-warn { background: var(--yellow); }
+    .notif-dot-error { background: var(--red); }
+    .notif-text { flex: 1; min-width: 0; }
+    .notif-title { color: var(--fg); font-weight: 500; }
+    .notif-body { color: var(--text-muted); margin-left: 4px; }
+    .notif-empty { color: var(--text-muted); font-style: italic; padding: 12px 0; }
     #bottom-panel-content { flex: 1; overflow-y: auto; padding: 4px 8px; }
     #ssh-panel-wrap {
       display: flex;
@@ -1125,7 +1157,10 @@
       </div>
     </div>
     <div id="bottom-panel" class="hidden">
-      <div id="bottom-panel-header">Output</div>
+      <div id="bottom-panel-header">
+        <div id="bottom-panel-tabs"></div>
+        <div id="bottom-panel-actions"></div>
+      </div>
       <div id="bottom-panel-content"></div>
     </div>
   </div>
@@ -1147,6 +1182,7 @@
   <script src="utils.js"></script>
   <script src="titlebar.js"></script>
   <script src="toast.js"></script>
+  <script src="notification-panel.js"></script>
   <script src="plugin-widgets.js"></script>
   <script src="settings.js"></script>
   <script src="file-icons.js"></script>
@@ -1298,6 +1334,17 @@
             nativeNotifications: appCfg.native_notifications !== false,
           });
         }
+        if (window.notificationPanel) {
+          window.notificationPanel.init();
+        }
+        try {
+          const layoutData = await invoke('get_saved_layout');
+          if (layoutData.bottom_panel_visible === false) {
+            document.getElementById('bottom-panel').classList.add('hidden');
+          } else {
+            document.getElementById('bottom-panel').classList.remove('hidden');
+          }
+        } catch (_) {}
 
         // Apply UI chrome font settings.
         const r = document.documentElement.style;
@@ -2154,7 +2201,7 @@
 
       // Save window layout on resize (debounced).
       let windowResaveSaveTimer = null;
-      window.addEventListener('resize', () => {
+      function debouncedSaveLayout() {
         if (windowResaveSaveTimer) clearTimeout(windowResaveSaveTimer);
         windowResaveSaveTimer = setTimeout(() => {
           invoke('save_window_layout', {
@@ -2163,10 +2210,12 @@
               ssh_panel_visible: window.sshPanel ? !window.sshPanel.isHidden() : true,
               files_panel_width: filesPanelEl.offsetWidth,
               files_panel_visible: window.filesPanel ? !window.filesPanel.isHidden() : true,
+              bottom_panel_visible: !document.getElementById('bottom-panel').classList.contains('hidden'),
             },
           }).catch(() => {});
         }, 500);
-      });
+      }
+      window.addEventListener('resize', debouncedSaveLayout);
 
       // ---- Vault init ----
       if (window.vault) {
@@ -2209,8 +2258,10 @@
         // Listen for plugin panel registrations and create panel containers.
         listenOnCurrentWindow('plugin-panel-registered', async (event) => {
           const { handle, plugin, name, location } = event.payload;
-          // For now, add plugin panels as additional content in the right sidebar.
-          // Future: support left/bottom panel locations with tabbed UI.
+          // Bottom-panel plugins are routed to the tabbed bottom panel via
+          // plugin-widgets.js — skip creating a sidebar container for them.
+          if (location === 'bottom') return;
+          // Add non-bottom plugin panels as additional content in the right sidebar.
           const sshPanel = document.getElementById('ssh-panel');
           if (!sshPanel) return;
 
@@ -2241,6 +2292,24 @@
             }
           } catch (e) {
             console.error('Initial plugin render failed:', e);
+          }
+        });
+
+        // Clean up sidebar containers when a plugin is disabled/unloaded.
+        listenOnCurrentWindow('plugin-panels-removed', (event) => {
+          const { handles } = event.payload;
+          for (const handle of handles) {
+            const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
+            if (container) {
+              // Remove the separator and header preceding the container.
+              const prev = container.previousElementSibling;
+              if (prev && prev.classList.contains('ssh-section-header')) {
+                const sep = prev.previousElementSibling;
+                if (sep && sep.classList.contains('ssh-panel-separator')) sep.remove();
+                prev.remove();
+              }
+              container.remove();
+            }
           }
         });
       }
@@ -2526,11 +2595,14 @@
           renameActiveTab();
           return;
         }
-        // Toggle bottom panel (placeholder — no bottom panel content yet).
+        // Toggle bottom panel.
         if (action === 'toggle-bottom-panel') {
           const bp = document.getElementById('bottom-panel');
-          if (bp) bp.classList.toggle('hidden');
-          setTimeout(() => fitAndResizeTab(currentTab()), 50);
+          if (bp) {
+            bp.classList.toggle('hidden');
+            setTimeout(() => fitAndResizeTab(currentTab()), 50);
+            debouncedSaveLayout();
+          }
           return;
         }
         if (action === 'about') {
@@ -2866,6 +2938,31 @@
           }
           if (appCfg.ui_font_size > 0) {
             document.body.style.fontSize = appCfg.ui_font_size + 'px';
+          }
+
+          // Re-apply terminal font/size to all open panes.
+          try {
+            const termCfg = await invoke('get_terminal_config');
+            let newTermFont = '"JetBrains Mono", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+            if (termCfg.font_family) {
+              newTermFont = '"' + termCfg.font_family + '", "Fira Code", "Cascadia Code"' + FONT_FALLBACKS;
+            }
+            termFontFamily = newTermFont;
+            const newTermSize = termCfg.font_size > 0 ? termCfg.font_size : 14;
+            termFontSize = newTermSize;
+            for (const pane of panes.values()) {
+              pane.term.options.fontFamily = newTermFont;
+              pane.term.options.fontSize = newTermSize;
+            }
+            // Allow the browser to load/measure the new font before re-fitting.
+            requestAnimationFrame(() => {
+              for (const pane of panes.values()) {
+                if (pane.fitAddon) pane.fitAddon.fit();
+                pane.term.refresh(0, pane.term.rows - 1);
+              }
+            });
+          } catch (e) {
+            console.warn('Failed to reload terminal font:', e);
           }
 
           // Re-apply notification settings.

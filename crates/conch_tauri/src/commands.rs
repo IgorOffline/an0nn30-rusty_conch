@@ -149,6 +149,7 @@ pub(crate) struct WindowLayout {
     ssh_panel_visible: Option<bool>,
     files_panel_width: Option<f64>,
     files_panel_visible: Option<bool>,
+    bottom_panel_visible: Option<bool>,
 }
 
 /// Layout state sent to the frontend on load.
@@ -161,6 +162,7 @@ pub(crate) struct SavedLayout {
     ssh_panel_visible: bool,
     files_panel_width: f64,
     files_panel_visible: bool,
+    bottom_panel_visible: bool,
 }
 
 #[tauri::command]
@@ -178,6 +180,7 @@ pub(crate) fn get_saved_layout() -> SavedLayout {
         ssh_panel_visible: state.layout.right_panel_visible,
         files_panel_width: state.layout.left_panel_width as f64,
         files_panel_visible: state.layout.left_panel_visible,
+        bottom_panel_visible: state.layout.bottom_panel_visible,
     }
 }
 
@@ -202,6 +205,9 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     }
     if let Some(v) = layout.files_panel_visible {
         state.layout.left_panel_visible = v;
+    }
+    if let Some(v) = layout.bottom_panel_visible {
+        state.layout.bottom_panel_visible = v;
     }
     let _ = config::save_persistent_state(&state);
 }
