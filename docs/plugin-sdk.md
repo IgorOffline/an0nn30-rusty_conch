@@ -26,6 +26,9 @@ Plugins are managed via **Settings > Plugins** -- scan, enable, disable, and per
   - [Lua API Reference](#lua-api-reference)
   - [Panel Widget Functions](#panel-widget-functions)
   - [Net API](#net-api)
+- [API Signatures Reference](#api-signatures-reference)
+  - [Java Signatures](#java-signatures)
+  - [Lua Signatures](#lua-signatures)
 - [Widget System](#widget-system)
 - [Widget Events](#widget-events)
 - [Plugin Events](#plugin-events)
@@ -726,6 +729,242 @@ end
 | `net.time()` | Current Unix timestamp (float, seconds since epoch) |
 | `net.resolve(hostname)` | DNS lookup (returns array of IP address strings, empty on failure) |
 | `net.scan(host, ports, timeout_ms?, concurrency?)` | TCP port scan (returns array of `{port, open}` tables for open ports; timeout default: 1000ms) |
+
+---
+
+## API Signatures Reference
+
+This section is a reference index of currently available API signatures from the SDK source.
+
+### Java Signatures
+
+#### `conch.plugin.ConchPlugin`
+
+```java
+PluginInfo getInfo();
+void setup();
+void onEvent(String eventJson);
+default String onQuery(String method, String argsJson); // default returns "null"
+String render();
+void teardown();
+```
+
+#### `conch.plugin.PluginInfo`
+
+```java
+// Fields
+public final String name;
+public final String description;
+public final String version;
+public final String pluginType;    // "action" | "panel"
+public final String panelLocation; // "none" | "left" | "right" | "bottom"
+
+// Constructors
+public PluginInfo(String name, String description, String version,
+                  String pluginType, String panelLocation);
+public PluginInfo(String name, String description, String version); // action/none
+```
+
+#### `conch.plugin.HostApi`
+
+```java
+// Permission
+public static native boolean checkPermission(String capability);
+
+// Logging
+public static native void log(int level, String message);
+public static void trace(String message);
+public static void debug(String message);
+public static void info(String message);
+public static void warn(String message);
+public static void error(String message);
+
+// Menu
+public static native void registerMenuItem(String menu, String label, String action);
+public static native void registerMenuItemWithKeybind(String menu, String label, String action, String keybind);
+public static void registerCommand(String label, String action);
+public static void registerCommand(String label, String action, String keybind);
+
+// Notifications / status
+public static native void notify(String title, String body, String level, int durationMs);
+public static void notify(String title, String body, String level);
+public static native void setStatus(String text, int level, float progress);
+
+// Clipboard / theme / config
+public static native void clipboardSet(String text);
+public static native String clipboardGet();
+public static native String getTheme();
+public static native String getConfig(String key);
+public static native void setConfig(String key, String value);
+
+// Dialogs / forms
+public static native String prompt(String message, String defaultValue);
+public static String prompt(String message);
+public static native boolean confirm(String message);
+public static native void alert(String title, String message);
+public static native void showError(String title, String message);
+public static native String showForm(String formDescriptorJson);
+
+// Bus / RPC
+public static native void subscribe(String eventType);
+public static native void publishEvent(String eventType, String dataJson);
+public static native String queryPlugin(String target, String method, String argsJson);
+public static native void registerService(String name);
+
+// Terminal / session
+public static native void writeToPty(String text);
+public static native void newTab(String command, boolean plain);
+public static native String getActiveSession();
+public static native String execActiveSession(String command);
+public static void newTab();
+public static void newPlainTab(String command);
+public static String platform();
+public static String execLocal(String command);
+
+// Net helpers
+public static double time();
+public static String[] resolve(String host);
+public static ScanResult[] scan(String host, int[] ports, Integer timeoutMs);
+
+public static final class ScanResult {
+    public final int port;
+    public final boolean open;
+    public ScanResult(int port, boolean open);
+}
+```
+
+#### `conch.plugin.Widgets`
+
+```java
+// Layout
+public Widgets horizontal(Widgets children);
+public Widgets vertical(Widgets children);
+public Widgets scrollArea(Float maxHeight, Widgets children);
+
+// Display
+public Widgets heading(String text);
+public Widgets label(String text);
+public Widgets label(String text, String style);
+public Widgets text(String text);
+public Widgets keyValue(String key, String value);
+public Widgets separator();
+public Widgets spacer();
+public Widgets spacer(float size);
+public Widgets badge(String text, String variant);
+public Widgets progress(String id, float fraction, String label);
+
+// Interactive
+public Widgets button(String id, String label);
+public Widgets button(String id, String label, String icon);
+public Widgets textInput(String id, String value, String hint);
+public Widgets checkbox(String id, String label, boolean checked);
+
+// Raw + serialization
+public Widgets raw(String json);
+public String toJson();
+```
+
+### Lua Signatures
+
+#### Lua plugin lifecycle hooks
+
+```lua
+function setup() end                      -- optional
+function on_event(event) end              -- optional
+function on_query(method, args_json) end  -- optional; return JSON string
+function render() end                     -- optional (panel plugins usually implement)
+function teardown() end                   -- optional
+```
+
+#### `app` table
+
+```lua
+app.log(level, message)
+app.clipboard(text)
+app.clipboard_get() -> string|nil
+app.get_theme() -> string|nil
+app.publish(event_type, data_table)
+app.subscribe(event_type)
+app.notify(title, body, level?, duration_ms?)
+app.set_status(text?, level?, progress?) -- progress < 0 hides progress bar
+app.register_service(name)
+app.register_menu_item(menu, label, action, keybind?)
+
+-- Overloads:
+app.register_command(label, action)
+app.register_command(label, action, keybind?)
+app.register_command(menu, label, action, keybind?)
+
+app.query_plugin(target, method, args?) -> string|nil
+app.get_config(key) -> string|nil
+app.set_config(key, value)
+```
+
+#### `ui` table
+
+```lua
+ui.panel_clear()
+
+-- Display
+ui.panel_heading(text)
+ui.panel_label(text, style?)
+ui.panel_text(text)
+ui.panel_scroll_text(id, text, max_height?)
+ui.panel_kv(key, value)
+ui.panel_separator()
+ui.panel_spacer(size?)
+ui.panel_icon_label(icon, text, style?)
+ui.panel_badge(text, variant)
+ui.panel_progress(id, fraction, label?)
+ui.panel_image(id?, src, width?, height?)
+
+-- Interactive
+ui.panel_button(id, label, icon?)
+ui.panel_text_input(id, value, hint?)
+ui.panel_text_edit(id, value, hint?, lines?)
+ui.panel_checkbox(id, label, checked)
+ui.panel_combobox(id, selected, options)
+
+-- Complex
+ui.panel_table(columns, rows)
+ui.panel_tree(id, nodes, selected?)
+ui.panel_toolbar(id?, items)
+ui.panel_path_bar(id, segments)
+ui.panel_tabs(id, active, tabs)
+
+-- Layout containers (callback receives no args)
+ui.panel_horizontal(func, spacing?)
+ui.panel_vertical(func, spacing?)
+ui.panel_scroll_area(func, max_height?)
+ui.panel_drop_zone(id, label, func?)
+
+-- Dialogs
+ui.form(title, fields) -> table|nil
+ui.alert(title, message)
+ui.error(title, message)
+ui.confirm(message) -> boolean
+ui.prompt(message, default?) -> string|nil
+```
+
+#### `session` table
+
+```lua
+session.platform() -> "macos"|"linux"|"windows"|"unknown"
+session.exec_local(command) -> {stdout, stderr, exit_code, status}
+session.exec(command) -> {stdout, stderr, exit_code, status}          -- alias of exec_local
+session.exec_active(command) -> {stdout, stderr, exit_code, status}
+session.current() -> table
+session.write(text)
+session.new_tab(command?, plain?)
+```
+
+#### `net` table
+
+```lua
+net.time() -> number
+net.resolve(hostname) -> string[]
+net.scan(host, ports, timeout_ms?, concurrency?) -> { {port=number, open=true}, ... }
+```
 
 ---
 
