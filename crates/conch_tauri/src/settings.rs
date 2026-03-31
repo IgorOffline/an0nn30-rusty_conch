@@ -1,10 +1,13 @@
 //! Settings dialog Tauri commands.
 
 use conch_core::config::{self, UserConfig};
+use parking_lot::Mutex;
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::Emitter;
 use ts_rs::TS;
 
+use crate::plugins::PluginState;
 use crate::TauriState;
 use crate::theme;
 
@@ -43,6 +46,7 @@ pub(crate) fn preview_theme_colors(name: String) -> Result<theme::ThemeColors, S
 pub(crate) fn save_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, TauriState>,
+    plugin_state: tauri::State<'_, Arc<Mutex<PluginState>>>,
     settings: serde_json::Value,
 ) -> Result<SaveSettingsResult, String> {
     let new_config: UserConfig =
@@ -63,9 +67,11 @@ pub(crate) fn save_settings(
 
     let _ = app.emit("config-changed", ());
 
-    // Rebuild menu to pick up keyboard shortcut changes.
+    // Rebuild menu to pick up keyboard shortcut changes while preserving
+    // dynamically registered plugin menu items.
     let kb = &new_config.conch.keyboard;
-    if let Ok(menu) = crate::menu::build_app_menu(&app, kb) {
+    let plugin_items = plugin_state.lock().menu_items.read().clone();
+    if let Ok(menu) = crate::menu::build_app_menu_with_plugins(&app, kb, &plugin_items) {
         let _ = app.set_menu(menu);
     }
 

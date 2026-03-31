@@ -7,6 +7,18 @@
   let listen = null;
   let serverDataFn = null; // returns { folders, ungrouped, ssh_config }
 
+  function attachEscapeHandler(onEscape) {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onEscape();
+      document.removeEventListener('keydown', onKey, true);
+    };
+    document.addEventListener('keydown', onKey, true);
+    return onKey;
+  }
+
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
@@ -79,10 +91,7 @@
     overlay.querySelector('#tm-close').addEventListener('click', removeOverlay);
     overlay.querySelector('#tm-new').addEventListener('click', () => showNewTunnelForm());
 
-    const onKey = (e) => {
-      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    attachEscapeHandler(() => removeOverlay());
   }
 
   function createTunnelRow(tunnel) {
@@ -232,6 +241,7 @@
       dismiss();
       await doDelete(tunnel);
     });
+    attachEscapeHandler(() => dismiss());
   }
 
   function showRowMenu(e, tunnel, status, errorMsg) {
@@ -345,10 +355,7 @@
     setTimeout(() => overlay.querySelector('#nt-local-port').focus(), 50);
 
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) removeOverlay(); });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { removeOverlay(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    attachEscapeHandler(() => removeOverlay());
 
     overlay.querySelector('#nt-cancel').addEventListener('click', () => { removeOverlay(); show(); });
     overlay.querySelector('#nt-save').addEventListener('click', () => submitNewTunnel(overlay));
@@ -461,10 +468,10 @@
     setTimeout(() => overlay.querySelector('#et-local-port').focus(), 50);
 
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { removeOverlay(); show(); } });
-    const onKey = (e) => {
-      if (e.key === 'Escape') { removeOverlay(); show(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    attachEscapeHandler(() => {
+      removeOverlay();
+      show();
+    });
 
     overlay.querySelector('#et-cancel').addEventListener('click', () => { removeOverlay(); show(); });
     overlay.querySelector('#et-save').addEventListener('click', () => submitEditTunnel(overlay, tunnel));
@@ -549,10 +556,7 @@
       });
     }
 
-    const onKey = (e) => {
-      if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey); }
-    };
-    document.addEventListener('keydown', onKey);
+    attachEscapeHandler(() => dismiss());
   }
 
   // ---------------------------------------------------------------------------

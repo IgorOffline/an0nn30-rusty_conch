@@ -725,19 +725,15 @@
       `<span class="tunnel-dot ${dotClass}"></span>` +
       `<span class="ssh-tunnel-label">${esc(tunnel.label)}</span>` +
       (errorMsg ? `<span class="ssh-tunnel-error-indicator" title="Error: ${attr(errorMsg)}">!</span>` : '') +
-      `<button class="ssh-tunnel-btn ssh-tunnel-edit-btn" title="Edit tunnel">Edit</button>` +
-      `<button class="ssh-tunnel-btn ssh-tunnel-action-btn" title="${btnTitle}">${errorMsg ? 'Retry' : btnIcon}</button>`;
+      `<button class="ssh-tunnel-btn ssh-tunnel-action-btn" title="${btnTitle}">${errorMsg ? 'Retry' : btnIcon}</button>` +
+      `<button class="ssh-tunnel-btn ssh-tunnel-menu-btn" title="More actions">\u22ef</button>`;
 
     if (errorMsg) el.title = 'Error: ' + errorMsg;
-    el.querySelector('.ssh-tunnel-edit-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (window.tunnelManager) window.tunnelManager.showEdit(tunnel);
-    });
 
-    const btn = el.querySelector('.ssh-tunnel-action-btn');
-    btn.addEventListener('click', async (e) => {
+    const actionBtn = el.querySelector('.ssh-tunnel-action-btn');
+    actionBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      btn.disabled = true;
+      actionBtn.disabled = true;
       if (isConnected) {
         try {
           await invoke('tunnel_stop', { tunnelId: tunnel.id });
@@ -754,6 +750,17 @@
         }
       }
       setTimeout(refreshTunnels, 400);
+    });
+
+    const menuBtn = el.querySelector('.ssh-tunnel-menu-btn');
+    menuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const rect = menuBtn.getBoundingClientRect();
+      showTunnelContextMenu(
+        { preventDefault() {}, clientX: rect.right - 4, clientY: rect.bottom + 2 },
+        tunnel,
+        status
+      );
     });
 
     // Right-click for context menu

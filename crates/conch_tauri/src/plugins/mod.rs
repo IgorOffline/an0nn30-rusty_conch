@@ -4,9 +4,9 @@
 //! Tauri commands for widget events and panel queries.
 
 pub(crate) mod tauri_host_api;
+mod permission_host_api;
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use conch_plugin::bus::PluginBus;
@@ -18,6 +18,50 @@ use tauri::Emitter;
 use ts_rs::TS;
 
 use tauri_host_api::TauriHostApi;
+use permission_host_api::{PermissionCheckedHostApi, PermissionProfile};
+
+const HOST_PLUGIN_API_MAJOR: u64 = conch_plugin_sdk::HOST_PLUGIN_API_MAJOR;
+const HOST_PLUGIN_API_MINOR: u64 = conch_plugin_sdk::HOST_PLUGIN_API_MINOR;
+
+fn ensure_plugin_api_compatible(plugin_name: &str, required: Option<&str>) -> Result<(), String> {
+    let Some(req) = required.map(str::trim).filter(|r| !r.is_empty()) else {
+        // Legacy plugin with no declared API requirement: allow in Phase 1.
+        return Ok(());
+    };
+    if api_requirement_matches(req) {
+        return Ok(());
+    }
+    Err(format!(
+        "Plugin '{}' requires plugin API '{}' but host is {}.{}",
+        plugin_name, req, HOST_PLUGIN_API_MAJOR, HOST_PLUGIN_API_MINOR
+    ))
+}
+
+fn api_requirement_matches(req: &str) -> bool {
+    // Phase 1 supports:
+    // - caret major range: ^1 or ^1.0
+    // - exact major/minor: 1 / 1.0 / 1.0.0
+    if let Some(rest) = req.strip_prefix('^') {
+        if let Some((major, _minor)) = parse_major_minor(rest) {
+            return major == HOST_PLUGIN_API_MAJOR;
+        }
+        return false;
+    }
+    if let Some((major, minor)) = parse_major_minor(req) {
+        return major == HOST_PLUGIN_API_MAJOR && minor <= HOST_PLUGIN_API_MINOR;
+    }
+    false
+}
+
+fn parse_major_minor(s: &str) -> Option<(u64, u64)> {
+    let mut parts = s.trim().split('.');
+    let major = parts.next()?.trim().parse::<u64>().ok()?;
+    let minor = parts
+        .next()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    Some((major, minor))
+}
 
 /// Metadata for a registered plugin panel.
 #[derive(Clone, Serialize, TS)]
@@ -85,6 +129,7 @@ pub(crate) struct PluginState {
     pub panels: Arc<RwLock<HashMap<u64, PanelInfo>>>,
     pub menu_items: Arc<RwLock<Vec<PluginMenuItem>>>,
     pub pending_dialogs: Arc<Mutex<PendingDialogs>>,
+    pub permission_profiles: Arc<RwLock<HashMap<String, PermissionProfile>>>,
     pub running_lua: Vec<runner::RunningLuaPlugin>,
     pub java_mgr: Option<JavaPluginManager>,
     pub plugins_config: conch_core::config::PluginsConfig,
@@ -97,6 +142,7 @@ impl PluginState {
             panels: Arc::new(RwLock::new(HashMap::new())),
             menu_items: Arc::new(RwLock::new(Vec::new())),
             pending_dialogs: Arc::new(Mutex::new(PendingDialogs::new())),
+            permission_profiles: Arc::new(RwLock::new(HashMap::new())),
             running_lua: Vec::new(),
             java_mgr: None,
             plugins_config,
@@ -112,15 +158,31 @@ impl PluginState {
         &self,
         name: &str,
         app_handle: &tauri::AppHandle,
+        declared_permissions: Option<&[String]>,
     ) -> Arc<dyn conch_plugin::HostApi> {
-        Arc::new(TauriHostApi {
+        // Store/refresh permission profile for this plugin.
+        let profile = match declared_permissions {
+            Some(perms) => PermissionProfile::from_declared(perms),
+            None => PermissionProfile::legacy_allow_all(),
+        };
+        self.permission_profiles
+            .write()
+            .insert(name.to_string(), profile);
+
+        let base: Arc<dyn conch_plugin::HostApi> = Arc::new(TauriHostApi {
             name: name.to_string(),
             app_handle: app_handle.clone(),
             bus: Arc::clone(&self.bus),
             panels: Arc::clone(&self.panels),
             menu_items: Arc::clone(&self.menu_items),
             pending_dialogs: Arc::clone(&self.pending_dialogs),
-        })
+        });
+
+        Arc::new(PermissionCheckedHostApi::new(
+            base,
+            name.to_string(),
+            Arc::clone(&self.permission_profiles),
+        ))
     }
 
     /// Get names of all currently loaded plugins.
@@ -169,6 +231,9 @@ impl PluginState {
         // Drop pending dialog channels owned by this plugin.
         self.pending_dialogs.lock().drain_for_plugin(plugin_name);
 
+        // Remove runtime permission profile for this plugin.
+        self.permission_profiles.write().remove(plugin_name);
+
         removed_handles
     }
 
@@ -213,8 +278,15 @@ impl PluginState {
         for saved_name in &state.loaded_plugins {
             // Try Lua first.
             if let Some(plugin) = lua_plugins.iter().find(|p| &p.meta.name == saved_name) {
+                if let Err(err) =
+                    ensure_plugin_api_compatible(&plugin.meta.name, plugin.meta.api_required.as_deref())
+                {
+                    log::warn!("{err}");
+                    continue;
+                }
                 let name = plugin.meta.name.clone();
-                let host_api = self.make_host_api(&name, app_handle);
+                let host_api =
+                    self.make_host_api(&name, app_handle, Some(&plugin.meta.permissions));
                 let mailbox_rx = self.bus.register_plugin(&name);
                 let Some(mailbox_tx) = self.bus.sender_for(&name) else {
                     continue;
@@ -232,11 +304,25 @@ impl PluginState {
             // Try Java — probe each JAR to match by plugin name since
             // JAR filenames don't necessarily match plugin display names.
             if let Some(ref mut mgr) = self.java_mgr {
+                let profiles = Arc::clone(&self.permission_profiles);
                 let mut found = false;
                 for (_, jar_path) in &jar_paths {
                     // Probe the JAR to get its plugin name.
                     match mgr.probe_jar_name(jar_path) {
                         Some(probe_name) if probe_name == *saved_name => {
+                            let declared = mgr.probe_jar_permissions(jar_path);
+                            profiles.write().insert(
+                                probe_name.clone(),
+                                PermissionProfile::from_declared(&declared),
+                            );
+                            if let Err(err) = ensure_plugin_api_compatible(
+                                saved_name,
+                                mgr.probe_jar_api_requirement(jar_path).as_deref(),
+                            ) {
+                                log::warn!("{err}");
+                                found = true;
+                                break;
+                            }
                             match mgr.load_plugin(jar_path) {
                                 Ok(meta) => {
                                     log::info!(
@@ -267,7 +353,7 @@ impl PluginState {
     /// Initialize the Java plugin manager (JVM) without loading any plugins.
     /// Plugins are loaded on demand via the Plugin Manager UI.
     pub fn init_java_manager(&mut self, app_handle: &tauri::AppHandle) {
-        let host_api = self.make_host_api("java", app_handle);
+        let host_api = self.make_host_api("java", app_handle, None);
         self.java_mgr = Some(JavaPluginManager::new(Arc::clone(&self.bus), host_api));
         log::info!("Java plugin manager initialized (JVM ready, no plugins loaded)");
     }
@@ -443,8 +529,9 @@ pub(crate) fn enable_plugin(
             .iter()
             .find(|p| p.meta.name == name)
             .ok_or_else(|| format!("Plugin '{name}' not found at {path}"))?;
+        ensure_plugin_api_compatible(&plugin.meta.name, plugin.meta.api_required.as_deref())?;
 
-        let host_api = ps.make_host_api(&name, &app);
+        let host_api = ps.make_host_api(&name, &app, Some(&plugin.meta.permissions));
 
         let mailbox_rx = ps.bus.register_plugin(&name);
         let mailbox_tx = ps
@@ -458,11 +545,17 @@ pub(crate) fn enable_plugin(
         ps.persist_enabled_plugins();
         Ok(())
     } else if source == "Java" {
+        let profiles = Arc::clone(&ps.permission_profiles);
         if let Some(ref mut mgr) = ps.java_mgr {
             // Check if already loaded (e.g., restored from previous session).
             if mgr.is_loaded(&name) {
                 return Ok(());
             }
+            let declared = mgr.probe_jar_permissions(std::path::Path::new(&path));
+            profiles
+                .write()
+                .insert(name.clone(), PermissionProfile::from_declared(&declared));
+            ensure_plugin_api_compatible(&name, mgr.probe_jar_api_requirement(std::path::Path::new(&path)).as_deref())?;
             mgr.load_plugin(std::path::Path::new(&path))
                 .map(|_| ())
                 .map_err(|e| format!("Failed to load JAR: {e}"))?;
@@ -894,5 +987,35 @@ mod tests {
             removed.is_empty(),
             "should return empty vec when plugin has no resources"
         );
+    }
+
+    #[test]
+    fn api_requirement_accepts_legacy_none() {
+        assert!(ensure_plugin_api_compatible("legacy", None).is_ok());
+    }
+
+    #[test]
+    fn api_requirement_accepts_caret_major_match() {
+        assert!(api_requirement_matches("^1"));
+        assert!(api_requirement_matches("^1.0"));
+    }
+
+    #[test]
+    fn api_requirement_rejects_major_mismatch() {
+        assert!(!api_requirement_matches("^2.0"));
+        assert!(!api_requirement_matches("2.0.0"));
+    }
+
+    #[test]
+    fn api_requirement_accepts_exact_minor_lte_host() {
+        assert!(api_requirement_matches("1"));
+        assert!(api_requirement_matches("1.0"));
+        assert!(api_requirement_matches("1.0.0"));
+    }
+
+    #[test]
+    fn api_requirement_rejects_invalid_syntax() {
+        assert!(!api_requirement_matches(">=1 <2"));
+        assert!(!api_requirement_matches("latest"));
     }
 }

@@ -20,6 +20,8 @@ pub struct PluginMeta {
     pub name: String,
     pub description: String,
     pub version: String,
+    pub api_required: Option<String>,
+    pub permissions: Vec<String>,
     pub plugin_type: conch_plugin_sdk::PluginType,
     pub panel_location: conch_plugin_sdk::PanelLocation,
 }
@@ -184,9 +186,27 @@ impl JavaPluginManager {
         self.probe_jar_metadata(jar_path).ok().map(|m| m.name)
     }
 
+    /// Get the plugin API requirement from a JAR manifest (`Plugin-Api`).
+    pub fn probe_jar_api_requirement(&self, jar_path: &Path) -> Option<String> {
+        read_manifest_attr_from_jar(jar_path, "Plugin-Api")
+            .ok()
+            .flatten()
+    }
+
+    /// Get declared permission capabilities from JAR manifest (`Plugin-Permissions`).
+    pub fn probe_jar_permissions(&self, jar_path: &Path) -> Vec<String> {
+        read_manifest_attr_from_jar(jar_path, "Plugin-Permissions")
+            .ok()
+            .flatten()
+            .map(|csv| parse_manifest_permissions(&csv))
+            .unwrap_or_default()
+    }
+
     /// Read plugin metadata from a JAR by loading it in the JVM.
     fn probe_jar_metadata(&mut self, jar_path: &Path) -> Result<PluginMeta, LoadError> {
         let class_name = read_plugin_class_from_jar(jar_path)?;
+        let api_required = self.probe_jar_api_requirement(jar_path);
+        let permissions = self.probe_jar_permissions(jar_path);
 
         let jvm = self.ensure_jvm()?;
         let mut env = jvm.attach_current_thread().map_err(|e| {
@@ -231,7 +251,9 @@ impl JavaPluginManager {
                 }
             };
 
-        let meta = read_plugin_info(&mut env, &info_obj)?;
+        let mut meta = read_plugin_info(&mut env, &info_obj)?;
+        meta.api_required = api_required;
+        meta.permissions = permissions;
         Ok(meta)
     }
 
@@ -482,6 +504,20 @@ fn call_on_event(env: &mut JNIEnv, plugin: &GlobalRef, json: &str, plugin_name: 
 
 /// Read `Plugin-Class` from a JAR's META-INF/MANIFEST.MF.
 fn read_plugin_class_from_jar(jar_path: &Path) -> Result<String, LoadError> {
+    let content = read_manifest_content_from_jar(jar_path)?;
+    for line in content.lines() {
+        if let Some(class) = line.strip_prefix("Plugin-Class:") {
+            return Ok(class.trim().to_string());
+        }
+    }
+
+    Err(LoadError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("no Plugin-Class in manifest of {}", jar_path.display()),
+    )))
+}
+
+fn read_manifest_content_from_jar(jar_path: &Path) -> Result<String, LoadError> {
     let file = std::fs::File::open(jar_path).map_err(|e| LoadError::Io(e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| {
         LoadError::Io(std::io::Error::new(
@@ -497,18 +533,30 @@ fn read_plugin_class_from_jar(jar_path: &Path) -> Result<String, LoadError> {
         ))
     })?;
 
-    let content = std::io::read_to_string(manifest).map_err(|e| LoadError::Io(e))?;
+    std::io::read_to_string(manifest).map_err(LoadError::Io)
+}
 
+fn read_manifest_attr_from_jar(jar_path: &Path, key: &str) -> Result<Option<String>, LoadError> {
+    let content = read_manifest_content_from_jar(jar_path)?;
+    let prefix = format!("{key}:");
     for line in content.lines() {
-        if let Some(class) = line.strip_prefix("Plugin-Class:") {
-            return Ok(class.trim().to_string());
+        if let Some(value) = line.strip_prefix(&prefix) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(Some(trimmed.to_string()));
+            }
+            return Ok(None);
         }
     }
+    Ok(None)
+}
 
-    Err(LoadError::Io(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("no Plugin-Class in manifest of {}", jar_path.display()),
-    )))
+fn parse_manifest_permissions(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Create a URLClassLoader for a JAR file.
@@ -615,6 +663,8 @@ fn read_plugin_info(env: &mut JNIEnv, info: &JObject) -> Result<PluginMeta, Load
         name,
         description,
         version,
+        api_required: None,
+        permissions: Vec::new(),
         plugin_type,
         panel_location,
     })

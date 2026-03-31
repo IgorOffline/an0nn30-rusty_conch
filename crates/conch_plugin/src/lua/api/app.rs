@@ -99,6 +99,48 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
         )?,
     )?;
 
+    // Backward compatibility: older plugins may call app.register_command(...)
+    // instead of app.register_menu_item(...).
+    //
+    // Supported forms:
+    //   register_command(menu, label, action, keybind?)
+    //   register_command(label, action, keybind?)   -- defaults menu to "Tools"
+    app.set(
+        "register_command",
+        lua.create_function(|lua, args: mlua::Variadic<LuaValue>| {
+            let (menu, label, action, keybind) = match args.len() {
+                2 => {
+                    let label = string_arg(&args, 0)?;
+                    let action = string_arg(&args, 1)?;
+                    ("Tools".to_string(), label, action, None)
+                }
+                3 => {
+                    let a0 = string_arg(&args, 0)?;
+                    let a1 = string_arg(&args, 1)?;
+                    let a2 = opt_string_arg(&args, 2)?;
+                    ("Tools".to_string(), a0, a1, a2)
+                }
+                4 => {
+                    let menu = string_arg(&args, 0)?;
+                    let label = string_arg(&args, 1)?;
+                    let action = string_arg(&args, 2)?;
+                    let keybind = opt_string_arg(&args, 3)?;
+                    (menu, label, action, keybind)
+                }
+                _ => {
+                    return Err(LuaError::RuntimeError(
+                        "register_command expects 2-4 args".into(),
+                    ));
+                }
+            };
+
+            with_host_api(lua, |api| {
+                api.register_menu_item(&menu, &label, &action, keybind.as_deref());
+            })?;
+            Ok(())
+        })?,
+    )?;
+
     app.set(
         "query_plugin",
         lua.create_function(
@@ -133,4 +175,25 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
 
     lua.globals().set("app", app)?;
     Ok(())
+}
+
+fn string_arg(args: &[LuaValue], idx: usize) -> LuaResult<String> {
+    match args.get(idx) {
+        Some(LuaValue::String(s)) => Ok(s.to_str()?.to_string()),
+        _ => Err(LuaError::RuntimeError(format!(
+            "register_command arg {} must be a string",
+            idx + 1
+        ))),
+    }
+}
+
+fn opt_string_arg(args: &[LuaValue], idx: usize) -> LuaResult<Option<String>> {
+    match args.get(idx) {
+        Some(LuaValue::Nil) | None => Ok(None),
+        Some(LuaValue::String(s)) => Ok(Some(s.to_str()?.to_string())),
+        _ => Err(LuaError::RuntimeError(format!(
+            "register_command arg {} must be a string or nil",
+            idx + 1
+        ))),
+    }
 }

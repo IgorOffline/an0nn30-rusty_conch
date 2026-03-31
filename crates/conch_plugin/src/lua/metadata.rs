@@ -20,6 +20,8 @@ pub struct LuaPluginMeta {
     pub name: String,
     pub description: String,
     pub version: String,
+    pub api_required: Option<String>,
+    pub permissions: Vec<String>,
     pub plugin_type: PluginType,
     pub panel_location: PanelLocation,
     pub icon: Option<String>,
@@ -40,6 +42,8 @@ impl Default for LuaPluginMeta {
             name: "Unknown".into(),
             description: String::new(),
             version: "0.0.0".into(),
+            api_required: None,
+            permissions: Vec::new(),
             plugin_type: PluginType::Action,
             panel_location: PanelLocation::None,
             icon: None,
@@ -72,6 +76,18 @@ pub fn parse_lua_metadata(source: &str) -> LuaPluginMeta {
             meta.description = value.trim().to_string();
         } else if let Some(value) = comment.strip_prefix("plugin-version:") {
             meta.version = value.trim().to_string();
+        } else if let Some(value) = comment.strip_prefix("plugin-api:") {
+            let req = value.trim();
+            if !req.is_empty() {
+                meta.api_required = Some(req.to_string());
+            }
+        } else if let Some(value) = comment.strip_prefix("plugin-permissions:") {
+            meta.permissions = value
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(ToString::to_string)
+                .collect();
         } else if let Some(value) = comment.strip_prefix("plugin-type:") {
             meta.plugin_type = match value.trim() {
                 "panel" => PluginType::Panel,
@@ -148,6 +164,8 @@ mod tests {
 -- plugin-description: Live system information panel
 -- plugin-type: panel
 -- plugin-version: 1.3.0
+-- plugin-api: ^1.0
+-- plugin-permissions: ui.panel, ui.menu
 -- plugin-location: right
 -- plugin-icon: system-info.png
 -- plugin-keybind: open_panel = cmd+shift+i | Toggle System Info panel
@@ -160,6 +178,8 @@ end
         assert_eq!(meta.name, "System Info");
         assert_eq!(meta.description, "Live system information panel");
         assert_eq!(meta.version, "1.3.0");
+        assert_eq!(meta.api_required.as_deref(), Some("^1.0"));
+        assert_eq!(meta.permissions, vec!["ui.panel", "ui.menu"]);
         assert!(matches!(meta.plugin_type, PluginType::Panel));
         assert!(matches!(meta.panel_location, PanelLocation::Right));
         assert_eq!(meta.icon.as_deref(), Some("system-info.png"));
