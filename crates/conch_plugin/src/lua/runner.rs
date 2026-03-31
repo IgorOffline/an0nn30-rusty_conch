@@ -156,25 +156,15 @@ fn lua_plugin_thread(
                 });
             }
 
-            PluginMail::RenderRequest { reply } => {
-                let widgets = handle_render(&lua);
+            PluginMail::RenderRequest { view_id, reply } => {
+                let widgets = handle_render(&lua, view_id.as_deref());
                 let json = serde_json::to_string(&widgets).unwrap_or_else(|_| "[]".into());
                 let _ = reply.send(json);
             }
 
             PluginMail::WidgetEvent { json } => {
-                // Parse and dispatch as a PluginEvent to on_event().
-                match serde_json::from_str::<conch_plugin_sdk::PluginEvent>(&json) {
-                    Ok(event) => {
-                        log::debug!("[lua:{chunk_name}] dispatching event: {json}");
-                        dispatch_event(&lua, &event);
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[lua:{chunk_name}] failed to parse PluginEvent: {e} — json: {json}"
-                        );
-                    }
-                }
+                log::debug!("[lua:{chunk_name}] dispatching event: {json}");
+                dispatch_event_json_raw(&lua, &json);
             }
 
             PluginMail::Shutdown => {
@@ -257,12 +247,50 @@ fn dispatch_event(lua: &Lua, event: &PluginEvent) {
     });
 }
 
+fn dispatch_event_json_raw(lua: &Lua, json: &str) {
+    let Ok(on_event) = lua.globals().get::<LuaFunction>("on_event") else {
+        log::debug!("dispatch_event_json_raw: no on_event function");
+        return;
+    };
+
+    let lua_literal = json_to_lua_literal(json);
+    let Ok(tbl) = lua
+        .load(&format!("return {}", lua_literal))
+        .eval::<LuaTable>()
+    else {
+        with_instruction_limit(lua, || {
+            if let Err(e) = on_event.call::<()>(json.to_string()) {
+                log::warn!("dispatch_event_json_raw: on_event(string) error: {e}");
+            }
+        });
+        return;
+    };
+
+    with_instruction_limit(lua, || {
+        if let Err(e) = on_event.call::<()>(tbl) {
+            log::warn!("dispatch_event_json_raw: on_event(table) error: {e}");
+        }
+    });
+}
+
 /// Handle a render request by calling the Lua `render()` function.
-fn handle_render(lua: &Lua) -> Vec<Widget> {
+fn handle_render(lua: &Lua, view_id: Option<&str>) -> Vec<Widget> {
     // Clear the accumulator before calling render.
     if let Err(e) = api::with_acc_pub(lua, |acc| acc.clear()) {
         log::error!("Lua render: failed to clear accumulator: {e}");
         return vec![];
+    }
+
+    if let Some(view_id) = view_id {
+        if let Ok(render_view_fn) = lua.globals().get::<LuaFunction>("render_view") {
+            let result =
+                with_instruction_limit(lua, || render_view_fn.call::<()>(view_id.to_string()));
+            if let Err(e) = result {
+                log::error!("Lua render_view({view_id}) error: {e}");
+                return vec![];
+            }
+            return api::take_widgets(lua).unwrap_or_default();
+        }
     }
 
     if let Ok(render_fn) = lua.globals().get::<LuaFunction>("render") {
@@ -536,7 +564,7 @@ mod tests {
             .exec()
             .unwrap();
 
-        let widgets = handle_render(&lua);
+        let widgets = handle_render(&lua, None);
         assert!(
             widgets.is_empty(),
             "render should return empty vec when aborted by instruction limit"

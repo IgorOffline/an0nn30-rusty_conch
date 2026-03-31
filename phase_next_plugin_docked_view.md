@@ -244,14 +244,14 @@ Phase 2 optional persistence:
 - Risk: API drift between Lua and Java.
   - Mitigation: single canonical docs table + parity tests in CI.
 
-## Open Questions (to decide before coding)
-1. Should docked views be allowed in all tabs or only active tab initially?
-2. Do we allow multiple views with same plugin-provided `id`, or auto-dedupe?
-3. Should docked views persist across app restarts in v1, or be session-only?
-4. Should plugin views be closable by users even if plugin expects them always visible?
+## Locked Product Decisions
+1. Docked views are created in the active tab only (workstation-per-tab model).
+2. Duplicate plugin-provided IDs auto-dedupe (focus existing view instead of creating another).
+3. No docked-view persistence across app restarts in v1 (session-only).
+4. Users can minimize or close plugin views even if plugin treats them as primary UI.
 
-## Recommended Defaults
-- Scope: active tab only (v1)
-- Duplicate IDs: dedupe by `(plugin, id)` within tab; focus existing view
-- Persistence: session-only first
-- User close: always allowed, plugin can reopen via command/menu
+## Implementation Defaults
+- Scope: active tab only.
+- Duplicate IDs: dedupe by `(plugin, id)` within tab; focus existing view.
+- Persistence: session-only.
+- User close/minimize: always allowed; plugin may reopen via command/menu.

@@ -421,8 +421,8 @@ fn java_plugin_thread(
     // Event loop.
     while let Some(mail) = mailbox.blocking_recv() {
         match mail {
-            PluginMail::RenderRequest { reply } => {
-                let json = call_render(&mut env, &plugin, &plugin_name);
+            PluginMail::RenderRequest { view_id, reply } => {
+                let json = call_render(&mut env, &plugin, &plugin_name, view_id.as_deref());
                 let _ = reply.send(json);
             }
 
@@ -498,7 +498,35 @@ fn java_plugin_thread(
     log::info!("jvm [{plugin_name}]: thread exiting");
 }
 
-fn call_render(env: &mut JNIEnv, plugin: &GlobalRef, plugin_name: &str) -> String {
+fn call_render(
+    env: &mut JNIEnv,
+    plugin: &GlobalRef,
+    plugin_name: &str,
+    view_id: Option<&str>,
+) -> String {
+    if let Some(view_id) = view_id {
+        if let Ok(jview_id) = env.new_string(view_id) {
+            match env.call_method(
+                plugin,
+                "renderView",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&jview_id)],
+            ) {
+                Ok(val) => {
+                    if let Ok(obj) = val.l() {
+                        let jstr = JString::from(obj);
+                        if let Ok(s) = env.get_string(&jstr) {
+                            return s.to_string_lossy().into_owned();
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Fall through to legacy render() below.
+                }
+            }
+        }
+    }
+
     match env.call_method(plugin, "render", "()Ljava/lang/String;", &[]) {
         Ok(val) => match val.l() {
             Ok(obj) => {
@@ -830,6 +858,21 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             name: "registerService".into(),
             sig: "(Ljava/lang/String;)V".into(),
             fn_ptr: native_host_register_service as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "openDockedView".into(),
+            sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+            fn_ptr: native_host_open_docked_view as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "closeDockedView".into(),
+            sig: "(Ljava/lang/String;)Z".into(),
+            fn_ptr: native_host_close_docked_view as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "focusDockedView".into(),
+            sig: "(Ljava/lang/String;)Z".into(),
+            fn_ptr: native_host_focus_docked_view as *mut std::ffi::c_void,
         },
         NativeMethod {
             name: "writeToPty".into(),
@@ -1183,6 +1226,58 @@ extern "system" fn native_host_register_service(mut env: JNIEnv, _class: JClass,
         return;
     };
     api.register_service(&svc);
+}
+
+extern "system" fn native_host_open_docked_view(
+    mut env: JNIEnv,
+    _class: JClass,
+    request_json: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(req) = jstr(&mut env, &request_json) else {
+        return std::ptr::null_mut();
+    };
+    match api.open_docked_view(&req) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_close_docked_view(
+    mut env: JNIEnv,
+    _class: JClass,
+    view_id: JString,
+) -> jboolean {
+    let Some(api) = get_api() else { return 0 };
+    let Some(view_id) = jstr(&mut env, &view_id) else {
+        return 0;
+    };
+    if api.close_docked_view(&view_id) {
+        1
+    } else {
+        0
+    }
+}
+
+extern "system" fn native_host_focus_docked_view(
+    mut env: JNIEnv,
+    _class: JClass,
+    view_id: JString,
+) -> jboolean {
+    let Some(api) = get_api() else { return 0 };
+    let Some(view_id) = jstr(&mut env, &view_id) else {
+        return 0;
+    };
+    if api.focus_docked_view(&view_id) {
+        1
+    } else {
+        0
+    }
 }
 
 extern "system" fn native_host_write_to_pty(mut env: JNIEnv, _class: JClass, text: JString) {

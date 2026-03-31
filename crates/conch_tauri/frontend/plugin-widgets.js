@@ -566,7 +566,16 @@
 
   function sendEvent(pluginName, widgetEvent) {
     if (!invoke || !pluginName) return;
-    const eventJson = JSON.stringify({ kind: 'widget', ...widgetEvent });
+    const payload = { kind: 'widget', ...widgetEvent };
+    // Optional view-scoped routing context for docked plugin views.
+    const active = document.activeElement;
+    if (active && typeof active.closest === 'function') {
+      const viewRoot = active.closest('[data-plugin-view-id]');
+      if (viewRoot && viewRoot.dataset && viewRoot.dataset.pluginViewId) {
+        payload.view_id = viewRoot.dataset.pluginViewId;
+      }
+    }
+    const eventJson = JSON.stringify(payload);
     invoke('plugin_widget_event', { pluginName, eventJson }).catch((e) => {
       console.error('plugin_widget_event error:', e);
     });

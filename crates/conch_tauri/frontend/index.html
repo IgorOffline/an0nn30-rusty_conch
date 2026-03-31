@@ -1498,6 +1498,7 @@
       let nextTabLabel = 1;
 
       const panes = new Map();
+      const pluginViewPaneById = new Map();
       let nextPaneId = 1;
       let focusedPaneId = null;
 
@@ -1535,12 +1536,18 @@
         const pane = panes.get(paneId);
         if (pane && pane.root) {
           pane.root.classList.add('focused');
-          pane.term.focus();
+          if (pane.kind === 'terminal' && pane.term) {
+            pane.term.focus();
+          }
           const tab = tabs.get(pane.tabId);
           if (tab) tab.focusedPaneId = paneId;
           // Notify files panel so SFTP routing follows the focused pane.
-          if (window.filesPanel) window.filesPanel.onTabChanged(pane);
-          invoke('set_active_pane', { paneId }).catch(() => {});
+          if (window.filesPanel && pane.kind === 'terminal') {
+            window.filesPanel.onTabChanged(pane);
+          }
+          if (pane.kind === 'terminal') {
+            invoke('set_active_pane', { paneId }).catch(() => {});
+          }
         }
       }
 
@@ -1809,13 +1816,16 @@
         for (const pid of paneIds) {
           const pane = panes.get(pid);
           if (!pane) continue;
-          if (notifyBackend && pane.spawned) {
+          if (notifyBackend && pane.kind === 'terminal' && pane.spawned) {
             const cmd = pane.type === 'ssh' ? 'ssh_disconnect' : 'close_pty';
             invoke(cmd, { paneId: pid }).catch(() => {});
+          } else if (notifyBackend && pane.kind === 'plugin_view' && pane.viewId) {
+            invoke('plugin_view_closed', { viewId: pane.viewId }).catch(() => {});
+            pluginViewPaneById.delete(pane.viewId);
           }
           if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
           if (pane.resizeObserver) pane.resizeObserver.disconnect();
-          pane.term.dispose();
+          if (pane.term) pane.term.dispose();
           panes.delete(pid);
         }
 
@@ -1912,7 +1922,7 @@
           }
           // Refocus the terminal
           const pane = panes.get(tab.focusedPaneId);
-          if (pane) pane.term.focus();
+          if (pane && pane.term) pane.term.focus();
         }
 
         input.addEventListener('keydown', (e) => {
@@ -1924,7 +1934,7 @@
             labelSpan.textContent = currentText;
             if (input.parentNode) labelSpan.removeChild(input);
             const pane = panes.get(tab.focusedPaneId);
-            if (pane) pane.term.focus();
+            if (pane && pane.term) pane.term.focus();
           }
           e.stopPropagation();
         }, true);
@@ -1962,6 +1972,7 @@
         const pane = {
           paneId,
           tabId,
+          kind: 'terminal',
           type: 'local',
           connectionId: null,
           term,
@@ -2066,6 +2077,7 @@
         const pane = {
           paneId,
           tabId,
+          kind: 'terminal',
           type: 'ssh',
           connectionId: null,
           term,
@@ -2202,18 +2214,21 @@
         }
 
         // Terminate the backend session (only if still running).
-        if (pane.spawned) {
+        if (pane.kind === 'terminal' && pane.spawned) {
           if (pane.type === 'ssh') {
             invoke('ssh_disconnect', { paneId }).catch(() => {});
           } else {
             invoke('close_pty', { paneId }).catch(() => {});
           }
+        } else if (pane.kind === 'plugin_view' && pane.viewId) {
+          invoke('plugin_view_closed', { viewId: pane.viewId }).catch(() => {});
+          pluginViewPaneById.delete(pane.viewId);
         }
 
         // Dispose xterm and observers.
         if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
         if (pane.resizeObserver) pane.resizeObserver.disconnect();
-        pane.term.dispose();
+        if (pane.term) pane.term.dispose();
         pane.root.remove();
         panes.delete(paneId);
 
@@ -2256,8 +2271,9 @@
         const newPane = {
           paneId: newPaneId,
           tabId: tab.id,
-          type: pane.type,
-          connectionId: pane.connectionId || null,
+          kind: 'terminal',
+          type: pane.kind === 'terminal' ? pane.type : 'local',
+          connectionId: pane.kind === 'terminal' ? (pane.connectionId || null) : null,
           term,
           fitAddon,
           root: newPaneEl,
@@ -2282,7 +2298,7 @@
         // Spawn the new session.
         const dims = fitAddon.proposeDimensions() || { cols: 80, rows: 24 };
 
-        if (pane.type === 'ssh' && pane.connectionId) {
+        if (pane.kind === 'terminal' && pane.type === 'ssh' && pane.connectionId) {
           // SSH: open a new channel on the existing connection.
           try {
             await invoke('ssh_open_channel', {
@@ -2322,6 +2338,108 @@
         setFocusedPane(newPaneId);
       }
 
+      async function openPluginDockedViewFromRequest(payload) {
+        const plugin = payload && payload.plugin;
+        const viewId = payload && payload.view_id;
+        if (!plugin || !viewId) return;
+        if (pluginViewPaneById.has(viewId)) {
+          setFocusedPane(pluginViewPaneById.get(viewId));
+          return;
+        }
+
+        let req = {};
+        try {
+          req = payload.request_json ? JSON.parse(payload.request_json) : {};
+        } catch (_) {
+          req = {};
+        }
+        const dock = req.dock || {};
+        const direction = dock.direction === 'vertical' ? 'vertical' : 'horizontal';
+        const ratioRaw = Number(dock.ratio);
+        const ratio = Number.isFinite(ratioRaw) ? Math.max(0.1, Math.min(0.9, ratioRaw)) : 0.35;
+
+        let anchor = currentPane();
+        if (!anchor && activeTabId != null) {
+          const tab = tabs.get(activeTabId);
+          if (tab && tab.treeRoot) {
+            const firstId = window.splitTree.firstLeaf(tab.treeRoot);
+            anchor = panes.get(firstId) || null;
+          }
+        }
+        if (!anchor) return;
+
+        const tab = tabs.get(anchor.tabId);
+        if (!tab) return;
+
+        const newPaneId = nextPaneId++;
+        tab.treeRoot = window.splitTree.splitLeaf(tab.treeRoot, anchor.paneId, newPaneId, direction);
+        const parent = window.splitTree.findParent(tab.treeRoot, anchor.paneId);
+        if (parent && parent.parent && parent.parent.type === 'split') {
+          parent.parent.ratio = ratio;
+        }
+
+        const paneEl = document.createElement('div');
+        paneEl.className = 'terminal-pane';
+        paneEl.dataset.paneId = newPaneId;
+        paneEl.dataset.pluginViewId = viewId;
+
+        const header = document.createElement('div');
+        header.className = 'ssh-section-header';
+        header.textContent = (req && req.title) ? String(req.title) : plugin;
+        paneEl.appendChild(header);
+
+        const widgetContainer = document.createElement('div');
+        widgetContainer.className = 'plugin-panel-content';
+        widgetContainer.dataset.pluginViewId = viewId;
+        paneEl.appendChild(widgetContainer);
+
+        const pane = {
+          paneId: newPaneId,
+          tabId: tab.id,
+          kind: 'plugin_view',
+          type: null,
+          connectionId: null,
+          term: null,
+          fitAddon: null,
+          root: paneEl,
+          spawned: false,
+          lastCols: 0,
+          lastRows: 0,
+          cleanupMouseBridge: null,
+          resizeObserver: null,
+          debounceTimer: null,
+          viewId,
+          pluginName: plugin,
+          widgetContainer,
+        };
+        panes.set(newPaneId, pane);
+        pluginViewPaneById.set(viewId, newPaneId);
+
+        rebuildTreeDOM(tab);
+        pane.resizeObserver = window.splitPane.createPaneResizeObserver(pane, () => {});
+        paneEl.addEventListener('mousedown', () => setFocusedPane(newPaneId));
+
+        invoke('register_plugin_view_binding', {
+          viewId,
+          paneId: newPaneId,
+          tabId: tab.id,
+        }).catch(() => {});
+
+        setFocusedPane(newPaneId);
+
+        try {
+          const result = await invoke('request_plugin_view_render', {
+            pluginName: plugin,
+            viewId,
+          });
+          if (result && window.pluginWidgets) {
+            window.pluginWidgets.renderWidgets(widgetContainer, result, plugin);
+          }
+        } catch (e) {
+          widgetContainer.textContent = 'Plugin view render failed: ' + String(e);
+        }
+      }
+
       // ---- Files panel init ----
       const filesPanelEl = document.getElementById('files-panel');
       const filesPanelWrapEl = document.getElementById('files-panel-wrap');
@@ -2351,7 +2469,7 @@
           panelWrapEl: sshPanelWrapEl,
           resizeHandleEl: sshResizeEl,
           fitActiveTab: debouncedFitAndResize,
-          refocusTerminal: () => { const pane = currentPane(); if (pane) pane.term.focus(); },
+          refocusTerminal: () => { const pane = currentPane(); if (pane && pane.term) pane.term.focus(); },
         });
       }
 
@@ -2472,6 +2590,25 @@
             }
           }
         });
+
+        listenOnCurrentWindow('plugin-view-open-requested', (event) => {
+          openPluginDockedViewFromRequest(event.payload).catch((e) => {
+            console.error('Failed to open plugin docked view:', e);
+          });
+        });
+
+        listenOnCurrentWindow('plugin-view-focus-requested', (event) => {
+          const viewId = event?.payload?.view_id;
+          if (!viewId || !pluginViewPaneById.has(viewId)) return;
+          setFocusedPane(pluginViewPaneById.get(viewId));
+        });
+
+        listenOnCurrentWindow('plugin-view-close-requested', (event) => {
+          const viewId = event?.payload?.view_id;
+          if (!viewId || !pluginViewPaneById.has(viewId)) return;
+          const paneId = pluginViewPaneById.get(viewId);
+          closePane(paneId);
+        });
       }
 
       // ---- Drag and drop ----
@@ -2559,12 +2696,12 @@
 
       function writeTextToCurrentPane(text) {
         const pane = currentPane();
-        if (!pane || !pane.spawned || typeof text !== 'string' || text.length === 0) return false;
+        if (!pane || pane.kind !== 'terminal' || !pane.spawned || typeof text !== 'string' || text.length === 0) return false;
         const cmd = pane.type === 'ssh' ? 'ssh_write' : 'write_to_pty';
         invoke(cmd, { paneId: pane.paneId, data: text }).catch((e) => {
           console.error('paste write error:', e);
         });
-        pane.term.focus();
+        if (pane.term) pane.term.focus();
         return true;
       }
 
@@ -2967,7 +3104,7 @@
         if (!pane) return;
 
         // If terminal has mouse tracking active (tmux/vim), let the tmux bridge handle it.
-        if (terminalMouseModeIsActive(pane.term)) return;
+        if (pane.kind === 'terminal' && terminalMouseModeIsActive(pane.term)) return;
 
         e.preventDefault();
         e.stopPropagation();
@@ -3090,7 +3227,7 @@
         if (typeof windowLabel !== 'string' || windowLabel !== currentWindowLabel) return;
         if (typeof paneId !== 'number' || typeof data !== 'string') return;
         const pane = panes.get(paneId);
-        if (pane) pane.term.write(data);
+        if (pane && pane.kind === 'terminal' && pane.term) pane.term.write(data);
       });
 
       await listenOnCurrentWindow('pty-exit', (event) => {
@@ -3101,6 +3238,7 @@
         if (typeof paneId !== 'number') return;
         const pane = panes.get(paneId);
         if (!pane) return;
+        if (pane.kind !== 'terminal') return;
         // Mark as not spawned so closePane skips the redundant backend disconnect
         // (backend already exited — that's why we received pty-exit).
         pane.spawned = false;
@@ -3762,7 +3900,7 @@
         if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
         if (isTextInputTarget(e.target) || isTextInputTarget(document.activeElement)) return;
         const pane = currentPane();
-        if (!pane || !pane.term) return;
+        if (!pane || pane.kind !== 'terminal' || !pane.term) return;
         e.preventDefault();
         e.stopPropagation();
         // Send xterm-style Alt+Arrow CSI sequence so tmux can bind M-Left/M-Right.
@@ -3822,7 +3960,9 @@
           };
           theme = newTheme;
           for (const pane of panes.values()) {
-            pane.term.options.theme = newTheme;
+            if (pane.kind === 'terminal' && pane.term) {
+              pane.term.options.theme = newTheme;
+            }
           }
           // Re-apply UI chrome font sizes.
           const appCfg = await invoke('get_app_config');
@@ -3847,12 +3987,15 @@
             const newTermSize = termCfg.font_size > 0 ? termCfg.font_size : 14;
             termFontSize = newTermSize;
             for (const pane of panes.values()) {
-              pane.term.options.fontFamily = newTermFont;
-              pane.term.options.fontSize = newTermSize;
+              if (pane.kind === 'terminal' && pane.term) {
+                pane.term.options.fontFamily = newTermFont;
+                pane.term.options.fontSize = newTermSize;
+              }
             }
             // Allow the browser to load/measure the new font before re-fitting.
             requestAnimationFrame(() => {
               for (const pane of panes.values()) {
+                if (pane.kind !== 'terminal' || !pane.term) continue;
                 if (pane.fitAddon) pane.fitAddon.fit();
                 pane.term.refresh(0, pane.term.rows - 1);
               }

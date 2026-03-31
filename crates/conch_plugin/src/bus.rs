@@ -70,7 +70,10 @@ pub enum PluginMail {
     /// A direct query from another plugin (or the host).
     BusQuery(QueryRequest),
     /// Host requests the plugin to render its widget tree.
-    RenderRequest { reply: oneshot::Sender<String> },
+    RenderRequest {
+        view_id: Option<String>,
+        reply: oneshot::Sender<String>,
+    },
     /// A widget interaction event (button click, text input, etc.).
     /// JSON-encoded `PluginEvent::Widget(...)`.
     WidgetEvent { json: String },
@@ -463,11 +466,15 @@ mod tests {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         sender
-            .try_send(PluginMail::RenderRequest { reply: reply_tx })
+            .try_send(PluginMail::RenderRequest {
+                view_id: None,
+                reply: reply_tx,
+            })
             .unwrap();
 
         match rx.try_recv().unwrap() {
-            PluginMail::RenderRequest { reply } => {
+            PluginMail::RenderRequest { view_id, reply } => {
+                assert!(view_id.is_none());
                 reply.send("[{\"type\":\"label\"}]".to_string()).unwrap();
             }
             _ => panic!("expected RenderRequest"),

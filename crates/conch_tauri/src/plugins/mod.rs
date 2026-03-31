@@ -27,6 +27,7 @@ fn supported_capability_set() -> &'static [&'static str] {
     &[
         "ui.menu",
         "ui.panel",
+        "ui.dock",
         "ui.notify",
         "ui.dialog",
         "clipboard.read",
@@ -124,6 +125,19 @@ pub(crate) struct PanelInfo {
     pub widgets_json: String,
 }
 
+/// Metadata for a plugin-owned docked split view.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub(crate) struct PluginViewInfo {
+    pub view_id: String,
+    pub plugin_name: String,
+    pub pane_id: u32,
+    pub tab_id: u32,
+    pub title: String,
+    pub icon: Option<String>,
+    pub last_widgets_json: String,
+}
+
 /// Shared plugin state accessible from Tauri commands.
 /// Pending dialog responses from the frontend.
 pub(crate) struct PendingDialogs {
@@ -177,6 +191,8 @@ struct PluginPanelsRemoved {
 pub(crate) struct PluginState {
     pub bus: Arc<PluginBus>,
     pub panels: Arc<RwLock<HashMap<u64, PanelInfo>>>,
+    pub views_by_id: Arc<RwLock<HashMap<String, PluginViewInfo>>>,
+    pub pane_to_view: Arc<RwLock<HashMap<u32, String>>>,
     pub menu_items: Arc<RwLock<Vec<PluginMenuItem>>>,
     pub pending_dialogs: Arc<Mutex<PendingDialogs>>,
     pub permission_profiles: Arc<RwLock<HashMap<String, PermissionProfile>>>,
@@ -190,6 +206,8 @@ impl PluginState {
         Self {
             bus: Arc::new(PluginBus::new()),
             panels: Arc::new(RwLock::new(HashMap::new())),
+            views_by_id: Arc::new(RwLock::new(HashMap::new())),
+            pane_to_view: Arc::new(RwLock::new(HashMap::new())),
             menu_items: Arc::new(RwLock::new(Vec::new())),
             pending_dialogs: Arc::new(Mutex::new(PendingDialogs::new())),
             permission_profiles: Arc::new(RwLock::new(HashMap::new())),
@@ -224,6 +242,8 @@ impl PluginState {
             app_handle: app_handle.clone(),
             bus: Arc::clone(&self.bus),
             panels: Arc::clone(&self.panels),
+            views_by_id: Arc::clone(&self.views_by_id),
+            pane_to_view: Arc::clone(&self.pane_to_view),
             menu_items: Arc::clone(&self.menu_items),
             pending_dialogs: Arc::clone(&self.pending_dialogs),
         });
@@ -816,6 +836,42 @@ pub(crate) fn get_panel_widgets(
         .map(|p| p.widgets_json.clone())
 }
 
+/// Record the frontend pane/tab binding for a plugin docked view.
+#[tauri::command]
+pub(crate) fn register_plugin_view_binding(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    view_id: String,
+    pane_id: u32,
+    tab_id: u32,
+) -> bool {
+    let state = state.lock();
+    let mut views = state.views_by_id.write();
+    let Some(info) = views.get_mut(&view_id) else {
+        return false;
+    };
+    info.pane_id = pane_id;
+    info.tab_id = tab_id;
+    state.pane_to_view.write().insert(pane_id, view_id);
+    true
+}
+
+/// Notify backend that a docked view was closed in the frontend.
+#[tauri::command]
+pub(crate) fn plugin_view_closed(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    view_id: String,
+) -> bool {
+    let state = state.lock();
+    let mut views = state.views_by_id.write();
+    let Some(info) = views.remove(&view_id) else {
+        return false;
+    };
+    if info.pane_id != 0 {
+        state.pane_to_view.write().remove(&info.pane_id);
+    }
+    true
+}
+
 /// Send a widget event to a plugin.
 #[tauri::command]
 pub(crate) fn plugin_widget_event(
@@ -846,7 +902,36 @@ pub(crate) async fn request_plugin_render(
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     sender
-        .send(conch_plugin::bus::PluginMail::RenderRequest { reply: reply_tx })
+        .send(conch_plugin::bus::PluginMail::RenderRequest {
+            view_id: None,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|e| format!("send failed: {e}"))?;
+    Ok(reply_rx.await.ok())
+}
+
+/// Request a plugin to re-render widgets for a specific view.
+#[tauri::command]
+pub(crate) async fn request_plugin_view_render(
+    state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    plugin_name: String,
+    view_id: String,
+) -> Result<Option<String>, String> {
+    let bus = {
+        let s = state.lock();
+        Arc::clone(&s.bus)
+    };
+    let sender = match bus.sender_for(&plugin_name) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(conch_plugin::bus::PluginMail::RenderRequest {
+            view_id: Some(view_id),
+            reply: reply_tx,
+        })
         .await
         .map_err(|e| format!("send failed: {e}"))?;
     Ok(reply_rx.await.ok())
