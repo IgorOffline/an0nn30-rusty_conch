@@ -99,10 +99,7 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
         )?,
     )?;
 
-    // Backward compatibility: older plugins may call app.register_command(...)
-    // instead of app.register_menu_item(...).
-    //
-    // Supported forms:
+    // Convenience alias for register_menu_item(...):
     //   register_command(menu, label, action, keybind?)
     //   register_command(label, action, keybind?)   -- defaults menu to "Tools"
     app.set(

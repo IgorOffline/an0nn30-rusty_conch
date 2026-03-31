@@ -11,6 +11,25 @@ use crate::plugins::PluginState;
 use crate::TauriState;
 use crate::theme;
 
+fn normalize_plugin_search_paths(cfg: &mut UserConfig) {
+    let config_dir = conch_core::config::config_dir();
+    let legacy_abs = config_dir.join("plugins_v2");
+    let current_abs = config_dir.join("plugins");
+
+    for path in &mut cfg.conch.plugins.search_paths {
+        let trimmed = path.trim();
+        if trimmed == "~/.config/conch/plugins_v2" {
+            *path = "~/.config/conch/plugins".to_string();
+            continue;
+        }
+
+        let as_path = std::path::Path::new(trimmed);
+        if as_path == legacy_abs {
+            *path = current_abs.to_string_lossy().to_string();
+        }
+    }
+}
+
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub(crate) struct SaveSettingsResult {
@@ -19,8 +38,9 @@ pub(crate) struct SaveSettingsResult {
 
 #[tauri::command]
 pub(crate) fn get_all_settings(state: tauri::State<'_, TauriState>) -> serde_json::Value {
-    let cfg = state.config.read();
-    serde_json::to_value(&*cfg).unwrap_or_default()
+    let mut cfg = state.config.read().clone();
+    normalize_plugin_search_paths(&mut cfg);
+    serde_json::to_value(cfg).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -49,11 +69,13 @@ pub(crate) fn save_settings(
     plugin_state: tauri::State<'_, Arc<Mutex<PluginState>>>,
     settings: serde_json::Value,
 ) -> Result<SaveSettingsResult, String> {
-    let new_config: UserConfig =
+    let mut new_config: UserConfig =
         serde_json::from_value(settings).map_err(|e| format!("Invalid settings: {e}"))?;
+    normalize_plugin_search_paths(&mut new_config);
 
     let restart_required = {
-        let old_config = state.config.read();
+        let mut old_config = state.config.read().clone();
+        normalize_plugin_search_paths(&mut old_config);
         needs_restart(&old_config, &new_config)
     };
 
@@ -228,5 +250,29 @@ mod tests {
         );
         // Should fall back to Dracula
         assert_eq!(tc.background, "#282a36");
+    }
+
+    #[test]
+    fn normalize_legacy_plugin_path_tilde_form() {
+        let mut cfg = UserConfig::default();
+        cfg.conch.plugins.search_paths = vec!["~/.config/conch/plugins_v2".into()];
+        normalize_plugin_search_paths(&mut cfg);
+        assert_eq!(
+            cfg.conch.plugins.search_paths,
+            vec!["~/.config/conch/plugins".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_legacy_plugin_path_absolute_form() {
+        let mut cfg = UserConfig::default();
+        let legacy = conch_core::config::config_dir().join("plugins_v2");
+        let current = conch_core::config::config_dir().join("plugins");
+        cfg.conch.plugins.search_paths = vec![legacy.to_string_lossy().to_string()];
+        normalize_plugin_search_paths(&mut cfg);
+        assert_eq!(
+            cfg.conch.plugins.search_paths,
+            vec![current.to_string_lossy().to_string()]
+        );
     }
 }

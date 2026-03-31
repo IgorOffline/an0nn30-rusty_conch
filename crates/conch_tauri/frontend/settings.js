@@ -1176,7 +1176,12 @@
     addDivider(c);
 
     // Sub-group: Search Paths
-    addSectionLabel(c, 'Search Paths');
+    addSectionLabel(c, 'Extra Search Paths');
+    const searchPathsHint = document.createElement('div');
+    searchPathsHint.className = 'settings-row-desc';
+    searchPathsHint.style.marginBottom = '8px';
+    searchPathsHint.textContent = 'Built-in defaults always include ~/.config/conch/plugins. Add extra directories here.';
+    c.appendChild(searchPathsHint);
 
     const pathsContainer = document.createElement('div');
     c.appendChild(pathsContainer);

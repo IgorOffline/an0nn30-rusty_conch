@@ -632,6 +632,19 @@
     overlay.innerHTML = `<div class="ssh-form"><div class="ssh-form-title">${esc(title)}</div><div class="ssh-form-body">${fieldsHtml}</div><div class="ssh-form-buttons">${buttonsHtml}</div></div>`;
     document.body.appendChild(overlay);
 
+    // Keyboard-first UX: focus the first editable field automatically.
+    setTimeout(() => {
+      const firstInput = overlay.querySelector(
+        '.ssh-form-body input[type="text"], .ssh-form-body input[type="password"], .ssh-form-body input[type="number"], .ssh-form-body select, .ssh-form-body textarea'
+      );
+      if (firstInput && typeof firstInput.focus === 'function') {
+        firstInput.focus();
+        if (firstInput.tagName === 'INPUT' && typeof firstInput.select === 'function') {
+          firstInput.select();
+        }
+      }
+    }, 30);
+
     const dismiss = (result) => {
       overlay.remove();
       invoke('dialog_respond_form', { promptId: prompt_id, result }).catch(() => {});
