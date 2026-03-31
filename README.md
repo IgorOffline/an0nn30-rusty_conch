@@ -112,26 +112,66 @@ Download the latest release for your platform from the [Releases page](https://g
 
 ### Build from source
 
-Requires Rust 1.85+ (edition 2024) and a JDK (for Java plugin support).
+#### Toolchain (all platforms)
+
+- Rust `1.85+` (edition 2024)
+- `cargo`
+- JDK `17+` (required for Java plugin support; recommended for all builds)
+
+#### Platform requirements
+
+#### macOS
+
+- Xcode Command Line Tools:
+  - `xcode-select --install`
+- Rust target/toolchain installed via `rustup`
+
+#### Linux (Debian/Ubuntu)
 
 ```bash
-git clone https://github.com/an0nn30/rusty_conch.git
-cd rusty_conch
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential pkg-config libssl-dev \
+  libgtk-3-dev libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev librsvg2-dev
+```
+
+#### Linux (Fedora)
+
+```bash
+sudo dnf install -y \
+  gcc gcc-c++ make pkgconf-pkg-config openssl-devel \
+  gtk3-devel webkit2gtk4.1-devel \
+  libappindicator-gtk3-devel librsvg2-devel
+```
+
+#### Linux (Arch)
+
+```bash
+sudo pacman -S --needed \
+  base-devel pkgconf openssl \
+  gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg
+```
+
+#### Windows
+
+- Microsoft C++ Build Tools (MSVC) or Visual Studio with C++ workload
+- WebView2 Runtime (usually already installed on Windows 10/11)
+- JDK `17+`
+- Rust MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`)
+
+```bash
+git clone https://github.com/an0nn30/conch.git
+cd conch
+
+# Debug build / run
+cargo run -p conch_tauri
+
+# Release build
 cargo build --release -p conch_tauri
 ```
 
 The binary is at `target/release/conch`.
-
-<details>
-<summary>Linux dependencies</summary>
-
-```bash
-sudo apt-get install -y \
-  libwebkit2gtk-4.1-dev libgtk-3-dev libssl-dev pkg-config \
-  libayatana-appindicator3-dev librsvg2-dev
-```
-
-</details>
 
 ## Keyboard Shortcuts
 
