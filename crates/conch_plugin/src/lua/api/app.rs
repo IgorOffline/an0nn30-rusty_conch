@@ -88,6 +88,25 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     )?;
 
     app.set(
+        "set_status",
+        lua.create_function(
+            |lua, (text, level, progress): (Option<String>, Option<String>, Option<f32>)| {
+                let level_num = match level.as_deref().unwrap_or("info") {
+                    "info" => 0u8,
+                    "warn" | "warning" => 1u8,
+                    "error" => 2u8,
+                    "success" => 3u8,
+                    _ => 0u8,
+                };
+                with_host_api(lua, |api| {
+                    api.set_status(text.as_deref(), level_num, progress.unwrap_or(-1.0));
+                })?;
+                Ok(())
+            },
+        )?,
+    )?;
+
+    app.set(
         "register_service",
         lua.create_function(|lua, name: String| {
             with_host_api(lua, |api| api.register_service(&name))?;

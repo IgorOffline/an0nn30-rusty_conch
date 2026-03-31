@@ -92,11 +92,11 @@ public interface ConchPlugin {
      * <p>Events are delivered as JSON strings. Common event types include:</p>
      * <ul>
      *   <li><b>Menu actions</b> — when the user clicks a registered menu item:
-     *       {@code {"MenuAction":{"action":"your_action"}}}</li>
+     *       {@code {"kind":"menu_action","action":"your_action"}}</li>
      *   <li><b>Widget events</b> — button clicks, text input changes, etc.:
-     *       {@code {"Widget":{"ButtonClick":{"id":"btn_id"}}}}</li>
+     *       {@code {"kind":"widget","type":"button_click","id":"btn_id"}}</li>
      *   <li><b>Bus events</b> — inter-plugin communication:
-     *       {@code {"BusEvent":{"event_type":"ssh.connected","data":{...}}}}</li>
+     *       {@code {"kind":"bus_event","event_type":"ssh.connected","data":{...}}}</li>
      * </ul>
      *
      * <p>Use {@code String.contains()} for simple matching, or a JSON
@@ -105,6 +105,20 @@ public interface ConchPlugin {
      * @param eventJson JSON-encoded event string
      */
     void onEvent(String eventJson);
+
+    /**
+     * Handle a direct RPC-style query from another plugin.
+     *
+     * <p>This is optional. The default implementation returns {@code "null"}.
+     * If implemented, return a JSON value string (object/array/string/number/bool/null).</p>
+     *
+     * @param method query method name
+     * @param argsJson JSON-encoded args payload
+     * @return JSON-encoded result value string
+     */
+    default String onQuery(String method, String argsJson) {
+        return "null";
+    }
 
     /**
      * Return the current widget tree as a JSON array string.

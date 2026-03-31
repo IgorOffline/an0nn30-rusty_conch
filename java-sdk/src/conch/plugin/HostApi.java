@@ -1,5 +1,14 @@
 package conch.plugin;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Host API for Conch plugins.
  *
@@ -16,6 +25,18 @@ package conch.plugin;
  *   <li><b>Logging</b> — {@link #log}, {@link #info}, {@link #warn},
  *       {@link #error}, {@link #debug}, {@link #trace}</li>
  *   <li><b>Menu items</b> — {@link #registerMenuItem}</li>
+ *   <li><b>Notifications / status</b> — {@link #notify}, {@link #setStatus}</li>
+ *   <li><b>Dialogs</b> — {@link #prompt}, {@link #confirm}, {@link #alert},
+ *       {@link #showError}, {@link #showForm}</li>
+ *   <li><b>Clipboard / theme / config</b> — {@link #clipboardSet},
+ *       {@link #clipboardGet}, {@link #getTheme}, {@link #getConfig},
+ *       {@link #setConfig}</li>
+ *   <li><b>Inter-plugin bus + RPC</b> — {@link #subscribe},
+ *       {@link #publishEvent}, {@link #queryPlugin}, {@link #registerService}</li>
+ *   <li><b>Session + terminal</b> — {@link #writeToPty}, {@link #newTab},
+ *       {@link #getActiveSession}, {@link #execActiveSession},
+ *       {@link #execLocal}, {@link #platform}</li>
+ *   <li><b>Network helpers</b> — {@link #time}, {@link #resolve}, {@link #scan}</li>
  * </ul>
  *
  * <h2>Example</h2>
@@ -38,6 +59,18 @@ package conch.plugin;
  */
 public class HostApi {
     private HostApi() {} // Static-only class — not instantiable.
+
+    // -----------------------------------------------------------------------
+    // Permissions
+    // -----------------------------------------------------------------------
+
+    /**
+     * Check whether this plugin has a capability permission.
+     *
+     * @param capability capability string (for example {@code "session.exec"})
+     * @return true if allowed
+     */
+    public static native boolean checkPermission(String capability);
 
     // -----------------------------------------------------------------------
     // Logging
@@ -131,6 +164,27 @@ public class HostApi {
      * @param keybind keyboard shortcut (e.g. {@code "cmd+shift+j"})
      */
     public static native void registerMenuItemWithKeybind(String menu, String label, String action, String keybind);
+
+    /**
+     * Register a command in the default {@code Tools} menu.
+     *
+     * @param label  command label
+     * @param action command action id
+     */
+    public static void registerCommand(String label, String action) {
+        registerMenuItem("Tools", label, action);
+    }
+
+    /**
+     * Register a command in the default {@code Tools} menu with a keybind.
+     *
+     * @param label   command label
+     * @param action  command action id
+     * @param keybind keybind string (for example {@code "cmd+shift+j"})
+     */
+    public static void registerCommand(String label, String action, String keybind) {
+        registerMenuItemWithKeybind("Tools", label, action, keybind);
+    }
 
     // -----------------------------------------------------------------------
     // Notifications
@@ -342,6 +396,23 @@ public class HostApi {
      */
     public static native void publishEvent(String eventType, String dataJson);
 
+    /**
+     * Send an RPC query to another plugin or registered service.
+     *
+     * @param target plugin name or service name
+     * @param method method name
+     * @param argsJson JSON args payload
+     * @return JSON result payload, or null if target not found / call failed
+     */
+    public static native String queryPlugin(String target, String method, String argsJson);
+
+    /**
+     * Register this plugin as a named service for query routing.
+     *
+     * @param name service name
+     */
+    public static native void registerService(String name);
+
     // -----------------------------------------------------------------------
     // Terminal / Session
     // -----------------------------------------------------------------------
@@ -366,6 +437,24 @@ public class HostApi {
     public static native void newTab(String command, boolean plain);
 
     /**
+     * Get info about the currently active session as JSON.
+     *
+     * @return JSON object or null when unavailable
+     */
+    public static native String getActiveSession();
+
+    /**
+     * Execute a command against the active session.
+     *
+     * <p>If the active pane is SSH, executes remotely over SSH.
+     * If local, executes on the host shell.</p>
+     *
+     * @param command command to execute
+     * @return JSON object with {@code status}, {@code stdout}, {@code stderr}, {@code exit_code}, or null
+     */
+    public static native String execActiveSession(String command);
+
+    /**
      * Open a new tab with default shell configuration.
      */
     public static void newTab() {
@@ -379,5 +468,145 @@ public class HostApi {
      */
     public static void newPlainTab(String command) {
         newTab(command, true);
+    }
+
+    /**
+     * Platform helper mirroring Lua {@code session.platform()}.
+     *
+     * @return {@code "macos"}, {@code "linux"}, {@code "windows"}, or {@code "unknown"}
+     */
+    public static String platform() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (os.contains("mac")) return "macos";
+        if (os.contains("win")) return "windows";
+        if (os.contains("nux") || os.contains("nix")) return "linux";
+        return "unknown";
+    }
+
+    /**
+     * Execute a local command on the host shell.
+     *
+     * <p>Returns a JSON object matching Lua {@code session.exec_local()}:
+     * {@code {"stdout":"...","stderr":"...","exit_code":0,"status":"ok"}}.</p>
+     *
+     * @param command shell command
+     * @return JSON result object
+     */
+    public static String execLocal(String command) {
+        if (!checkPermission("session.exec")) {
+            return "{\"stdout\":\"\",\"stderr\":\"permission denied: session.exec\",\"exit_code\":-1,\"status\":\"error\"}";
+        }
+        ProcessBuilder pb;
+        if (platform().equals("windows")) {
+            pb = new ProcessBuilder("cmd", "/c", command);
+        } else {
+            pb = new ProcessBuilder("sh", "-c", command);
+        }
+        try {
+            Process p = pb.start();
+            int exit = p.waitFor();
+            String out = readAll(p.getInputStream());
+            String err = readAll(p.getErrorStream());
+            return "{\"stdout\":" + jsonStr(out)
+                    + ",\"stderr\":" + jsonStr(err)
+                    + ",\"exit_code\":" + exit
+                    + ",\"status\":\"ok\"}";
+        } catch (Exception e) {
+            return "{\"stdout\":\"\",\"stderr\":" + jsonStr(e.toString())
+                    + ",\"exit_code\":-1,\"status\":\"error\"}";
+        }
+    }
+
+    /**
+     * Unix timestamp helper mirroring Lua {@code net.time()}.
+     *
+     * @return seconds since epoch
+     */
+    public static double time() {
+        return System.currentTimeMillis() / 1000.0;
+    }
+
+    /**
+     * DNS resolution helper mirroring Lua {@code net.resolve()}.
+     *
+     * @param host hostname
+     * @return resolved IP addresses (empty when denied or lookup fails)
+     */
+    public static String[] resolve(String host) {
+        if (!checkPermission("net.resolve")) return new String[0];
+        try {
+            InetAddress[] addrs = InetAddress.getAllByName(host);
+            String[] out = new String[addrs.length];
+            for (int i = 0; i < addrs.length; i++) out[i] = addrs[i].getHostAddress();
+            return out;
+        } catch (Exception ignored) {
+            return new String[0];
+        }
+    }
+
+    /**
+     * TCP port scan helper mirroring Lua {@code net.scan()}.
+     *
+     * @param host host to scan
+     * @param ports ports to test
+     * @param timeoutMs timeout per port in milliseconds (null = 1000)
+     * @return open ports as structured results
+     */
+    public static ScanResult[] scan(String host, int[] ports, Integer timeoutMs) {
+        if (!checkPermission("net.scan")) return new ScanResult[0];
+        int timeout = timeoutMs != null ? timeoutMs : 1000;
+        List<ScanResult> open = new ArrayList<>();
+        for (int port : ports) {
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress(host, port), timeout);
+                open.add(new ScanResult(port, true));
+            } catch (Exception ignored) {
+                // closed
+            }
+        }
+        return open.toArray(new ScanResult[0]);
+    }
+
+    /**
+     * Scan result row for {@link #scan(String, int[], Integer)}.
+     */
+    public static final class ScanResult {
+        public final int port;
+        public final boolean open;
+
+        public ScanResult(int port, boolean open) {
+            this.port = port;
+            this.open = open;
+        }
+    }
+
+    private static String readAll(java.io.InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = in.read(buf)) >= 0) {
+            out.write(buf, 0, n);
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    private static String jsonStr(String s) {
+        if (s == null) return "null";
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"':  sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n");  break;
+                case '\r': sb.append("\\r");  break;
+                case '\t': sb.append("\\t");  break;
+                default:
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
+            }
+        }
+        sb.append("\"");
+        return sb.toString();
     }
 }

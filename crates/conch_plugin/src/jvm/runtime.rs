@@ -441,9 +441,47 @@ fn java_plugin_thread(
             }
 
             PluginMail::BusQuery(req) => {
-                let _ = req.reply.send(QueryResponse {
-                    result: Err("Java plugins do not support queries yet".into()),
-                });
+                let args_json = serde_json::to_string(&req.args).unwrap_or_else(|_| "null".into());
+                let jmethod = match env.new_string(&req.method) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let _ = req.reply.send(QueryResponse {
+                            result: Ok(serde_json::Value::Null),
+                        });
+                        continue;
+                    }
+                };
+                let jargs = match env.new_string(&args_json) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let _ = req.reply.send(QueryResponse {
+                            result: Ok(serde_json::Value::Null),
+                        });
+                        continue;
+                    }
+                };
+                let result = env.call_method(
+                    &plugin,
+                    "onQuery",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&jmethod), JValue::Object(&jargs)],
+                );
+                let response = match result {
+                    Ok(v) => match v.l() {
+                        Ok(obj) => {
+                            let jstr = JString::from(obj);
+                            env.get_string(&jstr)
+                                .ok()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "null".to_string())
+                        }
+                        Err(_) => "null".to_string(),
+                    },
+                    Err(_) => "null".to_string(),
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&response).unwrap_or(serde_json::Value::Null);
+                let _ = req.reply.send(QueryResponse { result: Ok(value) });
             }
 
             PluginMail::Shutdown => {
@@ -692,6 +730,11 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
 
     let methods: &[NativeMethod] = &[
         NativeMethod {
+            name: "checkPermission".into(),
+            sig: "(Ljava/lang/String;)Z".into(),
+            fn_ptr: native_host_check_permission as *mut std::ffi::c_void,
+        },
+        NativeMethod {
             name: "log".into(),
             sig: "(ILjava/lang/String;)V".into(),
             fn_ptr: native_host_log as *mut std::ffi::c_void,
@@ -778,6 +821,16 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             fn_ptr: native_host_publish_event as *mut std::ffi::c_void,
         },
         NativeMethod {
+            name: "queryPlugin".into(),
+            sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+            fn_ptr: native_host_query_plugin as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "registerService".into(),
+            sig: "(Ljava/lang/String;)V".into(),
+            fn_ptr: native_host_register_service as *mut std::ffi::c_void,
+        },
+        NativeMethod {
             name: "writeToPty".into(),
             sig: "(Ljava/lang/String;)V".into(),
             fn_ptr: native_host_write_to_pty as *mut std::ffi::c_void,
@@ -786,6 +839,16 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             name: "newTab".into(),
             sig: "(Ljava/lang/String;Z)V".into(),
             fn_ptr: native_host_new_tab as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "getActiveSession".into(),
+            sig: "()Ljava/lang/String;".into(),
+            fn_ptr: native_host_get_active_session as *mut std::ffi::c_void,
+        },
+        NativeMethod {
+            name: "execActiveSession".into(),
+            sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+            fn_ptr: native_host_exec_active_session as *mut std::ffi::c_void,
         },
     ];
 
@@ -814,6 +877,18 @@ extern "system" fn native_host_log(mut env: JNIEnv, _class: JClass, level: jint,
         return;
     };
     api.log(level as u8, &msg);
+}
+
+extern "system" fn native_host_check_permission(
+    mut env: JNIEnv,
+    _class: JClass,
+    capability: JString,
+) -> jboolean {
+    let Some(api) = get_api() else { return 0 };
+    let Some(cap) = jstr(&mut env, &capability) else {
+        return 0;
+    };
+    if api.check_permission(&cap) { 1 } else { 0 }
 }
 
 extern "system" fn native_host_register_menu_item(
@@ -1073,6 +1148,46 @@ extern "system" fn native_host_publish_event(
     api.publish_event(&et, &data);
 }
 
+extern "system" fn native_host_query_plugin(
+    mut env: JNIEnv,
+    _class: JClass,
+    target: JString,
+    method: JString,
+    args_json: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(t) = jstr(&mut env, &target) else {
+        return std::ptr::null_mut();
+    };
+    let Some(m) = jstr(&mut env, &method) else {
+        return std::ptr::null_mut();
+    };
+    let Some(a) = jstr(&mut env, &args_json) else {
+        return std::ptr::null_mut();
+    };
+    match api.query_plugin(&t, &m, &a) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_register_service(
+    mut env: JNIEnv,
+    _class: JClass,
+    name: JString,
+) {
+    let Some(api) = get_api() else { return };
+    let Some(svc) = jstr(&mut env, &name) else {
+        return;
+    };
+    api.register_service(&svc);
+}
+
 extern "system" fn native_host_write_to_pty(mut env: JNIEnv, _class: JClass, text: JString) {
     let Some(api) = get_api() else { return };
     let Some(t) = jstr(&mut env, &text) else {
@@ -1094,6 +1209,39 @@ extern "system" fn native_host_new_tab(
         jstr(&mut env, &command)
     };
     api.new_tab(cmd.as_deref(), plain != 0);
+}
+
+extern "system" fn native_host_get_active_session(mut env: JNIEnv, _class: JClass) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    match api.get_active_session() {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_exec_active_session(
+    mut env: JNIEnv,
+    _class: JClass,
+    command: JString,
+) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    let Some(cmd) = jstr(&mut env, &command) else {
+        return std::ptr::null_mut();
+    };
+    match api.exec_active_session(&cmd) {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -227,6 +227,7 @@ Every Java plugin must implement `conch.plugin.ConchPlugin`:
 | `PluginInfo getInfo()` | Return plugin metadata (name, version, type, panel location) |
 | `void setup()` | Called once on plugin load. Register menu items, initialize state. |
 | `void onEvent(String eventJson)` | Handle events -- menu clicks, widget interactions, bus events. |
+| `String onQuery(String method, String argsJson)` | Handle direct RPC queries from other plugins. Return a JSON value string (`"null"` by default). |
 | `String render()` | Return widget tree as JSON array. Called on demand for panel plugins. |
 | `void teardown()` | Clean up resources before unload. |
 
@@ -263,6 +264,8 @@ Static methods on `conch.plugin.HostApi`.
 |--------|-------------|
 | `registerMenuItem(String menu, String label, String action)` | Add a menu item |
 | `registerMenuItemWithKeybind(String menu, String label, String action, String keybind)` | Add a menu item with keyboard shortcut (e.g. `"cmd+shift+j"`) |
+| `registerCommand(String label, String action)` | Convenience alias for adding a command under `"Tools"` |
+| `registerCommand(String label, String action, String keybind)` | `"Tools"` command with keybind |
 
 Users can override plugin keybinds in **Settings > Keyboard Shortcuts > Plugin Shortcuts**.
 Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<plugin>:<action>"`.
@@ -279,6 +282,12 @@ Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<pl
 | Method | Description |
 |--------|-------------|
 | `setStatus(String text, int level, float progress)` | Update the global status bar. Level: 0=info, 1=warn, 2=error, 3=success. Progress: 0.0-1.0 for a progress bar, negative to hide. Pass null text to clear. |
+
+**Permissions:**
+
+| Method | Description |
+|--------|-------------|
+| `checkPermission(String capability)` | Check whether this plugin has a capability (for example `"session.exec"` or `"net.scan"`) |
 
 **Dialogs (blocking):**
 
@@ -319,6 +328,8 @@ Config is stored at `~/.config/conch/plugins/<plugin-name>/<key>.json`.
 |--------|-------------|
 | `subscribe(String eventType)` | Subscribe to bus events from other plugins |
 | `publishEvent(String eventType, String dataJson)` | Publish a bus event |
+| `queryPlugin(String target, String method, String argsJson)` | RPC query to another plugin/service; returns JSON result or null |
+| `registerService(String name)` | Register this plugin as a named RPC service |
 
 **Terminal / Tabs:**
 
@@ -328,8 +339,20 @@ Config is stored at `~/.config/conch/plugins/<plugin-name>/<key>.json`.
 | `newTab(String command, boolean plain)` | Open a new tab (plain=true bypasses terminal.shell config) |
 | `newTab()` | Open a new tab with default shell |
 | `newPlainTab(String command)` | Open a plain shell tab and run a command |
+| `getActiveSession()` | Get active session metadata JSON (local/ssh, window/pane identifiers, SSH host/user/port when applicable) |
+| `execActiveSession(String command)` | Execute on active session and return JSON with `status/stdout/stderr/exit_code` |
 
-> **Note:** The Java SDK does not currently expose `queryPlugin`, `registerService`, or `getTheme` methods. These are available only in the Lua API.
+**Session / Net helpers:**
+
+| Method | Description |
+|--------|-------------|
+| `platform()` | Returns `"macos"`, `"linux"`, `"windows"`, or `"unknown"` |
+| `execLocal(String command)` | Execute a local shell command and return JSON result (`stdout/stderr/exit_code/status`) |
+| `time()` | Unix timestamp in seconds (float) |
+| `resolve(String host)` | DNS resolve helper (returns IP string array) |
+| `scan(String host, int[] ports, Integer timeoutMs)` | TCP scan helper (returns `ScanResult[]` for open ports) |
+
+> **Note:** Java and Lua now both support pub/sub and RPC query APIs. Query responses in Java are handled via `ConchPlugin.onQuery(...)`.
 
 ### Widget Builder
 
@@ -554,12 +577,14 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 |----------|-------------|
 | `app.log(level, message)` | Log (level: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`) |
 | `app.register_menu_item(menu, label, action, keybind?)` | Add a menu item (keybind e.g. `"cmd+shift+j"`) |
+| `app.register_command(...)` | Convenience alias for menu commands (defaults to `"Tools"` when menu is omitted) |
 | `app.register_service(name)` | Register as a named service for inter-plugin queries |
 | `app.subscribe(event_type)` | Subscribe to bus events |
 | `app.publish(event_type, data)` | Publish a bus event (data is a Lua table, serialized to JSON) |
 | `app.get_config(key)` | Read persisted config value (returns string or nil) |
 | `app.set_config(key, value)` | Write persisted config value |
 | `app.notify(title, body, level?, duration_ms?)` | Show a toast notification (level: `"info"`, `"success"`, `"warn"`, `"error"`) |
+| `app.set_status(text?, level?, progress?)` | Update global status bar (`level`: `"info"`, `"warn"`, `"error"`, `"success"`; `progress < 0` hides progress) |
 | `app.clipboard(text)` | Copy text to system clipboard |
 | `app.clipboard_get()` | Get clipboard text (returns string or nil) |
 | `app.get_theme()` | Get current theme JSON string (or nil if unavailable) |
@@ -863,9 +888,9 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 | `widget` | (nested widget event fields) | A widget interaction from one of the plugin's panels. Contains the widget event fields listed above (e.g. `type`, `id`, `value`). |
 | `menu_action` | `action` | A menu item registered by this plugin was clicked |
 | `bus_event` | `event_type`, `data` | An inter-plugin pub/sub event |
-| `bus_query` | `request_id`, `method`, `args` | A direct RPC query from another plugin |
-| `theme_changed` | `theme_json` | The host theme changed (color scheme switch) |
-| `shutdown` | -- | The plugin is being unloaded |
+| `bus_query` | `method`, `args` | Direct RPC queries are routed to query callbacks (`on_query` / `onQuery`) rather than `on_event` |
+| `theme_changed` | `theme_json` | Reserved event kind in the shared schema (not currently emitted by the host) |
+| `shutdown` | -- | Reserved event kind in the shared schema (plugins are currently shut down via `teardown()`) |
 
 ### Event JSON Examples
 
@@ -874,7 +899,6 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 { "kind": "widget", "type": "button_click", "id": "my_button" }
 { "kind": "widget", "type": "tree_context_menu", "id": "tree1", "node_id": "srv1", "action": "delete" }
 { "kind": "bus_event", "event_type": "ssh.connected", "data": { "host": "10.0.0.1" } }
-{ "kind": "bus_query", "request_id": "abc123", "method": "get_status", "args": {} }
 { "kind": "theme_changed", "theme_json": "{...}" }
 { "kind": "shutdown" }
 ```
@@ -899,7 +923,9 @@ function on_event(event)
 end
 ```
 
-> **Note on Lua `bus_query` events:** For Lua plugins, direct queries are handled by the separate `on_query(method, args_json)` function rather than through `on_event`. The runner dispatches bus queries to `on_query` automatically.
+> **Note on `bus_query` handling:** Direct queries are handled by dedicated query callbacks rather than `on_event`:
+> - Lua: `on_query(method, args_json)`
+> - Java: `onQuery(String method, String argsJson)`
 
 ---
 
@@ -1000,6 +1026,12 @@ local result = app.query_plugin("Other Plugin", "method_name", { arg1 = "value" 
 -- result is a JSON string, or nil if the target plugin was not found
 ```
 
+**Java (sender):**
+
+```java
+String result = HostApi.queryPlugin("Other Plugin", "method_name", "{\"arg1\":\"value\"}");
+```
+
 **Lua (receiver):**
 
 ```lua
@@ -1009,6 +1041,18 @@ function on_query(method, args_json)
     end
     return "null"
 end
+```
+
+**Java (receiver):**
+
+```java
+@Override
+public String onQuery(String method, String argsJson) {
+    if ("method_name".equals(method)) {
+        return "{\"result\":\"success\"}";
+    }
+    return "null";
+}
 ```
 
 ### Service Registry
@@ -1021,6 +1065,14 @@ app.register_service("database")
 
 -- Consumer plugin
 local result = app.query_plugin("database", "get_all", {})
+```
+
+```java
+// Provider plugin
+HostApi.registerService("database");
+
+// Consumer plugin
+String result = HostApi.queryPlugin("database", "get_all", "{}");
 ```
 
 ---
