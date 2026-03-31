@@ -8,12 +8,45 @@
   let activeMenu = null; // currently open dropdown
   let hoverNavEnabled = false; // when a menu is open, hovering others opens them
   let menuActionHandler = null; // callback for menu item clicks
+  let menuAreaEl = null;
+  let menuDefState = [];
+  let shortcutsState = {};
+  let debugBuildState = false;
+  let acceleratorHandler = null;
 
   // -----------------------------------------------------------------------
   // Menu definition — mirrors the native Tauri menu built in Rust.
   // Shortcuts are display-only; the native menu handles actual accelerators.
   // -----------------------------------------------------------------------
-  function buildMenuDef(shortcuts, debugBuild) {
+  function buildPluginSubmenu(pluginItems) {
+    if (!Array.isArray(pluginItems) || pluginItems.length === 0) return null;
+    const byPlugin = new Map();
+    for (const item of pluginItems) {
+      if (!item || !item.plugin || !item.action) continue;
+      if (!byPlugin.has(item.plugin)) byPlugin.set(item.plugin, []);
+      byPlugin.get(item.plugin).push(item);
+    }
+    const pluginNames = Array.from(byPlugin.keys()).sort((a, b) =>
+      a.toLowerCase().localeCompare(b.toLowerCase()),
+    );
+    const pluginEntries = [];
+    for (const pluginName of pluginNames) {
+      const items = byPlugin.get(pluginName) || [];
+      items.sort((a, b) => String(a.label || '').toLowerCase().localeCompare(String(b.label || '').toLowerCase()));
+      pluginEntries.push({
+        label: pluginName,
+        submenu: items.map((it) => ({
+          id: `plugin.${it.plugin}.${it.action}`,
+          label: it.label || it.action,
+          shortcut: it.keybind || '',
+        })),
+      });
+    }
+    if (pluginEntries.length === 0) return null;
+    return { label: 'Plugins', submenu: pluginEntries };
+  }
+
+  function buildMenuDef(shortcuts, debugBuild, pluginItems) {
     const ctrl = 'Ctrl';
     const menus = [
       {
@@ -61,6 +94,8 @@
       },
       {
         label: 'Tools', items: [
+          { id: 'open-command-palette', label: 'Plugin Commands\u2026', shortcut: `${ctrl}+Shift+P` },
+          { type: 'separator' },
           { id: 'manage-tunnels', label: 'Manage SSH Tunnels\u2026', shortcut: `${ctrl}+Shift+T` },
         ]
       },
@@ -86,6 +121,12 @@
           { id: 'open-devtools', label: 'Open Developer Console', shortcut: 'F12' },
         ]
       });
+    }
+    const toolsMenu = menus.find((m) => m.label === 'Tools');
+    const pluginSubmenu = buildPluginSubmenu(pluginItems);
+    if (toolsMenu && pluginSubmenu) {
+      toolsMenu.items.push({ type: 'separator' });
+      toolsMenu.items.push(pluginSubmenu);
     }
     return menus;
   }
@@ -148,42 +189,20 @@
     } catch (_) {}
 
     let zenShortcut = '';
-    let debugBuild = false;
     try {
       const cfg = await invoke('get_app_config');
       zenShortcut = cfg.zen_mode_shortcut || '';
-      debugBuild = !!cfg.debug_build;
+      debugBuildState = !!cfg.debug_build;
     } catch (_) {}
-    shortcuts.zen_mode = zenShortcut;
+    shortcutsState = { ...shortcuts, zen_mode: zenShortcut };
 
     const el = createTitlebar(onAction);
     const app = document.getElementById('app');
     app.insertBefore(el, app.firstChild);
 
     // Build menu buttons
-    const menuArea = el.querySelector('.titlebar-menu-area');
-    const menuDef = buildMenuDef(shortcuts, debugBuild);
-    for (const menu of menuDef) {
-      const btn = document.createElement('button');
-      btn.className = 'titlebar-menu-btn';
-      btn.textContent = menu.label;
-      btn.dataset.menu = menu.label;
-      btn.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (activeMenu && activeMenu.dataset.owner === menu.label) {
-          closeAllMenus();
-        } else {
-          openDropdown(btn, menu);
-        }
-      });
-      btn.addEventListener('mouseenter', () => {
-        if (hoverNavEnabled && activeMenu && activeMenu.dataset.owner !== menu.label) {
-          openDropdown(btn, menu);
-        }
-      });
-      menuArea.appendChild(btn);
-    }
+    menuAreaEl = el.querySelector('.titlebar-menu-area');
+    await refresh();
 
     // Window control buttons
     const win = tauri.window.getCurrentWindow();
@@ -213,9 +232,49 @@
       }
     }, true);
 
+  }
+
+  function renderMenuButtons() {
+    if (!menuAreaEl) return;
+    menuAreaEl.innerHTML = '';
+    for (const menu of menuDefState) {
+      const btn = document.createElement('button');
+      btn.className = 'titlebar-menu-btn';
+      btn.textContent = menu.label;
+      btn.dataset.menu = menu.label;
+      btn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const menuNow = menuDefState.find((m) => m.label === menu.label) || menu;
+        if (activeMenu && activeMenu.dataset.owner === menu.label) {
+          closeAllMenus();
+        } else {
+          openDropdown(btn, menuNow);
+        }
+      });
+      btn.addEventListener('mouseenter', () => {
+        if (hoverNavEnabled && activeMenu && activeMenu.dataset.owner !== menu.label) {
+          const menuNow = menuDefState.find((m) => m.label === menu.label) || menu;
+          openDropdown(btn, menuNow);
+        }
+      });
+      menuAreaEl.appendChild(btn);
+    }
+  }
+
+  async function refresh() {
+    const tauri = window.__TAURI__;
+    if (!tauri || !tauri.core || !tauri.core.invoke) return;
+    let pluginItems = [];
+    try {
+      pluginItems = await tauri.core.invoke('get_plugin_menu_items');
+    } catch (_) {}
+    menuDefState = buildMenuDef(shortcutsState, debugBuildState, pluginItems);
+    closeAllMenus();
+    renderMenuButtons();
     // Register keyboard accelerators since native menu can't provide them
     // when decorations are hidden.
-    registerAccelerators(menuDef);
+    registerAccelerators(menuDefState);
   }
 
   // -----------------------------------------------------------------------
@@ -231,54 +290,7 @@
     activeMenu = dropdown;
 
     for (const item of menuDef.items) {
-      if (item.type === 'separator') {
-        const sep = document.createElement('div');
-        sep.className = 'titlebar-dropdown-sep';
-        dropdown.appendChild(sep);
-        continue;
-      }
-      if (item.submenu) {
-        const row = document.createElement('div');
-        row.className = 'titlebar-dropdown-item titlebar-submenu-parent';
-        const labelSpan = document.createElement('span');
-        labelSpan.className = 'titlebar-dropdown-label';
-        labelSpan.textContent = item.label;
-        row.appendChild(labelSpan);
-        const arrow = document.createElement('span');
-        arrow.className = 'titlebar-dropdown-shortcut';
-        arrow.textContent = '\u25B8';
-        row.appendChild(arrow);
-
-        const sub = document.createElement('div');
-        sub.className = 'titlebar-dropdown titlebar-submenu';
-        for (const si of item.submenu) {
-          const sr = document.createElement('div');
-          sr.className = 'titlebar-dropdown-item';
-          sr.textContent = si.label;
-          sr.addEventListener('click', () => { closeAllMenus(); handleItemClick(si.id); });
-          sub.appendChild(sr);
-        }
-        row.appendChild(sub);
-        dropdown.appendChild(row);
-        continue;
-      }
-      const row = document.createElement('div');
-      row.className = 'titlebar-dropdown-item';
-      const labelSpan = document.createElement('span');
-      labelSpan.className = 'titlebar-dropdown-label';
-      labelSpan.textContent = item.label;
-      row.appendChild(labelSpan);
-      if (item.shortcut) {
-        const keySpan = document.createElement('span');
-        keySpan.className = 'titlebar-dropdown-shortcut';
-        keySpan.textContent = formatShortcut(item.shortcut);
-        row.appendChild(keySpan);
-      }
-      row.addEventListener('click', () => {
-        closeAllMenus();
-        handleItemClick(item.id);
-      });
-      dropdown.appendChild(row);
+      appendDropdownItem(dropdown, item);
     }
 
     // Position below the button
@@ -288,6 +300,53 @@
     document.body.appendChild(dropdown);
 
     btnEl.classList.add('active');
+  }
+
+  function appendDropdownItem(container, item) {
+    if (item.type === 'separator') {
+      const sep = document.createElement('div');
+      sep.className = 'titlebar-dropdown-sep';
+      container.appendChild(sep);
+      return;
+    }
+    if (item.submenu) {
+      const row = document.createElement('div');
+      row.className = 'titlebar-dropdown-item titlebar-submenu-parent';
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'titlebar-dropdown-label';
+      labelSpan.textContent = item.label;
+      row.appendChild(labelSpan);
+      const arrow = document.createElement('span');
+      arrow.className = 'titlebar-dropdown-shortcut';
+      arrow.textContent = '\u25B8';
+      row.appendChild(arrow);
+
+      const sub = document.createElement('div');
+      sub.className = 'titlebar-dropdown titlebar-submenu';
+      for (const si of item.submenu) {
+        appendDropdownItem(sub, si);
+      }
+      row.appendChild(sub);
+      container.appendChild(row);
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'titlebar-dropdown-item';
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'titlebar-dropdown-label';
+    labelSpan.textContent = item.label;
+    row.appendChild(labelSpan);
+    if (item.shortcut) {
+      const keySpan = document.createElement('span');
+      keySpan.className = 'titlebar-dropdown-shortcut';
+      keySpan.textContent = formatShortcut(item.shortcut);
+      row.appendChild(keySpan);
+    }
+    row.addEventListener('click', () => {
+      closeAllMenus();
+      handleItemClick(item.id);
+    });
+    container.appendChild(row);
   }
 
   function closeAllMenus() {
@@ -303,6 +362,16 @@
 
   function handleItemClick(id) {
     const tauri = window.__TAURI__;
+
+    if (typeof id === 'string' && id.startsWith('plugin.')) {
+      const parts = id.split('.');
+      if (parts.length >= 3) {
+        const pluginName = parts[1];
+        const action = parts.slice(2).join('.');
+        tauri.core.invoke('trigger_plugin_menu_action', { pluginName, action }).catch(() => {});
+        return;
+      }
+    }
 
     // Window actions handled directly via Tauri window API
     if (id === 'win-minimize') {
@@ -369,17 +438,27 @@
   function registerAccelerators(menuDef) {
     // Collect all shortcut->action bindings from the menu definition.
     const bindings = [];
-    for (const menu of menuDef) {
-      for (const item of menu.items) {
-        if (item.type === 'separator' || !item.shortcut || item.noAccel) continue;
+    function collect(items) {
+      for (const item of items || []) {
+        if (item.type === 'separator') continue;
+        if (item.submenu) {
+          collect(item.submenu);
+          continue;
+        }
+        if (!item.shortcut || item.noAccel) continue;
         const combo = parseShortcut(item.shortcut);
-        if (combo) {
+        if (combo && item.id) {
           bindings.push({ combo, id: item.id });
         }
       }
     }
+    for (const menu of menuDef) collect(menu.items);
 
-    document.addEventListener('keydown', (e) => {
+    if (acceleratorHandler) {
+      document.removeEventListener('keydown', acceleratorHandler, true);
+      acceleratorHandler = null;
+    }
+    acceleratorHandler = (e) => {
       for (const { combo, id } of bindings) {
         if (matchesEvent(combo, e)) {
           e.preventDefault();
@@ -388,8 +467,9 @@
           return;
         }
       }
-    }, true); // capture phase so we fire before xterm.js
+    };
+    document.addEventListener('keydown', acceleratorHandler, true); // capture phase so we fire before xterm.js
   }
 
-  exports.titlebar = { init };
+  exports.titlebar = { init, refresh };
 })(window);

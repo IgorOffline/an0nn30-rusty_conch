@@ -5,6 +5,7 @@
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
+use std::collections::BTreeMap;
 
 use crate::plugins;
 
@@ -495,22 +496,63 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             None::<&str>,
         )?));
 
-        // Add plugin items.
+        // Add plugin items in a deterministic and organized structure:
+        // Tools -> Plugins -> <Plugin Name> -> <Plugin Commands>
         if !plugin_items.is_empty() {
             tools_items.push(Box::new(PredefinedMenuItem::separator(app)?));
-        }
-        for item in plugin_items {
-            let menu_id = format!("plugin.{}.{}", item.plugin, item.action);
-            let override_key = format!("{}:{}", item.plugin, item.action);
-            let chosen_keybind = keyboard
-                .plugin_shortcuts
-                .get(&override_key)
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .or(item.keybind.as_deref());
-            let accel = chosen_keybind.map(config_key_to_accelerator);
-            let mi = MenuItem::with_id(app, &menu_id, &item.label, true, accel.as_deref())?;
-            tools_items.push(Box::new(mi));
+
+            let mut by_plugin: BTreeMap<String, Vec<&plugins::PluginMenuItem>> = BTreeMap::new();
+            for item in plugin_items {
+                by_plugin.entry(item.plugin.clone()).or_default().push(item);
+            }
+
+            let mut plugin_names: Vec<String> = by_plugin.keys().cloned().collect();
+            plugin_names.sort_by_key(|name| name.to_ascii_lowercase());
+
+            let mut plugin_submenus: Vec<Box<dyn tauri::menu::IsMenuItem<R>>> = Vec::new();
+            for plugin_name in plugin_names {
+                let mut entries = by_plugin.remove(&plugin_name).unwrap_or_default();
+                entries.sort_by(|a, b| {
+                    let a_group = a.menu.trim().to_ascii_lowercase();
+                    let b_group = b.menu.trim().to_ascii_lowercase();
+                    let a_key = if a_group == "tools" { "" } else { a_group.as_str() };
+                    let b_key = if b_group == "tools" { "" } else { b_group.as_str() };
+                    a_key
+                        .cmp(b_key)
+                        .then_with(|| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()))
+                        .then_with(|| a.action.to_ascii_lowercase().cmp(&b.action.to_ascii_lowercase()))
+                });
+
+                let mut entry_items: Vec<Box<dyn tauri::menu::IsMenuItem<R>>> = Vec::new();
+                for item in entries {
+                    let menu_id = format!("plugin.{}.{}", item.plugin, item.action);
+                    let override_key = format!("{}:{}", item.plugin, item.action);
+                    let chosen_keybind = keyboard
+                        .plugin_shortcuts
+                        .get(&override_key)
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .or(item.keybind.as_deref());
+                    let accel = chosen_keybind.map(config_key_to_accelerator);
+                    let mi = MenuItem::with_id(app, &menu_id, &item.label, true, accel.as_deref())?;
+                    entry_items.push(Box::new(mi));
+                }
+
+                if entry_items.is_empty() {
+                    continue;
+                }
+                let entry_refs: Vec<&dyn tauri::menu::IsMenuItem<R>> =
+                    entry_items.iter().map(|b| &**b).collect();
+                let plugin_menu = Submenu::with_items(app, &plugin_name, true, &entry_refs)?;
+                plugin_submenus.push(Box::new(plugin_menu));
+            }
+
+            if !plugin_submenus.is_empty() {
+                let plugin_refs: Vec<&dyn tauri::menu::IsMenuItem<R>> =
+                    plugin_submenus.iter().map(|b| &**b).collect();
+                let plugins_menu = Submenu::with_items(app, "Plugins", true, &plugin_refs)?;
+                tools_items.push(Box::new(plugins_menu));
+            }
         }
 
         // Rebuild the tools submenu.

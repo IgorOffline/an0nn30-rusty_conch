@@ -2774,6 +2774,9 @@
         // Listen for plugin panel registrations and create panel containers.
         listenOnCurrentWindow('plugin-panel-registered', async (event) => {
           const { handle, plugin, name, location } = event.payload;
+          if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+            window.titlebar.refresh().catch(() => {});
+          }
           // Bottom-panel plugins are routed to the tabbed bottom panel via
           // plugin-widgets.js — skip creating a sidebar container for them.
           if (location === 'bottom') return;
@@ -2813,6 +2816,9 @@
 
         // Clean up sidebar containers when a plugin is disabled/unloaded.
         listenOnCurrentWindow('plugin-panels-removed', (event) => {
+          if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+            window.titlebar.refresh().catch(() => {});
+          }
           const { handles } = event.payload;
           for (const handle of handles) {
             const container = document.querySelector(`[data-plugin-handle="${handle}"]`);
@@ -2849,6 +2855,9 @@
         });
 
         listenOnCurrentWindow('plugin-views-removed', (event) => {
+          if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+            window.titlebar.refresh().catch(() => {});
+          }
           const viewIds = (event && event.payload && event.payload.view_ids) || [];
           for (const viewId of viewIds) {
             if (!pluginViewPaneById.has(viewId)) continue;
@@ -3059,6 +3068,9 @@
               async () => {
                 await invoke('disable_plugin', { name: p.name, source: p.source });
                 await invoke('rebuild_menu').catch(() => {});
+                if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+                  window.titlebar.refresh().catch(() => {});
+                }
               }
             );
           } else {
@@ -3075,6 +3087,9 @@
                 }
                 await invoke('enable_plugin', { name: p.name, source: p.source, path: p.path });
                 await invoke('rebuild_menu').catch(() => {});
+                if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+                  window.titlebar.refresh().catch(() => {});
+                }
               }
             );
           }
@@ -3558,6 +3573,14 @@
         }
         if (action === 'manage-tunnels' && window.tunnelManager) {
           window.tunnelManager.show();
+          return;
+        }
+        if (action === 'open-command-palette') {
+          if (commandPalette) {
+            closeCommandPalette();
+          } else {
+            openCommandPalette();
+          }
           return;
         }
         if (action === 'vault-open' && window.vault) {

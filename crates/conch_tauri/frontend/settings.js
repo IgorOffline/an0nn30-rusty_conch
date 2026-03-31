@@ -1348,6 +1348,9 @@
       try {
         cachedPlugins = await invoke('scan_plugins');
         cachedPluginMenuItems = await invoke('get_plugin_menu_items').catch(() => []);
+        if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+          window.titlebar.refresh().catch(() => {});
+        }
       } catch (e) {
         if (window.toast) window.toast.error('Plugin Scan Failed', String(e));
       }
@@ -1441,6 +1444,9 @@
             }
             cachedPlugins = await invoke('scan_plugins');
             cachedPluginMenuItems = await invoke('get_plugin_menu_items').catch(() => []);
+            if (window.titlebar && typeof window.titlebar.refresh === 'function') {
+              window.titlebar.refresh().catch(() => {});
+            }
           } catch (e) {
             toggle.checked = !!plugin.loaded;
             if (window.toast) window.toast.error('Plugin Action Failed', String(e));
