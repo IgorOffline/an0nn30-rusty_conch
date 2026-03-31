@@ -1,6 +1,7 @@
 //! Conch-specific configuration: keyboard shortcuts and UI preferences.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -97,6 +98,7 @@ pub struct KeyboardConfig {
     pub navigate_pane_left: String,
     pub navigate_pane_right: String,
     pub rename_tab: String,
+    pub plugin_shortcuts: HashMap<String, String>,
 }
 
 impl Default for KeyboardConfig {
@@ -118,6 +120,7 @@ impl Default for KeyboardConfig {
             navigate_pane_left: "cmd+alt+left".into(),
             navigate_pane_right: "cmd+alt+right".into(),
             rename_tab: "F2".into(),
+            plugin_shortcuts: HashMap::new(),
         }
     }
 }

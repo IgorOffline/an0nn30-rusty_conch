@@ -88,7 +88,8 @@ pub(crate) fn config_key_to_accelerator(key: &str) -> String {
         .map(|part| {
             let lower = part.trim().to_lowercase();
             match lower.as_str() {
-                "cmd" | "ctrl" => "CmdOrCtrl".to_string(),
+                "cmd" => "CmdOrCtrl".to_string(),
+                "ctrl" => "Ctrl".to_string(),
                 "shift" => "Shift".to_string(),
                 "alt" | "opt" | "option" => "Alt".to_string(),
                 other => other.to_uppercase(),
@@ -452,10 +453,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
         }
         for item in plugin_items {
             let menu_id = format!("plugin.{}.{}", item.plugin, item.action);
-            let accel = item
-                .keybind
-                .as_deref()
-                .map(|k| config_key_to_accelerator(k));
+            let override_key = format!("{}:{}", item.plugin, item.action);
+            let chosen_keybind = keyboard
+                .plugin_shortcuts
+                .get(&override_key)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .or(item.keybind.as_deref());
+            let accel = chosen_keybind.map(config_key_to_accelerator);
             let mi = MenuItem::with_id(app, &menu_id, &item.label, true, accel.as_deref())?;
             tools_items.push(Box::new(mi));
         }
@@ -761,7 +766,7 @@ mod tests {
 
     #[test]
     fn config_key_to_accelerator_ctrl() {
-        assert_eq!(config_key_to_accelerator("ctrl+t"), "CmdOrCtrl+T");
+        assert_eq!(config_key_to_accelerator("ctrl+t"), "Ctrl+T");
     }
 
     #[test]

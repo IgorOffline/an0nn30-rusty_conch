@@ -340,56 +340,63 @@ pub fn run(config: UserConfig) -> anyhow::Result<()> {
                 // Check if it's a plugin menu item: "plugin.{source_name}.{action}"
                 let id_str = other;
                 if id_str.starts_with("plugin.") {
-                    let parts: Vec<&str> = id_str.splitn(3, '.').collect();
-                    if parts.len() == 3 {
-                        let source_name = parts[1];
-                        let action = parts[2].to_string();
+                    if let Some(ps) = app.try_state::<Arc<Mutex<plugins::PluginState>>>() {
+                        let ps_guard = ps.lock();
+                        let bus = Arc::clone(&ps_guard.bus);
+                        let mut target_plugin: Option<String> = None;
+                        let mut action: Option<String> = None;
 
-                        if let Some(ps) = app.try_state::<Arc<Mutex<plugins::PluginState>>>() {
-                            let ps_guard = ps.lock();
-                            let bus = Arc::clone(&ps_guard.bus);
-
-                            // Find the actual plugin name that registered this action.
-                            // The source_name might be "java" (shared) while the real
-                            // plugin name on the bus is different (e.g., "Form Test").
-                            let real_plugin = ps_guard
-                                .menu_items
-                                .read()
+                        // Resolve by exact menu-id match so plugin names and actions
+                        // can safely contain '.'.
+                        {
+                            let items = ps_guard.menu_items.read();
+                            if let Some(item) = items
                                 .iter()
-                                .find(|i| i.plugin == source_name && i.action == action)
-                                .map(|i| i.plugin.clone());
+                                .find(|i| format!("plugin.{}.{}", i.plugin, i.action) == id_str)
+                            {
+                                target_plugin = Some(item.plugin.clone());
+                                action = Some(item.action.clone());
+                            }
+                        }
 
-                            // Try direct match first, then all registered plugins.
-                            let target = real_plugin.as_deref().unwrap_or(source_name);
-                            let sent = if let Some(sender) = bus.sender_for(target) {
-                                let event = conch_plugin_sdk::PluginEvent::MenuAction {
-                                    action: action.clone(),
-                                };
-                                let json = serde_json::to_string(&event).unwrap_or_default();
-                                sender
-                                    .blocking_send(conch_plugin::bus::PluginMail::WidgetEvent {
-                                        json,
-                                    })
-                                    .is_ok()
-                            } else {
-                                false
+                        // Backward-compatible fallback for legacy IDs.
+                        if target_plugin.is_none() || action.is_none() {
+                            let parts: Vec<&str> = id_str.splitn(3, '.').collect();
+                            if parts.len() == 3 {
+                                target_plugin = Some(parts[1].to_string());
+                                action = Some(parts[2].to_string());
+                            }
+                        }
+
+                        let Some(action) = action else {
+                            return;
+                        };
+                        let target = target_plugin.as_deref().unwrap_or_default();
+                        let sent = if let Some(sender) = bus.sender_for(target) {
+                            let event = conch_plugin_sdk::PluginEvent::MenuAction {
+                                action: action.clone(),
                             };
+                            let json = serde_json::to_string(&event).unwrap_or_default();
+                            sender
+                                .blocking_send(conch_plugin::bus::PluginMail::WidgetEvent { json })
+                                .is_ok()
+                        } else {
+                            false
+                        };
 
-                            // For Java plugins: the TauriHostApi name is "java" but
-                            // plugins register on the bus with their actual name.
-                            // Broadcast the action to all Java plugins if direct send failed.
-                            if !sent {
-                                let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
-                                let json = serde_json::to_string(&event).unwrap_or_default();
-                                if let Some(ref mgr) = ps_guard.java_mgr {
-                                    for meta in mgr.loaded_plugins() {
-                                        if let Some(sender) = bus.sender_for(&meta.name) {
-                                            let _ = sender.blocking_send(
-                                                conch_plugin::bus::PluginMail::WidgetEvent {
-                                                    json: json.clone(),
-                                                },
-                                            );
-                                        }
+                        // For Java plugins: the TauriHostApi name can be shared while
+                        // plugins register on the bus with their own names.
+                        if !sent {
+                            let event = conch_plugin_sdk::PluginEvent::MenuAction { action };
+                            let json = serde_json::to_string(&event).unwrap_or_default();
+                            if let Some(ref mgr) = ps_guard.java_mgr {
+                                for meta in mgr.loaded_plugins() {
+                                    if let Some(sender) = bus.sender_for(&meta.name) {
+                                        let _ = sender.blocking_send(
+                                            conch_plugin::bus::PluginMail::WidgetEvent {
+                                                json: json.clone(),
+                                            },
+                                        );
                                     }
                                 }
                             }

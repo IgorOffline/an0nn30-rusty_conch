@@ -264,6 +264,9 @@ Static methods on `conch.plugin.HostApi`.
 | `registerMenuItem(String menu, String label, String action)` | Add a menu item |
 | `registerMenuItemWithKeybind(String menu, String label, String action, String keybind)` | Add a menu item with keyboard shortcut (e.g. `"cmd+shift+j"`) |
 
+Users can override plugin keybinds in **Settings > Keyboard Shortcuts > Plugin Shortcuts**.
+Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<plugin>:<action>"`.
+
 **Notifications:**
 
 | Method | Description |
@@ -463,6 +466,7 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 - `action_id` is the action string delivered in the event
 - `key_combo` uses the same format as menu keybinds (e.g., `cmd+shift+i`)
 - The description after `|` is optional
+- Users can override plugin keybinds in Settings without plugin code changes
 
 ```lua
 -- plugin-name: System Info

@@ -11,6 +11,7 @@
   let originalSettings = null;
   let cachedThemes = [];
   let cachedPlugins = [];
+  let cachedPluginMenuItems = [];
   let cachedFonts = { all: [], monospace: [] };
   let standaloneMode = false;   // true when running in its own window
   let standaloneRoot = null;    // root element in standalone mode
@@ -42,16 +43,18 @@
     if (document.getElementById('settings-overlay')) { close(); return; }
 
     try {
-      const [settings, themes, plugins, fonts] = await Promise.all([
+      const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
         invoke('get_all_settings'),
         invoke('list_themes'),
         invoke('scan_plugins'),
+        invoke('get_plugin_menu_items').catch(() => []),
         invoke('list_system_fonts'),
       ]);
       originalSettings = JSON.parse(JSON.stringify(settings));
       pendingSettings = JSON.parse(JSON.stringify(settings));
       cachedThemes = themes;
       cachedPlugins = plugins;
+      cachedPluginMenuItems = Array.isArray(pluginMenuItems) ? pluginMenuItems : [];
       cachedFonts = fonts;
       currentSection = 'appearance';
       renderDialog();
@@ -66,16 +69,18 @@
     standaloneRoot = rootEl;
 
     try {
-      const [settings, themes, plugins, fonts] = await Promise.all([
+      const [settings, themes, plugins, pluginMenuItems, fonts] = await Promise.all([
         invoke('get_all_settings'),
         invoke('list_themes'),
         invoke('scan_plugins'),
+        invoke('get_plugin_menu_items').catch(() => []),
         invoke('list_system_fonts'),
       ]);
       originalSettings = JSON.parse(JSON.stringify(settings));
       pendingSettings = JSON.parse(JSON.stringify(settings));
       cachedThemes = themes;
       cachedPlugins = plugins;
+      cachedPluginMenuItems = Array.isArray(pluginMenuItems) ? pluginMenuItems : [];
       cachedFonts = fonts;
       currentSection = 'appearance';
       renderStandalone();
@@ -729,32 +734,124 @@
     return parts.join('+');
   }
 
+  const KEYBOARD_CORE_LABELS = {
+    new_tab: 'New Tab',
+    close_tab: 'Close Tab',
+    rename_tab: 'Rename Tab',
+    new_window: 'New Window',
+    quit: 'Quit',
+    zen_mode: 'Zen Mode',
+    toggle_left_panel: 'Toggle File Explorer',
+    toggle_right_panel: 'Toggle Sessions Panel',
+    toggle_bottom_panel: 'Toggle Bottom Panel',
+    split_vertical: 'Split Pane Vertically',
+    split_horizontal: 'Split Pane Horizontally',
+    close_pane: 'Close Pane',
+    navigate_pane_up: 'Navigate Pane Up',
+    navigate_pane_down: 'Navigate Pane Down',
+    navigate_pane_left: 'Navigate Pane Left',
+    navigate_pane_right: 'Navigate Pane Right',
+  };
+
+  const KEYBOARD_CORE_GROUPS = [
+    {
+      label: 'Tab & Window',
+      keys: ['new_tab', 'close_tab', 'rename_tab', 'new_window', 'quit'],
+    },
+    {
+      label: 'View',
+      keys: ['zen_mode', 'toggle_left_panel', 'toggle_right_panel', 'toggle_bottom_panel'],
+    },
+    {
+      label: 'Split Panes',
+      keys: [
+        'split_vertical',
+        'split_horizontal',
+        'close_pane',
+        'navigate_pane_up',
+        'navigate_pane_down',
+        'navigate_pane_left',
+        'navigate_pane_right',
+      ],
+    },
+  ];
+
   // Currently recording shortcut state
   let recordingEl = null;
-  let recordingKey = null;
+  let recordingRef = null;
   let recordingHandler = null;
+
+  function ensurePluginShortcutMap() {
+    if (!pendingSettings?.conch?.keyboard) return {};
+    if (
+      !pendingSettings.conch.keyboard.plugin_shortcuts ||
+      typeof pendingSettings.conch.keyboard.plugin_shortcuts !== 'object'
+    ) {
+      pendingSettings.conch.keyboard.plugin_shortcuts = {};
+    }
+    return pendingSettings.conch.keyboard.plugin_shortcuts;
+  }
+
+  function getShortcutValue(ref) {
+    if (!pendingSettings?.conch?.keyboard || !ref) return '';
+    if (ref.kind === 'plugin') {
+      const map = ensurePluginShortcutMap();
+      if (Object.prototype.hasOwnProperty.call(map, ref.key)) return map[ref.key] || '';
+      return ref.defaultValue || '';
+    }
+    return pendingSettings.conch.keyboard[ref.key] || '';
+  }
+
+  function setShortcutValue(ref, value) {
+    if (!pendingSettings?.conch?.keyboard || !ref) return;
+    if (ref.kind === 'plugin') {
+      const map = ensurePluginShortcutMap();
+      map[ref.key] = value;
+      return;
+    }
+    pendingSettings.conch.keyboard[ref.key] = value;
+  }
+
+  function shortcutText(value) {
+    const formatted = formatShortcut(value);
+    return formatted || 'Unassigned';
+  }
+
+  function makeShortcutKeyBox(ref) {
+    const keyBox = document.createElement('span');
+    keyBox.className = 'settings-shortcut-key';
+    keyBox.textContent = shortcutText(getShortcutValue(ref));
+    keyBox.addEventListener('click', () => startRecording(keyBox, ref));
+    return keyBox;
+  }
+
+  function toTitleCaseWords(s) {
+    return String(s || '')
+      .split('_')
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  }
 
   function stopRecording() {
     if (recordingEl) {
       recordingEl.classList.remove('recording');
-      recordingEl.textContent = formatShortcut(
-        pendingSettings.conch.keyboard[recordingKey]
-      );
+      recordingEl.textContent = shortcutText(getShortcutValue(recordingRef));
     }
     if (recordingHandler) {
       document.removeEventListener('keydown', recordingHandler, true);
       recordingHandler = null;
     }
     recordingEl = null;
-    recordingKey = null;
+    recordingRef = null;
   }
 
-  function startRecording(el, settingsKey) {
+  function startRecording(el, settingsRef) {
     // Stop any existing recording first
     stopRecording();
 
     recordingEl = el;
-    recordingKey = settingsKey;
+    recordingRef = settingsRef;
     el.classList.add('recording');
     el.textContent = 'Press keys...';
 
@@ -771,7 +868,7 @@
       const combo = normalizeKeyEvent(e);
       if (!combo) return; // bare modifier, keep waiting
 
-      pendingSettings.conch.keyboard[settingsKey] = combo;
+      setShortcutValue(settingsRef, combo);
       stopRecording();
     };
     document.addEventListener('keydown', recordingHandler, true);
@@ -785,53 +882,56 @@
     h.textContent = 'Keyboard Shortcuts';
     c.appendChild(h);
 
-    const groups = [
-      {
-        label: 'Tab & Window',
-        shortcuts: [
-          { key: 'new_tab', label: 'New Tab' },
-          { key: 'close_tab', label: 'Close Tab' },
-          { key: 'rename_tab', label: 'Rename Tab' },
-          { key: 'new_window', label: 'New Window' },
-          { key: 'quit', label: 'Quit' },
-        ],
-      },
-      {
-        label: 'View',
-        shortcuts: [
-          { key: 'zen_mode', label: 'Zen Mode' },
-          { key: 'toggle_left_panel', label: 'Toggle File Explorer' },
-          { key: 'toggle_right_panel', label: 'Toggle Sessions Panel' },
-          { key: 'toggle_bottom_panel', label: 'Toggle Bottom Panel' },
-        ],
-      },
-      {
-        label: 'Split Panes',
-        shortcuts: [
-          { key: 'split_vertical', label: 'Split Pane Vertically' },
-          { key: 'split_horizontal', label: 'Split Pane Horizontally' },
-          { key: 'close_pane', label: 'Close Pane' },
-          { key: 'navigate_pane_up', label: 'Navigate Pane Up' },
-          { key: 'navigate_pane_down', label: 'Navigate Pane Down' },
-          { key: 'navigate_pane_left', label: 'Navigate Pane Left' },
-          { key: 'navigate_pane_right', label: 'Navigate Pane Right' },
-        ],
-      },
-    ];
-
-    for (let gi = 0; gi < groups.length; gi++) {
-      const group = groups[gi];
+    const knownKeys = new Set();
+    for (let gi = 0; gi < KEYBOARD_CORE_GROUPS.length; gi++) {
+      const group = KEYBOARD_CORE_GROUPS[gi];
       addSectionLabel(c, group.label);
 
-      for (const sc of group.shortcuts) {
-        const keyBox = document.createElement('span');
-        keyBox.className = 'settings-shortcut-key';
-        keyBox.textContent = formatShortcut(pendingSettings.conch.keyboard[sc.key]);
-        keyBox.addEventListener('click', () => startRecording(keyBox, sc.key));
-        addRow(c, sc.label, null, keyBox);
+      for (const key of group.keys) {
+        knownKeys.add(key);
+        const label = KEYBOARD_CORE_LABELS[key] || toTitleCaseWords(key);
+        addRow(c, label, null, makeShortcutKeyBox({ kind: 'core', key }));
       }
 
-      if (gi < groups.length - 1) addDivider(c);
+      addDivider(c);
+    }
+
+    const keyboard = pendingSettings?.conch?.keyboard || {};
+    const extraKeys = Object.keys(keyboard)
+      .filter((k) => k !== 'plugin_shortcuts' && typeof keyboard[k] === 'string' && !knownKeys.has(k))
+      .sort();
+    if (extraKeys.length > 0) {
+      addSectionLabel(c, 'Other');
+      for (const key of extraKeys) {
+        addRow(c, toTitleCaseWords(key), null, makeShortcutKeyBox({ kind: 'core', key }));
+      }
+      addDivider(c);
+    }
+
+    const byPluginAction = new Map();
+    for (const item of cachedPluginMenuItems || []) {
+      if (!item || !item.plugin || !item.action) continue;
+      const uniqueKey = `${item.plugin}:${item.action}`;
+      if (byPluginAction.has(uniqueKey)) continue;
+      byPluginAction.set(uniqueKey, item);
+    }
+    const pluginItems = Array.from(byPluginAction.values()).sort((a, b) => {
+      const pluginCmp = String(a.plugin || '').localeCompare(String(b.plugin || ''));
+      if (pluginCmp !== 0) return pluginCmp;
+      return String(a.label || '').localeCompare(String(b.label || ''));
+    });
+    if (pluginItems.length > 0) {
+      addSectionLabel(c, 'Plugin Shortcuts');
+      for (const item of pluginItems) {
+        const pluginKey = `${item.plugin}:${item.action}`;
+        const desc = item.menu ? `${item.plugin} \u2022 ${item.menu}` : item.plugin;
+        addRow(
+          c,
+          item.label || toTitleCaseWords(item.action),
+          desc,
+          makeShortcutKeyBox({ kind: 'plugin', key: pluginKey, defaultValue: item.keybind || '' })
+        );
+      }
     }
   }
   // --- Shared control helpers ---
@@ -1247,6 +1347,7 @@
       rescanLabel.style.opacity = '0.6';
       try {
         cachedPlugins = await invoke('scan_plugins');
+        cachedPluginMenuItems = await invoke('get_plugin_menu_items').catch(() => []);
       } catch (e) {
         if (window.toast) window.toast.error('Plugin Scan Failed', String(e));
       }
@@ -1339,6 +1440,7 @@
               if (window.toast) window.toast.success('Plugin Enabled', plugin.name);
             }
             cachedPlugins = await invoke('scan_plugins');
+            cachedPluginMenuItems = await invoke('get_plugin_menu_items').catch(() => []);
           } catch (e) {
             toggle.checked = !!plugin.loaded;
             if (window.toast) window.toast.error('Plugin Action Failed', String(e));

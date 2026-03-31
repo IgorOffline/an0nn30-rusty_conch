@@ -170,9 +170,23 @@ check_for_updates = true    # Check for new versions on startup (macOS/Windows)
 [conch.keyboard]
 new_tab = "cmd+t"
 close_tab = "cmd+w"
+new_window = "cmd+shift+n"
+quit = "cmd+q"
+rename_tab = "f2"
 zen_mode = "cmd+shift+z"
 toggle_left_panel = "cmd+shift+e"
 toggle_right_panel = "cmd+shift+r"
+toggle_bottom_panel = "cmd+shift+j"
+split_vertical = "cmd+d"
+split_horizontal = "cmd+shift+d"
+close_pane = "cmd+shift+w"
+navigate_pane_up = "cmd+alt+up"
+navigate_pane_down = "cmd+alt+down"
+navigate_pane_left = "cmd+alt+left"
+navigate_pane_right = "cmd+alt+right"
+
+[conch.keyboard.plugin_shortcuts]
+"My Plugin:do_thing" = "ctrl+alt+4"  # Per-plugin override key: "<plugin>:<action>"
 
 [conch.plugins]
 enabled = true              # Master switch

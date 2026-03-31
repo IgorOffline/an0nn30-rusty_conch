@@ -757,8 +757,22 @@ pub(crate) fn dialog_respond_confirm(
 #[tauri::command]
 pub(crate) fn get_plugin_menu_items(
     state: tauri::State<'_, Arc<Mutex<PluginState>>>,
+    app_state: tauri::State<'_, crate::TauriState>,
 ) -> Vec<PluginMenuItem> {
-    state.lock().menu_items.read().clone()
+    let mut items = state.lock().menu_items.read().clone();
+    let kb = app_state.config.read().conch.keyboard.clone();
+    for item in &mut items {
+        let key = format!("{}:{}", item.plugin, item.action);
+        if let Some(override_keybind) = kb.plugin_shortcuts.get(&key) {
+            let trimmed = override_keybind.trim();
+            item.keybind = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+    }
+    items
 }
 
 /// Trigger a plugin menu action (sends menu_action event to the plugin).
