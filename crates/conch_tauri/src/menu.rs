@@ -376,7 +376,14 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         {
             return Menu::with_items(
                 app,
-                &[&app_menu, &file_menu, &edit_menu, &view_menu, &tools_menu, &window_menu],
+                &[
+                    &app_menu,
+                    &file_menu,
+                    &edit_menu,
+                    &view_menu,
+                    &tools_menu,
+                    &window_menu,
+                ],
             );
         }
     }
@@ -734,7 +741,14 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             {
                 return Menu::with_items(
                     app,
-                    &[&app_menu, &file_menu, &edit_menu, &view_menu, &new_tools, &window_menu],
+                    &[
+                        &app_menu,
+                        &file_menu,
+                        &edit_menu,
+                        &view_menu,
+                        &new_tools,
+                        &window_menu,
+                    ],
                 );
             }
         }

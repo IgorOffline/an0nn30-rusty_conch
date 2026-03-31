@@ -566,6 +566,7 @@ mod tests {
     fn tauri_state_default_has_no_pty() {
         let state = TauriState {
             ptys: Arc::new(Mutex::new(HashMap::new())),
+            active_panes: Arc::new(Mutex::new(HashMap::new())),
             config: RwLock::new(UserConfig::default()),
         };
         assert!(state.ptys.lock().is_empty());

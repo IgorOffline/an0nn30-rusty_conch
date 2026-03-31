@@ -822,7 +822,8 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
         },
         NativeMethod {
             name: "queryPlugin".into(),
-            sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+            sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+                .into(),
             fn_ptr: native_host_query_plugin as *mut std::ffi::c_void,
         },
         NativeMethod {
@@ -1176,11 +1177,7 @@ extern "system" fn native_host_query_plugin(
     }
 }
 
-extern "system" fn native_host_register_service(
-    mut env: JNIEnv,
-    _class: JClass,
-    name: JString,
-) {
+extern "system" fn native_host_register_service(mut env: JNIEnv, _class: JClass, name: JString) {
     let Some(api) = get_api() else { return };
     let Some(svc) = jstr(&mut env, &name) else {
         return;
