@@ -232,6 +232,7 @@ Every Java plugin must implement `conch.plugin.ConchPlugin`:
 | `void onEvent(String eventJson)` | Handle events -- menu clicks, widget interactions, bus events. |
 | `String onQuery(String method, String argsJson)` | Handle direct RPC queries from other plugins. Return a JSON value string (`"null"` by default). |
 | `String render()` | Return widget tree as JSON array. Called on demand for panel plugins. |
+| `default String renderView(String viewId)` | Return widget tree JSON for a docked view instance (defaults to `render()`). |
 | `void teardown()` | Clean up resources before unload. |
 
 #### Plugin Types
@@ -270,6 +271,11 @@ Static methods on `conch.plugin.HostApi`.
 | `registerCommand(String label, String action)` | Convenience alias for adding a command under `"Tools"` |
 | `registerCommand(String label, String action, String keybind)` | `"Tools"` command with keybind |
 
+> **Overload note:** `registerCommand`/`register_command` with **3 args** means `(label, action, keybind)` under `"Tools"`.  
+> For a custom menu name:
+> - Java: use `registerMenuItem(...)` / `registerMenuItemWithKeybind(...)`
+> - Lua: use 4-arg `app.register_command(menu, label, action, keybind?)`
+
 Users can override plugin keybinds in **Settings > Keyboard Shortcuts > Plugin Shortcuts**.
 Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<plugin>:<action>"`.
 
@@ -279,6 +285,25 @@ Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<pl
 |--------|-------------|
 | `notify(String title, String body, String level, int durationMs)` | Show a toast notification (level: `"info"`, `"success"`, `"warn"`, `"error"`) |
 | `notify(String title, String body, String level)` | Show notification with default duration |
+
+**Docked Views:**
+
+| Method | Description |
+|--------|-------------|
+| `openDockedView(String requestJson)` | Request a docked split view (returns JSON `{"view_id","pane_id","tab_id"}` or null) |
+| `closeDockedView(String viewId)` | Close a docked view by `view_id` |
+| `focusDockedView(String viewId)` | Focus an existing docked view by `view_id` |
+
+Example request JSON:
+
+```json
+{
+  "id": "optional-stable-id",
+  "title": "Resource Monitor",
+  "icon": "activity",
+  "dock": { "direction": "horizontal", "ratio": 0.35 }
+}
+```
 
 **Status Bar:**
 
@@ -487,7 +512,7 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 | `-- plugin-description: ...` | No | Short description shown in Settings > Plugins |
 | `-- plugin-version: 1.0.0` | No | Semver version string (default: `"0.0.0"`) |
 | `-- plugin-api: ^1.0` | No | Required host plugin API version/range (legacy plugins may omit) |
-| `-- plugin-permissions: cap1, cap2` | No | Declared capability list for permission gating (e.g. `clipboard.read, ui.menu`) |
+| `-- plugin-permissions: cap1, cap2` | No | Declared capability list for permission gating (e.g. `clipboard.read, ui.menu, ui.dock`) |
 | `-- plugin-type: action` | No | `"action"` (default) or `"panel"` |
 | `-- plugin-location: left` | No | Panel location: `"left"` (default for panel plugins), `"right"`, `"bottom"` |
 | `-- plugin-icon: icon.png` | No | Custom icon for the panel tab (filename relative to plugin location) |
@@ -506,7 +531,7 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 -- plugin-type: panel
 -- plugin-version: 1.3.0
 -- plugin-api: ^1.0
--- plugin-permissions: ui.panel, ui.menu
+-- plugin-permissions: ui.panel, ui.menu, ui.dock
 -- plugin-location: right
 -- plugin-icon: system-info.png
 -- plugin-keybind: open_panel = cmd+shift+i | Toggle System Info panel
@@ -521,6 +546,7 @@ Each Lua plugin runs on a dedicated OS thread with its own Lua VM. The host mana
 |----------|------------|-------------|
 | `setup()` | Once, after the plugin source is loaded | Initialize state, register menu items, subscribe to events |
 | `render()` | On demand, for panel plugins | Build the widget tree using `ui.panel_*` functions |
+| `render_view(view_id)` | On demand, for docked views | Build the widget tree for a specific docked view id (fallback to `render()` when omitted) |
 | `on_event(event)` | When any event targets this plugin | Handle widget interactions, menu actions, bus events. The `event` argument is a native Lua table. |
 | `on_query(method, args_json)` | When another plugin sends an RPC query | Handle inter-plugin queries. `args_json` is a JSON string. Return a JSON string as the response. |
 | `teardown()` | When the plugin is unloaded or the app shuts down | Clean up resources |
@@ -602,6 +628,9 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 | `ui.alert(title, message)` | Blocking alert dialog |
 | `ui.error(title, message)` | Blocking error dialog |
 | `ui.form(title, fields)` | Multi-field form dialog (returns table or nil) |
+| `ui.open_docked_view(opts)` | Open/focus a docked split view (returns `{view_id, pane_id, tab_id}` or nil) |
+| `ui.close_docked_view(view_id)` | Close a docked view by id (returns boolean) |
+| `ui.focus_docked_view(view_id)` | Focus a docked view by id (returns boolean) |
 | `ui.panel_*` functions | See [Panel Widget Functions](#panel-widget-functions) below |
 
 **`session` -- Terminal and system operations:**
@@ -746,6 +775,7 @@ void setup();
 void onEvent(String eventJson);
 default String onQuery(String method, String argsJson); // default returns "null"
 String render();
+default String renderView(String viewId); // default delegates to render()
 void teardown();
 ```
 
@@ -789,6 +819,11 @@ public static void registerCommand(String label, String action, String keybind);
 public static native void notify(String title, String body, String level, int durationMs);
 public static void notify(String title, String body, String level);
 public static native void setStatus(String text, int level, float progress);
+
+// Docked views
+public static native String openDockedView(String requestJson);
+public static native boolean closeDockedView(String viewId);
+public static native boolean focusDockedView(String viewId);
 
 // Clipboard / theme / config
 public static native void clipboardSet(String text);
@@ -873,6 +908,7 @@ function setup() end                      -- optional
 function on_event(event) end              -- optional
 function on_query(method, args_json) end  -- optional; return JSON string
 function render() end                     -- optional (panel plugins usually implement)
+function render_view(view_id) end         -- optional (docked views; fallback to render())
 function teardown() end                   -- optional
 ```
 
@@ -894,6 +930,10 @@ app.register_menu_item(menu, label, action, keybind?)
 app.register_command(label, action)
 app.register_command(label, action, keybind?)
 app.register_command(menu, label, action, keybind?)
+
+-- Note: 3 args means (label, action, keybind?) under "Tools".
+-- Use 4 args to specify a menu name.
+-- Example: app.register_command("Plugins", "Open Monitor", "open_monitor", nil)
 
 app.query_plugin(target, method, args?) -> string|nil
 app.get_config(key) -> string|nil
@@ -944,7 +984,27 @@ ui.alert(title, message)
 ui.error(title, message)
 ui.confirm(message) -> boolean
 ui.prompt(message, default?) -> string|nil
+
+-- Docked views
+ui.open_docked_view(opts) -> table|nil   -- { view_id, pane_id, tab_id }
+ui.close_docked_view(view_id) -> boolean
+ui.focus_docked_view(view_id) -> boolean
 ```
+
+`ui.open_docked_view(opts)` accepts:
+
+```lua
+{
+  id = "optional-stable-id",
+  title = "Pane Title",
+  icon = "activity",
+  dock = { direction = "horizontal" | "vertical", ratio = 0.35 }
+}
+```
+
+Notes:
+- `id` enables dedupe/focus behavior for repeat opens from the same plugin.
+- `dock.ratio` is clamped to `0.1 .. 0.9`.
 
 #### `session` table
 
@@ -1111,7 +1171,6 @@ Events generated by interactive widgets. These are delivered to the plugin wrapp
 | `path_bar_navigate` | `id`, `segment_index` | Breadcrumb segment clicked (0-based index) |
 | `drop` | `id`, `source?`, `items` | Items dropped onto a DropZone |
 | `toolbar_input_submit` | `id`, `value` | Toolbar text input submitted |
-| `toolbar_input_changed` | `id`, `value` | Toolbar text input changed |
 | `context_menu_action` | `action` | Standalone context menu action triggered |
 
 ---
@@ -1124,7 +1183,7 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 
 | Kind | Fields | Description |
 |------|--------|-------------|
-| `widget` | (nested widget event fields) | A widget interaction from one of the plugin's panels. Contains the widget event fields listed above (e.g. `type`, `id`, `value`). |
+| `widget` | (nested widget event fields) | A widget interaction from plugin UI. Contains widget fields (e.g. `type`, `id`, `value`) and may include `view_id` for docked-view scoped events. |
 | `menu_action` | `action` | A menu item registered by this plugin was clicked |
 | `bus_event` | `event_type`, `data` | An inter-plugin pub/sub event |
 | `bus_query` | `method`, `args` | Direct RPC queries are routed to query callbacks (`on_query` / `onQuery`) rather than `on_event` |
@@ -1136,6 +1195,7 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 ```json
 { "kind": "menu_action", "action": "do_something" }
 { "kind": "widget", "type": "button_click", "id": "my_button" }
+{ "kind": "widget", "view_id": "plugin:example:view:1", "type": "button_click", "id": "my_button" }
 { "kind": "widget", "type": "tree_context_menu", "id": "tree1", "node_id": "srv1", "action": "delete" }
 { "kind": "bus_event", "event_type": "ssh.connected", "data": { "host": "10.0.0.1" } }
 { "kind": "theme_changed", "theme_json": "{...}" }
