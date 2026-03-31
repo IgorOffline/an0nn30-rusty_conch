@@ -728,6 +728,11 @@ fn register_host_natives(env: &mut JNIEnv) -> Result<(), LoadError> {
             fn_ptr: native_host_clipboard_get as *mut std::ffi::c_void,
         },
         NativeMethod {
+            name: "getTheme".into(),
+            sig: "()Ljava/lang/String;".into(),
+            fn_ptr: native_host_get_theme as *mut std::ffi::c_void,
+        },
+        NativeMethod {
             name: "getConfig".into(),
             sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
             fn_ptr: native_host_get_config as *mut std::ffi::c_void,
@@ -901,6 +906,19 @@ extern "system" fn native_host_clipboard_get(mut env: JNIEnv, _class: JClass) ->
         return std::ptr::null_mut();
     };
     match api.clipboard_get() {
+        Some(s) => env
+            .new_string(&s)
+            .map(|js| js.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+extern "system" fn native_host_get_theme(mut env: JNIEnv, _class: JClass) -> jobject {
+    let Some(api) = get_api() else {
+        return std::ptr::null_mut();
+    };
+    match api.get_theme() {
         Some(s) => env
             .new_string(&s)
             .map(|js| js.into_raw())

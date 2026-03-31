@@ -1,7 +1,7 @@
 //! `net.*` Lua table — time, DNS resolution, port scanning.
 
-use mlua::prelude::*;
 use super::with_host_api;
+use mlua::prelude::*;
 
 // ---------------------------------------------------------------------------
 // net.* table

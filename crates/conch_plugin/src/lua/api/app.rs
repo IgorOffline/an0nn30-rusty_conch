@@ -45,6 +45,14 @@ pub(super) fn register_app_table(lua: &Lua) -> LuaResult<()> {
     )?;
 
     app.set(
+        "get_theme",
+        lua.create_function(|lua, ()| {
+            let result = with_host_api(lua, |api| api.get_theme())?;
+            Ok(result)
+        })?,
+    )?;
+
+    app.set(
         "publish",
         lua.create_function(|lua, (event_type, data): (String, LuaValue)| {
             let data_json = serde_json::to_string(&lua_value_to_json(data)?)

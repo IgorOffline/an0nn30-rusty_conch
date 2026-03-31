@@ -191,6 +191,20 @@ public class HostApi {
     public static native String clipboardGet();
 
     // -----------------------------------------------------------------------
+    // Theme
+    // -----------------------------------------------------------------------
+
+    /**
+     * Get the current UI theme as JSON.
+     *
+     * <p>Returns a JSON object with fields such as {@code name},
+     * {@code appearance_mode}, {@code dark_mode}, and {@code colors}.</p>
+     *
+     * @return theme JSON string, or null if unavailable
+     */
+    public static native String getTheme();
+
+    // -----------------------------------------------------------------------
     // Plugin Config (persistent key/value storage)
     // -----------------------------------------------------------------------
 

@@ -39,6 +39,12 @@ pub trait HostApi: Send + Sync {
 
     // -- Theme --
     fn get_theme(&self) -> Option<String>;
+    fn get_active_session(&self) -> Option<String> {
+        None
+    }
+    fn exec_active_session(&self, _command: &str) -> Option<String> {
+        None
+    }
 
     // -- Menu --
     fn register_menu_item(&self, menu: &str, label: &str, action: &str, keybind: Option<&str>);

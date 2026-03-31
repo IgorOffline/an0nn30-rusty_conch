@@ -1,6 +1,7 @@
 //! `session.*` Lua table — platform info, command execution, PTY write, new tab.
 
 use mlua::prelude::*;
+use serde_json::Value as JsonValue;
 
 use super::with_host_api;
 
@@ -27,55 +28,64 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
-    // Execute a command locally (not in the terminal PTY).
-    // For SSH session exec, use app.query_plugin("ssh", "exec", {...}).
+    // Execute a command on the host shell (local only).
+    session.set(
+        "exec_local",
+        lua.create_function(|lua, cmd: String| -> LuaResult<LuaTable> {
+            exec_local_impl(lua, &cmd)
+        })?,
+    )?;
+
+    // Backward-compatible alias of `session.exec_local()`.
     session.set(
         "exec",
         lua.create_function(|lua, cmd: String| -> LuaResult<LuaTable> {
-            let result = lua.create_table()?;
+            exec_local_impl(lua, &cmd)
+        })?,
+    )?;
+
+    // Execute a command on the currently active session:
+    // - active SSH pane: remote exec over SSH
+    // - active local pane: local host shell exec
+    session.set(
+        "exec_active",
+        lua.create_function(|lua, cmd: String| -> LuaResult<LuaTable> {
             let allowed = with_host_api(lua, |api| api.check_permission("session.exec"))?;
             if !allowed {
-                result.set("stdout", "")?;
-                result.set("stderr", "permission denied: session.exec")?;
-                result.set("exit_code", -1)?;
-                result.set("status", "error")?;
-                return Ok(result);
+                return build_exec_error(lua, "permission denied: session.exec");
             }
-            match std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .output()
-            {
-                Ok(output) => {
-                    result.set(
-                        "stdout",
-                        String::from_utf8_lossy(&output.stdout).to_string(),
-                    )?;
-                    result.set(
-                        "stderr",
-                        String::from_utf8_lossy(&output.stderr).to_string(),
-                    )?;
-                    result.set("exit_code", output.status.code().unwrap_or(-1))?;
-                    result.set("status", "ok")?;
+
+            let tbl = lua.create_table()?;
+            match with_host_api(lua, |api| api.exec_active_session(&cmd))? {
+                Some(json) => {
+                    if let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(&json) {
+                        set_lua_table_from_json_map(&tbl, map)?;
+                        if tbl.get::<Option<String>>("status")?.is_none() {
+                            tbl.set("status", "ok")?;
+                        }
+                        if tbl.get::<Option<i64>>("exit_code")?.is_none() {
+                            tbl.set("exit_code", 0)?;
+                        }
+                        if tbl.get::<Option<String>>("stdout")?.is_none() {
+                            tbl.set("stdout", "")?;
+                        }
+                        if tbl.get::<Option<String>>("stderr")?.is_none() {
+                            tbl.set("stderr", "")?;
+                        }
+                        return Ok(tbl);
+                    }
+                    build_exec_error(lua, "host returned invalid exec response")
                 }
-                Err(e) => {
-                    result.set("stdout", "")?;
-                    result.set("stderr", e.to_string())?;
-                    result.set("exit_code", -1)?;
-                    result.set("status", "error")?;
-                }
+                None => build_exec_error(lua, "active session execution unavailable"),
             }
-            Ok(result)
         })?,
     )?;
 
     // Get info about the currently active session.
-    // Returns a table with basic session info. For detailed info about SSH
-    // sessions, use app.query_plugin("ssh", "get_sessions").
     session.set(
         "current",
-        lua.create_function(|_lua, ()| -> LuaResult<LuaTable> {
-            let tbl = _lua.create_table()?;
+        lua.create_function(|lua, ()| -> LuaResult<LuaTable> {
+            let tbl = lua.create_table()?;
             let platform = if cfg!(target_os = "macos") {
                 "macos"
             } else if cfg!(target_os = "linux") {
@@ -85,8 +95,17 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
             } else {
                 "unknown"
             };
+
+            if let Some(json) = with_host_api(lua, |api| api.get_active_session())?
+                && let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(&json)
+            {
+                set_lua_table_from_json_map(&tbl, map)?;
+            }
+
             tbl.set("platform", platform)?;
-            tbl.set("type", "local")?;
+            if tbl.get::<Option<String>>("type")?.is_none() {
+                tbl.set("type", "local")?;
+            }
             Ok(tbl)
         })?,
     )?;
@@ -116,5 +135,63 @@ pub(super) fn register_session_table(lua: &Lua) -> LuaResult<()> {
     )?;
 
     lua.globals().set("session", session)?;
+    Ok(())
+}
+
+fn build_exec_error(lua: &Lua, msg: &str) -> LuaResult<LuaTable> {
+    let result = lua.create_table()?;
+    result.set("stdout", "")?;
+    result.set("stderr", msg)?;
+    result.set("exit_code", -1)?;
+    result.set("status", "error")?;
+    Ok(result)
+}
+
+fn exec_local_impl(lua: &Lua, cmd: &str) -> LuaResult<LuaTable> {
+    let allowed = with_host_api(lua, |api| api.check_permission("session.exec"))?;
+    if !allowed {
+        return build_exec_error(lua, "permission denied: session.exec");
+    }
+    match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+        Ok(output) => {
+            let result = lua.create_table()?;
+            result.set(
+                "stdout",
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            )?;
+            result.set(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )?;
+            result.set("exit_code", output.status.code().unwrap_or(-1))?;
+            result.set("status", "ok")?;
+            Ok(result)
+        }
+        Err(e) => build_exec_error(lua, &e.to_string()),
+    }
+}
+
+fn set_lua_table_from_json_map(
+    tbl: &LuaTable,
+    map: serde_json::Map<String, JsonValue>,
+) -> LuaResult<()> {
+    for (k, v) in map {
+        match v {
+            JsonValue::String(s) => {
+                tbl.set(k, s)?;
+            }
+            JsonValue::Bool(b) => {
+                tbl.set(k, b)?;
+            }
+            JsonValue::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    tbl.set(k, i)?;
+                } else if let Some(f) = n.as_f64() {
+                    tbl.set(k, f)?;
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }

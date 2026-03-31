@@ -104,8 +104,7 @@ impl PermissionCheckedHostApi {
         let key = format!("{plugin_name}:{method}:{capability}");
         let mut seen = self.denied_notices.lock();
         if seen.insert(key) {
-            self.inner
-                .show_error("Plugin Permission Denied", msg);
+            self.inner.show_error("Plugin Permission Denied", msg);
         }
     }
 }
@@ -209,6 +208,20 @@ impl HostApi for PermissionCheckedHostApi {
 
     fn get_theme(&self) -> Option<String> {
         self.inner.get_theme()
+    }
+
+    fn get_active_session(&self) -> Option<String> {
+        if !self.check_capability("get_active_session", "session.status") {
+            return None;
+        }
+        self.inner.get_active_session()
+    }
+
+    fn exec_active_session(&self, command: &str) -> Option<String> {
+        if !self.check_capability("exec_active_session", "session.exec") {
+            return None;
+        }
+        self.inner.exec_active_session(command)
     }
 
     fn register_menu_item(&self, menu: &str, label: &str, action: &str, keybind: Option<&str>) {
@@ -320,34 +333,60 @@ mod tests {
     }
 
     impl HostApi for MockHost {
-        fn plugin_name(&self) -> &str { &self.name }
-        fn register_panel(&self, _: PanelLocation, _: &str, _: Option<&str>) -> u64 { 1 }
+        fn plugin_name(&self) -> &str {
+            &self.name
+        }
+        fn register_panel(&self, _: PanelLocation, _: &str, _: Option<&str>) -> u64 {
+            1
+        }
         fn set_widgets(&self, _: u64, _: &str) {}
         fn log(&self, _: u8, _: &str) {}
         fn notify(&self, _: &str) {}
         fn set_status(&self, _: Option<&str>, _: u8, _: f32) {}
         fn publish_event(&self, _: &str, _: &str) {}
         fn subscribe(&self, _: &str) {}
-        fn query_plugin(&self, _: &str, _: &str, _: &str) -> Option<String> { None }
+        fn query_plugin(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
         fn register_service(&self, _: &str) {}
-        fn get_config(&self, _: &str) -> Option<String> { None }
+        fn get_config(&self, _: &str) -> Option<String> {
+            None
+        }
         fn set_config(&self, _: &str, _: &str) {}
         fn clipboard_set(&self, _: &str) {}
-        fn clipboard_get(&self) -> Option<String> { Some("secret".into()) }
-        fn get_theme(&self) -> Option<String> { None }
+        fn clipboard_get(&self) -> Option<String> {
+            Some("secret".into())
+        }
+        fn get_theme(&self) -> Option<String> {
+            None
+        }
         fn register_menu_item(&self, _: &str, _: &str, _: &str, _: Option<&str>) {}
-        fn show_form(&self, _: &str) -> Option<String> { None }
-        fn show_confirm(&self, _: &str) -> bool { false }
-        fn show_prompt(&self, _: &str, _: &str) -> Option<String> { None }
+        fn show_form(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn show_confirm(&self, _: &str) -> bool {
+            false
+        }
+        fn show_prompt(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
         fn show_alert(&self, _: &str, _: &str) {}
-        fn show_error(&self, _: &str, msg: &str) { self.errors.lock().push(msg.to_string()); }
-        fn show_context_menu(&self, _: &str) -> Option<String> { None }
+        fn show_error(&self, _: &str, msg: &str) {
+            self.errors.lock().push(msg.to_string());
+        }
+        fn show_context_menu(&self, _: &str) -> Option<String> {
+            None
+        }
         fn write_to_pty(&self, _: &[u8]) {}
         fn new_tab(&self, _: Option<&str>, _: bool) {}
-        fn open_session(&self, _: &str) -> u64 { 0 }
+        fn open_session(&self, _: &str) -> u64 {
+            0
+        }
         fn close_session(&self, _: u64) {}
         fn set_session_status(&self, _: u64, _: u8, _: Option<&str>) {}
-        fn session_prompt(&self, _: u64, _: u8, _: &str, _: Option<&str>) -> Option<String> { None }
+        fn session_prompt(&self, _: u64, _: u8, _: &str, _: Option<&str>) -> Option<String> {
+            None
+        }
     }
 
     #[test]

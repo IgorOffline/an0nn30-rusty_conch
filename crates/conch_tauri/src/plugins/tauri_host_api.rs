@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use conch_plugin::HostApi;
@@ -12,7 +13,7 @@ use conch_plugin::bus::PluginBus;
 use conch_plugin_sdk::PanelLocation;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use super::{PanelInfo, PendingDialogs, PluginMenuItem};
 
@@ -26,6 +27,23 @@ pub(crate) struct TauriHostApi {
     pub panels: std::sync::Arc<RwLock<HashMap<u64, PanelInfo>>>,
     pub menu_items: std::sync::Arc<RwLock<Vec<PluginMenuItem>>>,
     pub pending_dialogs: std::sync::Arc<Mutex<PendingDialogs>>,
+}
+
+impl TauriHostApi {
+    fn active_window_and_pane(&self) -> Option<(String, u32)> {
+        let tauri_state = self.app_handle.state::<crate::TauriState>();
+        let active = tauri_state.active_panes.lock();
+        if active.is_empty() {
+            return None;
+        }
+        let label = if active.contains_key("main") {
+            "main".to_string()
+        } else {
+            active.keys().next()?.clone()
+        };
+        let pane_id = *active.get(&label)?;
+        Some((label, pane_id))
+    }
 }
 
 // -- Tauri events emitted by TauriHostApi --
@@ -247,11 +265,145 @@ impl HostApi for TauriHostApi {
     }
 
     fn get_theme(&self) -> Option<String> {
-        // Return a basic theme descriptor. Can be expanded later.
+        let tauri_state = self.app_handle.state::<crate::TauriState>();
+        let cfg = tauri_state.config.read();
+        let colors = crate::theme::resolve_theme_colors(&cfg);
+        let appearance_mode = format!("{:?}", cfg.colors.appearance_mode).to_lowercase();
+        let dark_mode = !matches!(
+            cfg.colors.appearance_mode,
+            conch_core::config::AppearanceMode::Light
+        );
         Some(
             serde_json::json!({
-                "dark_mode": true,
-                "name": "dracula",
+                "name": cfg.colors.theme,
+                "appearance_mode": appearance_mode,
+                "dark_mode": dark_mode,
+                "colors": colors,
+            })
+            .to_string(),
+        )
+    }
+
+    fn get_active_session(&self) -> Option<String> {
+        let tauri_state = self.app_handle.state::<crate::TauriState>();
+        let (window_label, pane_id) = self.active_window_and_pane()?;
+
+        let key = crate::pty::session_key(&window_label, pane_id);
+
+        let remote_state = self
+            .app_handle
+            .state::<Arc<Mutex<crate::remote::RemoteState>>>();
+        if let Some(remote) = remote_state.lock().sessions.get(&key) {
+            return Some(
+                serde_json::json!({
+                    "window_label": window_label,
+                    "pane_id": pane_id,
+                    "key": key,
+                    "type": "ssh",
+                    "host": remote.host,
+                    "user": remote.user,
+                    "port": remote.port,
+                })
+                .to_string(),
+            );
+        }
+
+        if tauri_state.ptys.lock().contains_key(&key) {
+            return Some(
+                serde_json::json!({
+                    "window_label": window_label,
+                    "pane_id": pane_id,
+                    "key": key,
+                    "type": "local",
+                })
+                .to_string(),
+            );
+        }
+
+        Some(
+            serde_json::json!({
+                "window_label": window_label,
+                "pane_id": pane_id,
+                "key": key,
+                "type": "unknown",
+            })
+            .to_string(),
+        )
+    }
+
+    fn exec_active_session(&self, command: &str) -> Option<String> {
+        let tauri_state = self.app_handle.state::<crate::TauriState>();
+        let (window_label, pane_id) = self.active_window_and_pane()?;
+        let key = crate::pty::session_key(&window_label, pane_id);
+
+        let remote_state = self
+            .app_handle
+            .state::<Arc<Mutex<crate::remote::RemoteState>>>();
+
+        let ssh_handle = {
+            let state = remote_state.lock();
+            if let Some(session) = state.sessions.get(&key) {
+                state
+                    .connections
+                    .get(&session.connection_id)
+                    .map(|conn| Arc::clone(&conn.ssh_handle))
+            } else {
+                None
+            }
+        };
+
+        if let Some(ssh_handle) = ssh_handle {
+            let result =
+                tauri::async_runtime::block_on(conch_remote::ssh::exec(&ssh_handle, command));
+            return Some(match result {
+                Ok((stdout, stderr, exit_code)) => serde_json::json!({
+                    "status": "ok",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code as i64,
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "status": "error",
+                    "stdout": "",
+                    "stderr": e.to_string(),
+                    "exit_code": -1,
+                })
+                .to_string(),
+            });
+        }
+
+        if tauri_state.ptys.lock().contains_key(&key) {
+            return Some(
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .output()
+                {
+                    Ok(output) => serde_json::json!({
+                        "status": "ok",
+                        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                        "exit_code": output.status.code().unwrap_or(-1),
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({
+                        "status": "error",
+                        "stdout": "",
+                        "stderr": e.to_string(),
+                        "exit_code": -1,
+                    })
+                    .to_string(),
+                },
+            );
+        }
+
+        Some(
+            serde_json::json!({
+                "status": "error",
+                "stdout": "",
+                "stderr": "no active session",
+                "exit_code": -1,
             })
             .to_string(),
         )

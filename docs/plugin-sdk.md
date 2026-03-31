@@ -298,6 +298,12 @@ Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<pl
 | `clipboardSet(String text)` | Copy text to system clipboard |
 | `clipboardGet()` | Get clipboard text (returns null if unavailable) |
 
+**Theme:**
+
+| Method | Description |
+|--------|-------------|
+| `getTheme()` | Get current theme JSON (name, appearance mode, dark mode, and resolved color map) |
+
 **Config (persistent per-plugin storage):**
 
 | Method | Description |
@@ -556,6 +562,7 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 | `app.notify(title, body, level?, duration_ms?)` | Show a toast notification (level: `"info"`, `"success"`, `"warn"`, `"error"`) |
 | `app.clipboard(text)` | Copy text to system clipboard |
 | `app.clipboard_get()` | Get clipboard text (returns string or nil) |
+| `app.get_theme()` | Get current theme JSON string (or nil if unavailable) |
 | `app.query_plugin(target, method, args?)` | RPC query to another plugin (args is a Lua table or nil; returns string or nil) |
 
 **`ui` -- Dialogs and panel widgets:**
@@ -574,12 +581,24 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 | Function | Description |
 |----------|-------------|
 | `session.platform()` | Get current OS platform (returns `"macos"`, `"linux"`, `"windows"`, or `"unknown"`) |
-| `session.current()` | Get info about the active session (returns table with `platform` and `type` fields) |
-| `session.exec(command)` | Run a local shell command (returns table with `stdout`, `stderr`, `exit_code`, `status`) |
+| `session.current()` | Get info about the active session (always includes `platform` and `type`; may include `window_label`, `pane_id`, `key`, and SSH fields like `host`, `user`, `port`) |
+| `session.exec_local(command)` | Run a local host shell command (returns table with `stdout`, `stderr`, `exit_code`, `status`) |
+| `session.exec_active(command)` | Run a command on the active session (SSH pane = remote exec, local pane = local exec; returns table with `stdout`, `stderr`, `exit_code`, `status`) |
+| `session.exec(command)` | Backward-compatible alias for `session.exec_local(command)` |
 | `session.write(text)` | Write text to the focused terminal PTY |
 | `session.new_tab(command?, plain?)` | Open a new tab (plain=true uses OS default shell) |
 
 > **Note:** `session.platform()` is a function call, not a property access. Use `session.platform()` (with parentheses).
+
+```lua
+-- Always runs on the host machine:
+local local_result = session.exec_local("uname -a")
+
+-- Runs against the active pane:
+-- - active SSH pane => remote command over SSH
+-- - active local pane => local host command
+local active_result = session.exec_active("pwd")
+```
 
 **`net` -- Network operations:**
 

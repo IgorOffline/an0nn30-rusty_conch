@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tauri::Emitter;
 use ts_rs::TS;
 
-use crate::plugins::PluginState;
 use crate::TauriState;
+use crate::plugins::PluginState;
 use crate::theme;
 
 fn normalize_plugin_search_paths(cfg: &mut UserConfig) {
