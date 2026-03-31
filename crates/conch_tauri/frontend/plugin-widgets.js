@@ -104,7 +104,7 @@
   // Widget rendering
   // ---------------------------------------------------------------------------
 
-  function renderWidgets(container, widgetsJson, pluginName) {
+  function renderWidgets(container, widgetsJson, pluginName, viewId) {
     let widgets;
     try {
       widgets = typeof widgetsJson === 'string' ? JSON.parse(widgetsJson) : widgetsJson;
@@ -117,14 +117,14 @@
 
     const frag = document.createDocumentFragment();
     for (const w of widgets) {
-      const el = renderWidget(w, pluginName);
+      const el = renderWidget(w, pluginName, viewId);
       if (el) frag.appendChild(el);
     }
     container.innerHTML = '';
     container.appendChild(frag);
   }
 
-  function renderWidget(w, pluginName) {
+  function renderWidget(w, pluginName, viewId) {
     if (!w || !w.type) return null;
 
     switch (w.type) {
@@ -138,18 +138,18 @@
       case 'icon_label': return renderIconLabel(w);
       case 'badge': return renderBadge(w);
       case 'progress': return renderProgress(w);
-      case 'button': return renderButton(w, pluginName);
-      case 'text_input': return renderTextInput(w, pluginName);
-      case 'text_edit': return renderTextEdit(w, pluginName);
-      case 'checkbox': return renderCheckbox(w, pluginName);
-      case 'combo_box': return renderComboBox(w, pluginName);
-      case 'toolbar': return renderToolbar(w, pluginName);
-      case 'tree_view': return renderTreeView(w, pluginName);
-      case 'table': return renderTable(w, pluginName);
-      case 'horizontal': return renderHorizontal(w, pluginName);
-      case 'vertical': return renderVertical(w, pluginName);
-      case 'scroll_area': return renderScrollArea(w, pluginName);
-      case 'tabs': return renderTabs(w, pluginName);
+      case 'button': return renderButton(w, pluginName, viewId);
+      case 'text_input': return renderTextInput(w, pluginName, viewId);
+      case 'text_edit': return renderTextEdit(w, pluginName, viewId);
+      case 'checkbox': return renderCheckbox(w, pluginName, viewId);
+      case 'combo_box': return renderComboBox(w, pluginName, viewId);
+      case 'toolbar': return renderToolbar(w, pluginName, viewId);
+      case 'tree_view': return renderTreeView(w, pluginName, viewId);
+      case 'table': return renderTable(w, pluginName, viewId);
+      case 'horizontal': return renderHorizontal(w, pluginName, viewId);
+      case 'vertical': return renderVertical(w, pluginName, viewId);
+      case 'scroll_area': return renderScrollArea(w, pluginName, viewId);
+      case 'tabs': return renderTabs(w, pluginName, viewId);
       default:
         const el = document.createElement('div');
         el.className = 'pw-unknown';
@@ -160,41 +160,41 @@
 
   // -- Layout --
 
-  function renderHorizontal(w, pn) {
+  function renderHorizontal(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-horizontal';
     if (w.spacing) el.style.gap = w.spacing + 'px';
     if (w.centered) el.style.justifyContent = 'center';
     for (const child of (w.children || [])) {
-      const c = renderWidget(child, pn);
+      const c = renderWidget(child, pn, viewId);
       if (c) el.appendChild(c);
     }
     return el;
   }
 
-  function renderVertical(w, pn) {
+  function renderVertical(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-vertical';
     if (w.spacing) el.style.gap = w.spacing + 'px';
     for (const child of (w.children || [])) {
-      const c = renderWidget(child, pn);
+      const c = renderWidget(child, pn, viewId);
       if (c) el.appendChild(c);
     }
     return el;
   }
 
-  function renderScrollArea(w, pn) {
+  function renderScrollArea(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-scroll-area';
     if (w.max_height) el.style.maxHeight = w.max_height + 'px';
     for (const child of (w.children || [])) {
-      const c = renderWidget(child, pn);
+      const c = renderWidget(child, pn, viewId);
       if (c) el.appendChild(c);
     }
     return el;
   }
 
-  function renderTabs(w, pn) {
+  function renderTabs(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-tabs';
     const bar = document.createElement('div');
@@ -207,13 +207,13 @@
       btn.className = 'pw-tab-btn' + (i === w.active ? ' active' : '');
       btn.textContent = tab.label;
       btn.addEventListener('click', () => {
-        sendEvent(pn, { type: 'tab_changed', id: w.id, active: i });
+        sendEvent(pn, { type: 'tab_changed', id: w.id, active: i }, viewId);
       });
       bar.appendChild(btn);
 
       if (i === w.active) {
         for (const child of (tab.children || [])) {
-          const c = renderWidget(child, pn);
+          const c = renderWidget(child, pn, viewId);
           if (c) content.appendChild(c);
         }
       }
@@ -309,17 +309,17 @@
 
   // -- Interactive --
 
-  function renderButton(w, pn) {
+  function renderButton(w, pn, viewId) {
     const el = document.createElement('button');
     el.className = 'pw-button';
     if (w.icon) el.innerHTML = iconHtml(w.icon, 14) + esc(w.label);
     else el.textContent = w.label;
     if (w.enabled === false) el.disabled = true;
-    el.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: w.id }));
+    el.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: w.id }, viewId));
     return el;
   }
 
-  function renderTextInput(w, pn) {
+  function renderTextInput(w, pn, viewId) {
     const el = document.createElement('input');
     el.className = 'pw-text-input';
     el.type = 'text';
@@ -330,45 +330,45 @@
     el.addEventListener('input', () => {
       clearTimeout(debounce);
       debounce = setTimeout(() => {
-        sendEvent(pn, { type: 'text_input_changed', id: w.id, value: el.value });
+        sendEvent(pn, { type: 'text_input_changed', id: w.id, value: el.value }, viewId);
       }, 200);
     });
     el.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendEvent(pn, { type: 'text_input_submit', id: w.id, value: el.value });
-      if (e.key === 'ArrowDown') sendEvent(pn, { type: 'text_input_arrow_down', id: w.id });
-      if (e.key === 'ArrowUp') sendEvent(pn, { type: 'text_input_arrow_up', id: w.id });
+      if (e.key === 'Enter') sendEvent(pn, { type: 'text_input_submit', id: w.id, value: el.value }, viewId);
+      if (e.key === 'ArrowDown') sendEvent(pn, { type: 'text_input_arrow_down', id: w.id }, viewId);
+      if (e.key === 'ArrowUp') sendEvent(pn, { type: 'text_input_arrow_up', id: w.id }, viewId);
     });
     if (w.request_focus) setTimeout(() => el.focus(), 50);
     return el;
   }
 
-  function renderTextEdit(w, pn) {
+  function renderTextEdit(w, pn, viewId) {
     const el = document.createElement('textarea');
     el.className = 'pw-text-edit';
     el.value = w.value || '';
     if (w.hint) el.placeholder = w.hint;
     if (w.lines) el.rows = w.lines;
     el.addEventListener('input', () => {
-      sendEvent(pn, { type: 'text_edit_changed', id: w.id, value: el.value });
+      sendEvent(pn, { type: 'text_edit_changed', id: w.id, value: el.value }, viewId);
     });
     return el;
   }
 
-  function renderCheckbox(w, pn) {
+  function renderCheckbox(w, pn, viewId) {
     const el = document.createElement('label');
     el.className = 'pw-checkbox';
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.checked = w.checked;
     input.addEventListener('change', () => {
-      sendEvent(pn, { type: 'checkbox_changed', id: w.id, checked: input.checked });
+      sendEvent(pn, { type: 'checkbox_changed', id: w.id, checked: input.checked }, viewId);
     });
     el.appendChild(input);
     el.appendChild(document.createTextNode(' ' + w.label));
     return el;
   }
 
-  function renderComboBox(w, pn) {
+  function renderComboBox(w, pn, viewId) {
     const el = document.createElement('select');
     el.className = 'pw-combo-box';
     for (const opt of (w.options || [])) {
@@ -379,14 +379,14 @@
       el.appendChild(o);
     }
     el.addEventListener('change', () => {
-      sendEvent(pn, { type: 'combo_box_changed', id: w.id, value: el.value });
+      sendEvent(pn, { type: 'combo_box_changed', id: w.id, value: el.value }, viewId);
     });
     return el;
   }
 
   // -- Toolbar --
 
-  function renderToolbar(w, pn) {
+  function renderToolbar(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-toolbar';
     for (const item of (w.items || [])) {
@@ -404,7 +404,7 @@
         btn.textContent = item.label || '';
         if (item.tooltip) btn.title = item.tooltip;
         if (item.enabled === false) btn.disabled = true;
-        btn.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: item.id }));
+        btn.addEventListener('click', () => sendEvent(pn, { type: 'button_click', id: item.id }, viewId));
         el.appendChild(btn);
       } else if (item.type === 'text_input') {
         const input = document.createElement('input');
@@ -413,7 +413,7 @@
         input.value = item.value || '';
         if (item.hint) input.placeholder = item.hint;
         input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') sendEvent(pn, { type: 'toolbar_input_submit', id: item.id, value: input.value });
+          if (e.key === 'Enter') sendEvent(pn, { type: 'toolbar_input_submit', id: item.id, value: input.value }, viewId);
         });
         el.appendChild(input);
       }
@@ -423,16 +423,16 @@
 
   // -- Tree View --
 
-  function renderTreeView(w, pn) {
+  function renderTreeView(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-tree';
     for (const node of (w.nodes || [])) {
-      el.appendChild(renderTreeNode(node, w.id, w.selected, pn));
+      el.appendChild(renderTreeNode(node, w.id, w.selected, pn, viewId));
     }
     return el;
   }
 
-  function renderTreeNode(node, treeId, selectedId, pn) {
+  function renderTreeNode(node, treeId, selectedId, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-tree-node';
 
@@ -449,7 +449,7 @@
       arrow.textContent = expanded ? '▼' : '▶';
       arrow.addEventListener('click', (e) => {
         e.stopPropagation();
-        sendEvent(pn, { type: 'tree_toggle', id: treeId, node_id: node.id, expanded: !expanded });
+        sendEvent(pn, { type: 'tree_toggle', id: treeId, node_id: node.id, expanded: !expanded }, viewId);
       });
       row.appendChild(arrow);
     } else {
@@ -477,10 +477,10 @@
     }
 
     row.addEventListener('click', () => {
-      sendEvent(pn, { type: 'tree_select', id: treeId, node_id: node.id });
+      sendEvent(pn, { type: 'tree_select', id: treeId, node_id: node.id }, viewId);
     });
     row.addEventListener('dblclick', () => {
-      sendEvent(pn, { type: 'tree_activate', id: treeId, node_id: node.id });
+      sendEvent(pn, { type: 'tree_activate', id: treeId, node_id: node.id }, viewId);
     });
 
     el.appendChild(row);
@@ -489,7 +489,7 @@
       const childContainer = document.createElement('div');
       childContainer.className = 'pw-tree-children';
       for (const child of node.children) {
-        childContainer.appendChild(renderTreeNode(child, treeId, selectedId, pn));
+        childContainer.appendChild(renderTreeNode(child, treeId, selectedId, pn, viewId));
       }
       el.appendChild(childContainer);
     }
@@ -499,7 +499,7 @@
 
   // -- Table --
 
-  function renderTable(w, pn) {
+  function renderTable(w, pn, viewId) {
     const el = document.createElement('div');
     el.className = 'pw-table-wrap';
 
@@ -521,7 +521,7 @@
         }
         th.addEventListener('click', () => {
           const asc = w.sort_column === col.id ? !w.sort_ascending : true;
-          sendEvent(pn, { type: 'table_sort', id: w.id, column: col.id, ascending: asc });
+          sendEvent(pn, { type: 'table_sort', id: w.id, column: col.id, ascending: asc }, viewId);
         });
       }
       headerRow.appendChild(th);
@@ -548,10 +548,10 @@
         tr.appendChild(td);
       }
       tr.addEventListener('click', () => {
-        sendEvent(pn, { type: 'table_select', id: w.id, row_id: row.id });
+        sendEvent(pn, { type: 'table_select', id: w.id, row_id: row.id }, viewId);
       });
       tr.addEventListener('dblclick', () => {
-        sendEvent(pn, { type: 'table_activate', id: w.id, row_id: row.id });
+        sendEvent(pn, { type: 'table_activate', id: w.id, row_id: row.id }, viewId);
       });
       tbody.appendChild(tr);
     }
@@ -564,17 +564,10 @@
   // Event dispatch
   // ---------------------------------------------------------------------------
 
-  function sendEvent(pluginName, widgetEvent) {
+  function sendEvent(pluginName, widgetEvent, viewId) {
     if (!invoke || !pluginName) return;
     const payload = { kind: 'widget', ...widgetEvent };
-    // Optional view-scoped routing context for docked plugin views.
-    const active = document.activeElement;
-    if (active && typeof active.closest === 'function') {
-      const viewRoot = active.closest('[data-plugin-view-id]');
-      if (viewRoot && viewRoot.dataset && viewRoot.dataset.pluginViewId) {
-        payload.view_id = viewRoot.dataset.pluginViewId;
-      }
-    }
+    if (viewId) payload.view_id = viewId;
     const eventJson = JSON.stringify(payload);
     invoke('plugin_widget_event', { pluginName, eventJson }).catch((e) => {
       console.error('plugin_widget_event error:', e);

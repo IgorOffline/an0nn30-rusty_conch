@@ -2385,13 +2385,43 @@
 
         const header = document.createElement('div');
         header.className = 'ssh-section-header';
-        header.textContent = (req && req.title) ? String(req.title) : plugin;
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        const titleEl = document.createElement('span');
+        titleEl.textContent = (req && req.title) ? String(req.title) : plugin;
+        const actionsEl = document.createElement('span');
+        actionsEl.style.display = 'inline-flex';
+        actionsEl.style.gap = '8px';
+        const minBtn = document.createElement('button');
+        minBtn.className = 'bottom-panel-action-btn';
+        minBtn.textContent = '−';
+        minBtn.title = 'Minimize';
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'bottom-panel-action-btn';
+        closeBtn.textContent = '×';
+        closeBtn.title = 'Close';
+        actionsEl.appendChild(minBtn);
+        actionsEl.appendChild(closeBtn);
+        header.appendChild(titleEl);
+        header.appendChild(actionsEl);
         paneEl.appendChild(header);
 
         const widgetContainer = document.createElement('div');
         widgetContainer.className = 'plugin-panel-content';
         widgetContainer.dataset.pluginViewId = viewId;
         paneEl.appendChild(widgetContainer);
+        let minimized = false;
+        minBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          minimized = !minimized;
+          widgetContainer.style.display = minimized ? 'none' : '';
+          minBtn.textContent = minimized ? '+' : '−';
+        });
+        closeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          closePane(newPaneId);
+        });
 
         const pane = {
           paneId: newPaneId,
@@ -2433,7 +2463,7 @@
             viewId,
           });
           if (result && window.pluginWidgets) {
-            window.pluginWidgets.renderWidgets(widgetContainer, result, plugin);
+            window.pluginWidgets.renderWidgets(widgetContainer, result, plugin, viewId);
           }
         } catch (e) {
           widgetContainer.textContent = 'Plugin view render failed: ' + String(e);
@@ -2608,6 +2638,15 @@
           if (!viewId || !pluginViewPaneById.has(viewId)) return;
           const paneId = pluginViewPaneById.get(viewId);
           closePane(paneId);
+        });
+
+        listenOnCurrentWindow('plugin-views-removed', (event) => {
+          const viewIds = (event && event.payload && event.payload.view_ids) || [];
+          for (const viewId of viewIds) {
+            if (!pluginViewPaneById.has(viewId)) continue;
+            const paneId = pluginViewPaneById.get(viewId);
+            closePane(paneId);
+          }
         });
       }
 
