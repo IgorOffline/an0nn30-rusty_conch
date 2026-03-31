@@ -5,9 +5,18 @@ import conch.plugin.HostApi;
 import conch.plugin.PluginInfo;
 
 /**
- * Minimal Java plugin for Conch — registers a menu item that logs a message.
+ * Java parity sample plugin for Conch.
+ *
+ * Demonstrates:
+ * - menu registration
+ * - status/notification APIs
+ * - active session introspection
+ * - service registration + query RPC via onQuery()
  */
 public class HelloPlugin implements ConchPlugin {
+    private static final String ACTION_HELLO = "say_hello";
+    private static final String ACTION_QUERY = "query_self";
+    private static final String SERVICE_NAME = "hello_java_service";
 
     @Override
     public PluginInfo getInfo() {
@@ -23,14 +32,32 @@ public class HelloPlugin implements ConchPlugin {
     @Override
     public void setup() {
         HostApi.info("Hello Java plugin: setup");
-        HostApi.registerMenuItem("Tools", "Java: Say Hello", "say_hello");
+        HostApi.registerMenuItem("Tools", "Java: Say Hello", ACTION_HELLO);
+        HostApi.registerMenuItem("Tools", "Java: Query Service", ACTION_QUERY);
+        HostApi.registerService(SERVICE_NAME);
+        HostApi.setStatus("Hello Java ready", 0, -1.0f);
     }
 
     @Override
     public void onEvent(String eventJson) {
-        if (eventJson.contains("say_hello")) {
-            HostApi.info("Hello from Java plugin! The menu item was clicked.");
+        if (eventJson.contains(ACTION_HELLO)) {
+            String active = HostApi.getActiveSession();
+            HostApi.info("Hello from Java plugin! Active session=" + active);
+            HostApi.notify("Hello Java", "Active session: " + active, "info", 3500);
+            return;
         }
+        if (eventJson.contains(ACTION_QUERY)) {
+            String result = HostApi.queryPlugin(SERVICE_NAME, "hello_status", "{}");
+            HostApi.notify("Hello Java RPC", String.valueOf(result), "success", 3500);
+        }
+    }
+
+    @Override
+    public String onQuery(String method, String argsJson) {
+        if ("hello_status".equals(method)) {
+            return "{\"plugin\":\"Hello Java\",\"status\":\"ok\"}";
+        }
+        return "null";
     }
 
     @Override
