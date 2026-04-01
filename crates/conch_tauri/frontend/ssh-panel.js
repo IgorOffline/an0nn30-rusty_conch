@@ -149,22 +149,26 @@
   // ---------------------------------------------------------------------------
 
   function isHidden() {
+    if (window.toolWindowManager) return !window.toolWindowManager.isVisible('ssh-sessions');
     return panelWrapEl.classList.contains('hidden');
   }
 
   function showPanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.activate('ssh-sessions'); return; }
     panelWrapEl.classList.remove('hidden');
     if (fitActiveTabFn) fitActiveTabFn();
     saveLayoutState();
   }
 
   function hidePanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.deactivate('ssh-sessions'); return; }
     panelWrapEl.classList.add('hidden');
     if (fitActiveTabFn) fitActiveTabFn();
     saveLayoutState();
   }
 
   function togglePanel() {
+    if (window.toolWindowManager) { window.toolWindowManager.toggle('ssh-sessions'); return; }
     if (isHidden()) showPanel(); else hidePanel();
   }
 
@@ -258,6 +262,8 @@
   }
 
   async function restoreLayout() {
+    // When TWM is active, sidebar width and visibility are managed centrally.
+    if (window.toolWindowManager) return;
     try {
       const saved = await invoke('get_saved_layout');
       if (saved.ssh_panel_width > 100) {
