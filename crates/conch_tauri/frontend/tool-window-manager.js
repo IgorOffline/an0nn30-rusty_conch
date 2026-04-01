@@ -20,6 +20,8 @@
     right: { wrapEl: null, panelEl: null, resizeEl: null, dividerEl: null },
   };
 
+  const strips = { left: null, right: null };
+
   let fitActiveTabFn = null;
   let saveLayoutFn = null;
   let savedZoneAssignments = null; // populated from backend before registration
@@ -48,6 +50,9 @@
     sidebars.right.panelEl   = document.getElementById('right-panel-container');
     sidebars.right.resizeEl  = document.getElementById('right-sidebar-resize');
     sidebars.right.dividerEl = document.getElementById('right-zone-divider');
+
+    strips.left  = document.getElementById('left-strip');
+    strips.right = document.getElementById('right-strip');
 
     initSidebarResize('left');
     initSidebarResize('right');
@@ -83,6 +88,7 @@
       activate(id);
     } else {
       updateZone(zone);
+      updateStrips();
     }
   }
 
@@ -106,6 +112,7 @@
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
+    updateStrips();
   }
 
   // ---- Activation / Deactivation --------------------------------------------
@@ -137,6 +144,7 @@
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
+    updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
     triggerSave();
   }
@@ -153,6 +161,7 @@
 
     updateZone(tw.zone);
     updateSidebar(sideForZone(tw.zone));
+    updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
     triggerSave();
   }
@@ -206,6 +215,7 @@
     updateZone(targetZone);
     updateSidebar(sideForZone(oldZoneName));
     updateSidebar(sideForZone(targetZone));
+    updateStrips();
     if (fitActiveTabFn) fitActiveTabFn();
     triggerSave();
   }
@@ -226,42 +236,21 @@
       zone.el.classList.remove('empty');
     }
 
-    // Zone header — always present when zone has content (title + context menu)
+    // Zone header — just shows active window title, no tab buttons (strip handles tabs)
     let headerEl = zone.el.querySelector('.zone-header');
     if (hasActive && wins.length >= 1) {
       const activeTw = toolWindows.get(zone.activeId);
       if (!headerEl) {
         headerEl = document.createElement('div');
         headerEl.className = 'zone-header';
-        // Insert before tab strip or content
         zone.el.insertBefore(headerEl, zone.el.firstChild);
       }
       headerEl.style.display = '';
-      // Build header: title on left, tab buttons if multiple windows
       headerEl.innerHTML = '';
       const titleSpan = document.createElement('span');
       titleSpan.className = 'zone-header-title';
       titleSpan.textContent = activeTw ? activeTw.title : '';
       headerEl.appendChild(titleSpan);
-
-      // If multiple windows, add tab buttons in the header
-      if (wins.length >= 2) {
-        const tabGroup = document.createElement('div');
-        tabGroup.className = 'zone-header-tabs';
-        for (const wid of wins) {
-          const tw = toolWindows.get(wid);
-          if (!tw) continue;
-          const btn = document.createElement('button');
-          btn.className = 'zone-header-tab' + (zone.activeId === wid ? ' active' : '');
-          btn.textContent = tw.title;
-          btn.addEventListener('click', () => activate(wid));
-          btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e, wid); });
-          tabGroup.appendChild(btn);
-        }
-        headerEl.appendChild(tabGroup);
-      }
-
-      // Right-click on header to move the active window
       headerEl.oncontextmenu = (e) => { e.preventDefault(); if (zone.activeId) showContextMenu(e, zone.activeId); };
     } else if (headerEl) {
       headerEl.style.display = 'none';
@@ -310,12 +299,59 @@
         topZone.el.style.flex = '0';
         botZone.el.style.flex = '1';
       }
-      // When both active, flex is managed by zone divider drag (or defaults)
+      // When both active, force a balanced split so neither zone is invisible
       if (topActive && botActive) {
-        if (!topZone.el.style.flex || topZone.el.style.flex === '0') topZone.el.style.flex = '1';
-        if (!botZone.el.style.flex || botZone.el.style.flex === '0') botZone.el.style.flex = '1';
+        const tf = parseFloat(topZone.el.style.flex) || 0;
+        const bf = parseFloat(botZone.el.style.flex) || 0;
+        if (bf < 0.1 || tf < 0.1) {
+          topZone.el.style.flex = '1';
+          botZone.el.style.flex = '1';
+        }
       }
     }
+  }
+
+  // ---- Side strips (IntelliJ-style outer-edge buttons) ----------------------
+
+  function updateStrips() {
+    for (const side of ['left', 'right']) {
+      const stripEl = strips[side];
+      if (!stripEl) continue;
+
+      stripEl.innerHTML = '';
+
+      const topZone = zones[side + '-top'];
+      const botZone = zones[side + '-bottom'];
+
+      // Top section — windows assigned to the top zone
+      const topSection = document.createElement('div');
+      topSection.className = 'strip-section';
+      for (const wid of topZone.windows) {
+        topSection.appendChild(makeStripBtn(wid, topZone));
+      }
+      stripEl.appendChild(topSection);
+
+      // Bottom section — windows assigned to the bottom zone (pushed to bottom)
+      const botSection = document.createElement('div');
+      botSection.className = 'strip-section strip-section-bottom';
+      for (const wid of botZone.windows) {
+        botSection.appendChild(makeStripBtn(wid, botZone));
+      }
+      stripEl.appendChild(botSection);
+    }
+  }
+
+  function makeStripBtn(windowId, zone) {
+    const tw = toolWindows.get(windowId);
+    if (!tw) return document.createTextNode('');
+
+    const btn = document.createElement('button');
+    btn.className = 'strip-btn' + (tw.active ? ' active' : '');
+    btn.textContent = tw.title;
+    btn.dataset.toolWindow = windowId;
+    btn.addEventListener('click', () => toggle(windowId));
+    btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showContextMenu(e, windowId); });
+    return btn;
   }
 
   // ---- Context menu (Phase 3 stub — simple implementation) ------------------
@@ -362,7 +398,18 @@
     menu.style.position = 'fixed';
     menu.style.left = event.clientX + 'px';
     menu.style.top  = event.clientY + 'px';
+    menu.style.visibility = 'hidden';
     document.body.appendChild(menu);
+
+    // Clamp to viewport so the menu doesn't clip off-screen
+    const rect = menu.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (rect.right > vw) menu.style.left = Math.max(0, vw - rect.width - 4) + 'px';
+    if (rect.bottom > vh) menu.style.top = Math.max(0, vh - rect.height - 4) + 'px';
+    if (rect.left < 0) menu.style.left = '4px';
+    if (rect.top < 0) menu.style.top = '4px';
+    menu.style.visibility = '';
 
     const dismiss = (e) => {
       if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', dismiss, true); }
