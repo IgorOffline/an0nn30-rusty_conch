@@ -504,6 +504,11 @@
       color: var(--fg);
     }
     #bottom-panel.hidden { display: none; }
+    #bottom-panel-resize {
+      height: 4px; cursor: row-resize; background: transparent; flex-shrink: 0;
+      transition: background 150ms;
+    }
+    #bottom-panel-resize:hover, #bottom-panel-resize.dragging { background: var(--dim-fg); }
     #bottom-panel-header {
       display: flex; align-items: center; flex-shrink: 0;
       border-bottom: 1px solid var(--tab-border); padding: 0;
@@ -1347,6 +1352,7 @@
       </div>
     </div>
     <div id="bottom-panel" class="hidden">
+      <div id="bottom-panel-resize"></div>
       <div id="bottom-panel-header">
         <div id="bottom-panel-tabs"></div>
         <div id="bottom-panel-actions"></div>
@@ -1549,6 +1555,9 @@
             document.getElementById('bottom-panel').classList.add('hidden');
           } else {
             document.getElementById('bottom-panel').classList.remove('hidden');
+          }
+          if (layoutData.bottom_panel_height > 0) {
+            document.getElementById('bottom-panel').style.height = layoutData.bottom_panel_height + 'px';
           }
         } catch (_) {}
 
@@ -2746,6 +2755,8 @@
       }
 
       // Save window layout on resize (debounced).
+      const bottomPanelEl = document.getElementById('bottom-panel');
+      const bottomResizeEl = document.getElementById('bottom-panel-resize');
       let windowResaveSaveTimer = null;
       function debouncedSaveLayout() {
         if (windowResaveSaveTimer) clearTimeout(windowResaveSaveTimer);
@@ -2756,12 +2767,46 @@
               ssh_panel_visible: window.sshPanel ? !window.sshPanel.isHidden() : true,
               files_panel_width: filesPanelEl.offsetWidth,
               files_panel_visible: window.filesPanel ? !window.filesPanel.isHidden() : true,
-              bottom_panel_visible: !document.getElementById('bottom-panel').classList.contains('hidden'),
+              bottom_panel_visible: !bottomPanelEl.classList.contains('hidden'),
+              bottom_panel_height: bottomPanelEl.offsetHeight,
             },
           }).catch(() => {});
         }, 500);
       }
       window.addEventListener('resize', debouncedSaveLayout);
+
+      // ---- Bottom panel resize ----
+      {
+        let dragging = false, startY = 0, startHeight = 0;
+        bottomResizeEl.addEventListener('dragstart', (e) => e.preventDefault());
+        bottomResizeEl.style.touchAction = 'none';
+        bottomResizeEl.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          bottomResizeEl.setPointerCapture(e.pointerId);
+          dragging = true;
+          startY = e.clientY;
+          startHeight = bottomPanelEl.offsetHeight;
+          bottomResizeEl.classList.add('dragging');
+          document.body.style.cursor = 'row-resize';
+          document.body.style.userSelect = 'none';
+        });
+        bottomResizeEl.addEventListener('pointermove', (e) => {
+          if (!dragging) return;
+          const delta = startY - e.clientY;
+          const newHeight = Math.max(40, Math.min(300, startHeight + delta));
+          bottomPanelEl.style.height = newHeight + 'px';
+          debouncedFitAndResize();
+        });
+        bottomResizeEl.addEventListener('pointerup', (e) => {
+          if (!dragging) return;
+          bottomResizeEl.releasePointerCapture(e.pointerId);
+          dragging = false;
+          bottomResizeEl.classList.remove('dragging');
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+          debouncedSaveLayout();
+        });
+      }
 
       // ---- Vault init ----
       if (window.vault) {
