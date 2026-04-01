@@ -252,7 +252,7 @@ public class Widgets {
         return this;
     }
 
-    // -- Raw JSON -----------------------------------------------------------
+    // -- Raw JSON / Custom HTML -----------------------------------------------
 
     /**
      * Add a raw JSON widget string. Use this for widget types not yet
@@ -263,6 +263,38 @@ public class Widgets {
      */
     public Widgets raw(String json) {
         items.add(json);
+        return this;
+    }
+
+    /**
+     * Add raw HTML rendered in a Shadow DOM with CSS isolation.
+     *
+     * <p>Theme variables ({@code --bg}, {@code --fg}, {@code --green}, etc.)
+     * are forwarded into the shadow root. Elements with a
+     * {@code data-action="id"} attribute emit {@code button_click} events
+     * back to the plugin when clicked.</p>
+     *
+     * @param content raw HTML string
+     * @return this builder
+     */
+    public Widgets html(String content) {
+        items.add("{\"type\":\"html\",\"content\":" + jsonStr(content) + "}");
+        return this;
+    }
+
+    /**
+     * Add raw HTML with custom CSS, rendered in a Shadow DOM.
+     *
+     * <p>The CSS is injected into the shadow root's {@code <style>} element
+     * alongside the forwarded theme variables.</p>
+     *
+     * @param content raw HTML string
+     * @param css     CSS rules for the shadow root
+     * @return this builder
+     */
+    public Widgets html(String content, String css) {
+        items.add("{\"type\":\"html\",\"content\":" + jsonStr(content)
+                + ",\"css\":" + jsonStr(css) + "}");
         return this;
     }
 
