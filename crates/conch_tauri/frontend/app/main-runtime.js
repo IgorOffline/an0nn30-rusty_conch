@@ -101,8 +101,6 @@
             nextTabId: 1,
             nextTabLabel: 1,
             panes: new Map(),
-            pluginViewPaneById: new Map(),
-            pluginViewSizeMemory: new Map(),
             nextPaneId: 1,
             focusedPaneId: null,
           };
@@ -111,8 +109,6 @@
       let nextTabId = initialState.nextTabId;
       let nextTabLabel = initialState.nextTabLabel;
       const panes = initialState.panes;
-      const pluginViewPaneById = initialState.pluginViewPaneById;
-      const pluginViewSizeMemory = initialState.pluginViewSizeMemory;
       let nextPaneId = initialState.nextPaneId;
       let focusedPaneId = initialState.focusedPaneId;
       const inputRuntime = composition && composition.inputRuntime
@@ -147,7 +143,6 @@
             refocusActiveTerminal: () => { throw new Error('managerDelegates.refocusActiveTerminal is unavailable'); },
             getTabForPane: () => { throw new Error('managerDelegates.getTabForPane is unavailable'); },
             allPanesInTab: () => { throw new Error('managerDelegates.allPanesInTab is unavailable'); },
-            rememberPluginViewSize: () => { throw new Error('managerDelegates.rememberPluginViewSize is unavailable'); },
             setFocusedPane: () => { throw new Error('managerDelegates.setFocusedPane is unavailable'); },
             closePane: () => { throw new Error('managerDelegates.closePane is unavailable'); },
             splitPane: () => { throw new Error('managerDelegates.splitPane is unavailable'); },
@@ -175,8 +170,6 @@
             appEl,
             tabBarEl,
             terminalHostEl,
-            pluginViewPaneById,
-            pluginViewSizeMemory,
             managerDelegates,
             terminalRuntime,
             layoutRuntime,
@@ -196,7 +189,6 @@
             fitAndResizeTab: (tab) => fitAndResizeTab(tab),
             normalizeTabTitle: (rawTitle, fallback) => normalizeTabTitle(rawTitle, fallback),
             allPanesInTab: (tabId) => managerDelegates.allPanesInTab(tabId),
-            rememberPluginViewSize: (pane) => managerDelegates.rememberPluginViewSize(pane),
             setFocusedPane: (paneId) => managerDelegates.setFocusedPane(paneId),
             closeTabDelegate: (tabId) => managerDelegates.closeTab(tabId),
             showStatus: (message) => showStatus(message),
@@ -250,8 +242,6 @@
           currentWindow,
           tabs,
           panes,
-          pluginViewPaneById,
-          pluginViewSizeMemory,
           getActiveTabId: () => activeTabId,
           allocPaneId: () => nextPaneId++,
           currentPane: () => currentPane(),

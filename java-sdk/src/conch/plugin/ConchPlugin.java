@@ -140,19 +140,6 @@ public interface ConchPlugin {
     String render();
 
     /**
-     * Return the widget tree for a specific docked view instance.
-     *
-     * <p>Default implementation falls back to {@link #render()} so existing
-     * plugins remain compatible.</p>
-     *
-     * @param viewId docked view identifier
-     * @return JSON array of widget objects
-     */
-    default String renderView(String viewId) {
-        return render();
-    }
-
-    /**
      * Clean up before the plugin is unloaded.
      *
      * <p>Called once when the user unloads the plugin or the application

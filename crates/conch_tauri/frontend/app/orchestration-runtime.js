@@ -6,8 +6,6 @@
     const currentWindow = deps.currentWindow;
     const tabs = deps.tabs;
     const panes = deps.panes;
-    const pluginViewPaneById = deps.pluginViewPaneById;
-    const pluginViewSizeMemory = deps.pluginViewSizeMemory;
     const getActiveTabId = deps.getActiveTabId;
     const allocPaneId = deps.allocPaneId;
     const currentPane = deps.currentPane;
@@ -23,40 +21,9 @@
     const rebuildTreeDOM = deps.rebuildTreeDOM;
 
     let paneDnd = null;
-    let pluginRuntime = null;
     let debouncedSaveLayout = () => {};
 
     async function init() {
-      pluginRuntime = global.conchPluginRuntime && global.conchPluginRuntime.create
-        ? global.conchPluginRuntime.create({
-            getPanes: () => panes,
-            getTabs: () => tabs,
-            getActiveTabId: () => getActiveTabId(),
-            getPluginViewPaneById: () => pluginViewPaneById,
-            getPluginViewSizeMemory: () => pluginViewSizeMemory,
-            currentPane: () => currentPane(),
-            setFocusedPane: (paneId) => setFocusedPane(paneId),
-            closePane: (paneId) => closePane(paneId),
-            allocatePaneId: () => allocPaneId(),
-            splitLeaf: (treeRoot, sourcePaneId, newPaneId, direction) => (
-              global.splitTree.splitLeaf(treeRoot, sourcePaneId, newPaneId, direction)
-            ),
-            findParent: (treeRoot, paneId) => global.splitTree.findParent(treeRoot, paneId),
-            firstLeaf: (treeRoot) => global.splitTree.firstLeaf(treeRoot),
-            rebuildTreeDOM: (tab) => rebuildTreeDOM(tab),
-            createPaneResizeObserver: (pane, fitCb) => global.splitPane.createPaneResizeObserver(pane, fitCb),
-            registerDraggablePaneHeader: (paneId, headerEl, kind) => {
-              if (paneDnd) paneDnd.registerDraggablePaneHeader(paneId, headerEl, kind);
-            },
-            invoke,
-            renderPluginWidgets: (container, result, pluginName, viewId) => {
-              if (result && global.pluginWidgets) {
-                global.pluginWidgets.renderWidgets(container, result, pluginName, viewId);
-              }
-            },
-          })
-        : null;
-
       paneDnd = global.paneDnd && global.paneDnd.initPaneDnd
         ? global.paneDnd.initPaneDnd({
             getActiveTabId: () => getActiveTabId(),
@@ -89,15 +56,6 @@
           getCurrentTab: () => currentTab(),
           getCurrentPane: () => currentPane(),
           createSshTab: (opts) => createSshTab(opts),
-          openPluginDockedViewFromRequest: async (payload) => {
-            if (!pluginRuntime || !pluginRuntime.openPluginDockedViewFromRequest) {
-              throw new Error('pluginRuntime.openPluginDockedViewFromRequest is unavailable');
-            }
-            return pluginRuntime.openPluginDockedViewFromRequest(payload);
-          },
-          setFocusedPane: (paneId) => setFocusedPane(paneId),
-          closePane: (paneId) => closePane(paneId),
-          getPluginViewPaneById: () => pluginViewPaneById,
         });
         const runtimeResult = await toolWindowRuntime.init();
         if (runtimeResult && typeof runtimeResult.debouncedSaveLayout === 'function') {
@@ -117,7 +75,6 @@
 
       return {
         paneDnd,
-        pluginRuntime,
         debouncedSaveLayout,
       };
     }

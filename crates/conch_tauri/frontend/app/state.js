@@ -6,8 +6,6 @@
       nextTabId: 1,
       nextTabLabel: 1,
       panes: new Map(),
-      pluginViewPaneById: new Map(),
-      pluginViewSizeMemory: new Map(),
       nextPaneId: 1,
       focusedPaneId: null,
     };

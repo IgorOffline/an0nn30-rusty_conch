@@ -7,8 +7,6 @@
     const appEl = deps.appEl;
     const tabBarEl = deps.tabBarEl;
     const terminalHostEl = deps.terminalHostEl;
-    const pluginViewPaneById = deps.pluginViewPaneById;
-    const pluginViewSizeMemory = deps.pluginViewSizeMemory;
     const managerDelegates = deps.managerDelegates;
     const terminalRuntime = deps.terminalRuntime;
     const layoutRuntime = deps.layoutRuntime;
@@ -30,7 +28,6 @@
     const fitAndResizeTab = deps.fitAndResizeTab;
     const normalizeTabTitle = deps.normalizeTabTitle;
     const allPanesInTab = deps.allPanesInTab;
-    const rememberPluginViewSize = deps.rememberPluginViewSize;
     const setFocusedPane = deps.setFocusedPane;
     const closeTabDelegate = deps.closeTabDelegate;
     const showStatus = deps.showStatus;
@@ -46,7 +43,6 @@
               ? global.conchSplitRuntime.paneRatioInTree(tab, paneId)
               : null
           ),
-          setPluginViewSize: (viewId, ratio) => pluginViewSizeMemory.set(viewId, ratio),
           rebuildTreeDOM: (tab) => {
             if (layoutRuntime && layoutRuntime.rebuildTreeDOM) return layoutRuntime.rebuildTreeDOM(tab);
             return rebuildTreeDOM(tab);
@@ -62,12 +58,6 @@
           notifyTerminalClosed: (paneId, paneType) => {
             const cmd = paneType === 'ssh' ? 'ssh_disconnect' : 'close_pty';
             invoke(cmd, { paneId }).catch(() => {});
-          },
-          notifyPluginViewClosed: (viewId) => {
-            invoke('plugin_view_closed', { viewId }).catch(() => {});
-          },
-          deletePluginViewPane: (viewId) => {
-            pluginViewPaneById.delete(viewId);
           },
           closeTab: (tabId) => closeTabDelegate(tabId),
           initTerminal: (root) => terminalRuntime.initTerminal(root),
@@ -135,7 +125,6 @@
             if (global.filesPanel) global.filesPanel.onTabChanged(target);
           },
           allPanesInTab: (tabId) => allPanesInTab(tabId),
-          rememberPluginViewSize: (pane) => rememberPluginViewSize(pane),
           unregisterPaneDnd: (paneId) => {
             const paneDnd = getPaneDnd();
             if (paneDnd) paneDnd.unregisterPane(paneId);
@@ -143,12 +132,6 @@
           notifyTerminalClosed: (paneId, paneType) => {
             const cmd = paneType === 'ssh' ? 'ssh_disconnect' : 'close_pty';
             invoke(cmd, { paneId }).catch(() => {});
-          },
-          notifyPluginViewClosed: (viewId) => {
-            invoke('plugin_view_closed', { viewId }).catch(() => {});
-          },
-          deletePluginViewPane: (viewId) => {
-            pluginViewPaneById.delete(viewId);
           },
           showStatus: (message) => showStatus(message),
           destroyCurrentWindow: async () => {

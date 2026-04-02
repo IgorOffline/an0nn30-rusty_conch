@@ -7,7 +7,6 @@
   let invoke = null;
   let listen = null;
   const pluginMenuItems = [];
-  const dockedViewRefreshTimers = new Map();
   // Tracks plugins whose dialog was recently dismissed to reject queued duplicates.
   const _dialogCooldown = new Set();
   // Tracks handles for panels registered at the bottom location.
@@ -568,32 +567,6 @@
   // Event dispatch
   // ---------------------------------------------------------------------------
 
-  function refreshDockedView(pluginName, viewId) {
-    if (!invoke || !pluginName || !viewId) return;
-    const key = pluginName + '::' + viewId;
-    if (dockedViewRefreshTimers.has(key)) return;
-
-    const eventType = widgetEventTypeByViewKey.get(key);
-    const delayMs = eventType === 'text_input_changed' || eventType === 'text_edit_changed' ? 180 : 0;
-    const timer = setTimeout(async () => {
-      dockedViewRefreshTimers.delete(key);
-      const container = document.querySelector(`.plugin-panel-content[data-plugin-view-id="${viewId}"]`);
-      if (!container) return;
-      try {
-        const result = await invoke('request_plugin_view_render', { pluginName, viewId });
-        if (result != null) renderWidgets(container, result, pluginName, viewId);
-      } catch (e) {
-        console.error('request_plugin_view_render error:', e);
-      } finally {
-        widgetEventTypeByViewKey.delete(key);
-      }
-    }, delayMs);
-
-    dockedViewRefreshTimers.set(key, timer);
-  }
-
-  const widgetEventTypeByViewKey = new Map();
-
   function sendEvent(pluginName, widgetEvent, viewId) {
     if (!invoke || !pluginName) return;
     const payload = { kind: 'widget', ...widgetEvent };
@@ -601,13 +574,7 @@
     const eventJson = JSON.stringify(payload);
     invoke('plugin_widget_event', { pluginName, eventJson })
       .then(() => {
-        if (viewId) {
-          const key = pluginName + '::' + viewId;
-          widgetEventTypeByViewKey.set(key, widgetEvent && widgetEvent.type ? widgetEvent.type : '');
-          refreshDockedView(pluginName, viewId);
-        } else {
-          refreshPanelPlugin(pluginName);
-        }
+        refreshPanelPlugin(pluginName);
       })
       .catch((e) => {
         console.error('plugin_widget_event error:', e);

@@ -233,7 +233,6 @@ Every Java plugin must implement `conch.plugin.ConchPlugin`:
 | `void onEvent(String eventJson)` | Handle events -- menu clicks, widget interactions, bus events. |
 | `String onQuery(String method, String argsJson)` | Handle direct RPC queries from other plugins. Return a JSON value string (`"null"` by default). |
 | `String render()` | Return widget tree as JSON array. Called on demand for tool-window plugins. |
-| `default String renderView(String viewId)` | Return widget tree JSON for a docked view instance (defaults to `render()`). |
 | `void teardown()` | Clean up resources before unload. |
 
 #### Plugin Types
@@ -296,25 +295,6 @@ Overrides are stored in `conch.keyboard.plugin_shortcuts` using key format `"<pl
 |--------|-------------|
 | `notify(String title, String body, String level, int durationMs)` | Show a toast notification (level: `"info"`, `"success"`, `"warn"`, `"error"`) |
 | `notify(String title, String body, String level)` | Show notification with default duration |
-
-**Docked Views:**
-
-| Method | Description |
-|--------|-------------|
-| `openDockedView(String requestJson)` | Request a docked split view (returns JSON `{"view_id","pane_id","tab_id"}` or null) |
-| `closeDockedView(String viewId)` | Close a docked view by `view_id` |
-| `focusDockedView(String viewId)` | Focus an existing docked view by `view_id` |
-
-Example request JSON:
-
-```json
-{
-  "id": "optional-stable-id",
-  "title": "Resource Monitor",
-  "icon": "activity",
-  "dock": { "direction": "horizontal", "ratio": 0.35 }
-}
-```
 
 **Status Bar:**
 
@@ -525,7 +505,7 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 | `-- plugin-description: ...` | No | Short description shown in Settings > Plugins |
 | `-- plugin-version: 1.0.0` | No | Semver version string (default: `"0.0.0"`) |
 | `-- plugin-api: ^1.0` | No | Required host plugin API version/range (legacy plugins may omit) |
-| `-- plugin-permissions: cap1, cap2` | No | Declared capability list for permission gating (e.g. `clipboard.read, ui.menu, ui.dock`) |
+| `-- plugin-permissions: cap1, cap2` | No | Declared capability list for permission gating (e.g. `clipboard.read, ui.menu, ui.panel`) |
 | `-- plugin-type: action` | No | `"action"` (default) or `"tool_window"` |
 | `-- plugin-location: left` | No | Default zone: `"left"` (default for tool-window plugins), `"right"`, `"bottom"` |
 | `-- plugin-icon: icon.png` | No | Custom icon for the tool window tab (filename relative to plugin location) |
@@ -544,7 +524,7 @@ Lua plugins declare metadata in `-- plugin-*` comment headers at the top of the 
 -- plugin-type: tool_window
 -- plugin-version: 1.3.0
 -- plugin-api: ^1.0
--- plugin-permissions: ui.panel, ui.menu, ui.dock
+-- plugin-permissions: ui.panel, ui.menu
 -- plugin-location: right
 -- plugin-icon: system-info.png
 -- plugin-keybind: open_panel = cmd+shift+i | Toggle System Info panel
@@ -561,7 +541,6 @@ Each Lua plugin runs on a dedicated OS thread with its own Lua VM. The host mana
 |----------|------------|-------------|
 | `setup()` | Once, after the plugin source is loaded | Initialize state, register menu items, subscribe to events |
 | `render()` | On demand, for tool-window plugins | Build the widget tree using `ui.panel_*` functions |
-| `render_view(view_id)` | On demand, for docked views | Build the widget tree for a specific docked view id (fallback to `render()` when omitted) |
 | `on_event(event)` | When any event targets this plugin | Handle widget interactions, menu actions, bus events. The `event` argument is a native Lua table. |
 | `on_query(method, args_json)` | When another plugin sends an RPC query | Handle inter-plugin queries. `args_json` is a JSON string. Return a JSON string as the response. |
 | `teardown()` | When the plugin is unloaded or the app shuts down | Clean up resources |
@@ -643,9 +622,6 @@ Functions are organized across four global tables: `app`, `ui`, `session`, and `
 | `ui.alert(title, message)` | Blocking alert dialog |
 | `ui.error(title, message)` | Blocking error dialog |
 | `ui.form(title, fields)` | Multi-field form dialog (returns table or nil) |
-| `ui.open_docked_view(opts)` | Open/focus a docked split view (returns `{view_id, pane_id, tab_id}` or nil) |
-| `ui.close_docked_view(view_id)` | Close a docked view by id (returns boolean) |
-| `ui.focus_docked_view(view_id)` | Focus a docked view by id (returns boolean) |
 | `ui.panel_*` functions | See [Panel Widget Functions](#panel-widget-functions) below |
 
 **`session` -- Terminal and system operations:**
@@ -790,7 +766,6 @@ void setup();
 void onEvent(String eventJson);
 default String onQuery(String method, String argsJson); // default returns "null"
 String render();
-default String renderView(String viewId); // default delegates to render()
 void teardown();
 ```
 
@@ -838,11 +813,6 @@ public static void registerCommand(String label, String action, String keybind);
 public static native void notify(String title, String body, String level, int durationMs);
 public static void notify(String title, String body, String level);
 public static native void setStatus(String text, int level, float progress);
-
-// Docked views
-public static native String openDockedView(String requestJson);
-public static native boolean closeDockedView(String viewId);
-public static native boolean focusDockedView(String viewId);
 
 // Clipboard / theme / config
 public static native void clipboardSet(String text);
@@ -929,7 +899,6 @@ function setup() end                      -- optional
 function on_event(event) end              -- optional
 function on_query(method, args_json) end  -- optional; return JSON string
 function render() end                     -- optional (tool-window plugins usually implement)
-function render_view(view_id) end         -- optional (docked views; fallback to render())
 function teardown() end                   -- optional
 ```
 
@@ -1009,27 +978,7 @@ ui.alert(title, message)
 ui.error(title, message)
 ui.confirm(message) -> boolean
 ui.prompt(message, default?) -> string|nil
-
--- Docked views
-ui.open_docked_view(opts) -> table|nil   -- { view_id, pane_id, tab_id }
-ui.close_docked_view(view_id) -> boolean
-ui.focus_docked_view(view_id) -> boolean
 ```
-
-`ui.open_docked_view(opts)` accepts:
-
-```lua
-{
-  id = "optional-stable-id",
-  title = "Pane Title",
-  icon = "activity",
-  dock = { direction = "horizontal" | "vertical", ratio = 0.35 }
-}
-```
-
-Notes:
-- `id` enables dedupe/focus behavior for repeat opens from the same plugin.
-- `dock.ratio` is clamped to `0.1 .. 0.9`.
 
 #### `session` table
 
@@ -1177,7 +1126,7 @@ The `html` widget renders raw HTML inside a Shadow DOM for full CSS isolation. T
 | `content` | string | Raw HTML string to render inside the shadow root |
 | `css?` | string | Optional CSS injected into the shadow root's `<style>` |
 
-Works in both panel and docked view plugin types.
+Works in tool-window plugins.
 
 ---
 
@@ -1220,7 +1169,7 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 
 | Kind | Fields | Description |
 |------|--------|-------------|
-| `widget` | (nested widget event fields) | A widget interaction from plugin UI. Contains widget fields (e.g. `type`, `id`, `value`) and may include `view_id` for docked-view scoped events. |
+| `widget` | (nested widget event fields) | A widget interaction from plugin UI. Contains widget fields (e.g. `type`, `id`, `value`). |
 | `menu_action` | `action` | A menu item registered by this plugin was clicked |
 | `bus_event` | `event_type`, `data` | An inter-plugin pub/sub event |
 | `bus_query` | `method`, `args` | Direct RPC queries are routed to query callbacks (`on_query` / `onQuery`) rather than `on_event` |
@@ -1232,7 +1181,6 @@ All events are delivered to plugins wrapped in a top-level `PluginEvent` envelop
 ```json
 { "kind": "menu_action", "action": "do_something" }
 { "kind": "widget", "type": "button_click", "id": "my_button" }
-{ "kind": "widget", "view_id": "plugin:example:view:1", "type": "button_click", "id": "my_button" }
 { "kind": "widget", "type": "tree_context_menu", "id": "tree1", "node_id": "srv1", "action": "delete" }
 { "kind": "bus_event", "event_type": "ssh.connected", "data": { "host": "10.0.0.1" } }
 { "kind": "theme_changed", "theme_json": "{...}" }
@@ -1273,8 +1221,8 @@ This section explains the internal rendering pipeline — how widgets get from p
 
 | Plugin Type | Registration | Render Trigger | Container |
 |-------------|-------------|----------------|-----------|
-| **Panel** | Auto-registered on load via `register_panel()` | Pull (frontend requests) + Push (`ui.request_render()`) | Sidebar panel (left/right) or bottom panel |
-| **Action** (docked view) | On-demand via `ui.open_docked_view()` | Pull (frontend requests after events) | Tab in the main editor area |
+| **Tool Window** | Auto-registered on load via `register_panel()` | Pull (frontend requests) + Push (`ui.request_render()`) | Sidebar panel (left/right) or bottom panel |
+| **Action** | Event-driven (no persistent UI) | N/A | No persistent container |
 
 ### The Widget Pipeline
 
@@ -1309,12 +1257,10 @@ Frontend                         Rust Backend                    Plugin Thread
    │─ renderWidgets(container, json)│                               │
 ```
 
-**When does this happen?**
+**When does this happen for tool-window plugins?**
 
 - **Initial load:** When a tool-window plugin is first registered, the frontend does one `request_plugin_render` call.
 - **After widget events:** When the user interacts with a widget (button click, text input, etc.), the frontend sends the event to the plugin, then automatically requests a fresh render.
-- **Docked views:** Same flow but using `request_plugin_view_render` with a `view_id`.
-
 ### Push-Based Rendering (set_widgets / request_render)
 
 Plugins can push widget updates to the frontend at any time — useful for showing loading states during blocking operations.
@@ -1352,15 +1298,13 @@ function switch_env(env)
 end
 ```
 
-> **Note:** `ui.request_render()` currently works for **tool-window plugins** only. Docked views use the pull-based re-render triggered automatically after each widget event.
+> **Note:** `ui.request_render()` applies to tool-window plugin UI.
 
 ### Auto Re-render After Events
 
 When a user interacts with a widget, the frontend handles re-rendering automatically:
 
-**Panel plugins:** `sendEvent()` → `plugin_widget_event` (Tauri command) → `on_event()` runs → frontend calls `refreshPanelPlugin()` → `request_plugin_render` → `render()` → update DOM.
-
-**Docked views:** `sendEvent()` → `plugin_widget_event` → `on_event()` runs → frontend calls `refreshDockedView()` → `request_plugin_view_render` → `render_view(view_id)` or `render()` → update DOM.
+**Tool-window plugins:** `sendEvent()` → `plugin_widget_event` (Tauri command) → `on_event()` runs → frontend calls `refreshPanelPlugin()` → `request_plugin_render` → `render()` → update DOM.
 
 In both cases, plugins **do not need to call `ui.request_render()`** after handling events — the re-render happens automatically. Use `ui.request_render()` only when you need to push an update **during** a long-running operation (before the event handler returns).
 
@@ -1373,8 +1317,8 @@ In both cases, plugins **do not need to call `ui.request_render()`** after handl
 | `crates/conch_plugin/src/lua/api/mod.rs` | Widget accumulator, HostApi bridge, PanelHandleStore |
 | `crates/conch_plugin/src/host_api.rs` | `HostApi` trait definition (`set_widgets`, `register_panel`) |
 | `crates/conch_tauri/src/plugins/tauri_host_api.rs` | `TauriHostApi` — emits Tauri events for widget updates |
-| `crates/conch_tauri/src/plugins/mod.rs` | `request_plugin_render` / `request_plugin_view_render` commands |
-| `crates/conch_tauri/frontend/plugin-widgets.js` | Frontend renderer, `sendEvent()`, `refreshPanelPlugin()`, `refreshDockedView()` |
+| `crates/conch_tauri/src/plugins/mod.rs` | `request_plugin_render` command |
+| `crates/conch_tauri/frontend/plugin-widgets.js` | Frontend renderer, `sendEvent()`, `refreshPanelPlugin()` |
 
 ---
 

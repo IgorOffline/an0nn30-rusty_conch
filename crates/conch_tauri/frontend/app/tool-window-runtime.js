@@ -6,10 +6,6 @@
     const getCurrentTab = deps.getCurrentTab;
     const getCurrentPane = deps.getCurrentPane;
     const createSshTab = deps.createSshTab;
-    const openPluginDockedViewFromRequest = deps.openPluginDockedViewFromRequest;
-    const setFocusedPane = deps.setFocusedPane;
-    const closePane = deps.closePane;
-    const getPluginViewPaneById = deps.getPluginViewPaneById;
 
     async function init() {
       const bottomPanelEl = document.getElementById('bottom-panel');
@@ -232,37 +228,6 @@
           }
         });
 
-        listenOnCurrentWindow('plugin-view-open-requested', (event) => {
-          openPluginDockedViewFromRequest(event.payload).catch((error) => {
-            console.error('Failed to open plugin docked view:', error);
-          });
-        });
-
-        listenOnCurrentWindow('plugin-view-focus-requested', (event) => {
-          const viewId = event && event.payload ? event.payload.view_id : null;
-          const map = getPluginViewPaneById();
-          if (!viewId || !map.has(viewId)) return;
-          setFocusedPane(map.get(viewId));
-        });
-
-        listenOnCurrentWindow('plugin-view-close-requested', (event) => {
-          const viewId = event && event.payload ? event.payload.view_id : null;
-          const map = getPluginViewPaneById();
-          if (!viewId || !map.has(viewId)) return;
-          closePane(map.get(viewId));
-        });
-
-        listenOnCurrentWindow('plugin-views-removed', (event) => {
-          if (global.titlebar && typeof global.titlebar.refresh === 'function') {
-            global.titlebar.refresh().catch(() => {});
-          }
-          const viewIds = (event && event.payload && event.payload.view_ids) || [];
-          const map = getPluginViewPaneById();
-          for (const viewId of viewIds) {
-            if (!map.has(viewId)) continue;
-            closePane(map.get(viewId));
-          }
-        });
       }
 
       return {
