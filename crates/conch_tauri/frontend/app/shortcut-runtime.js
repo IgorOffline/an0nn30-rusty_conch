@@ -23,6 +23,7 @@
     let pluginAllShortcutFallbacks = [];
     let toolWindowShortcutFallbacks = [];
     let functionKeyShortcutFallbacks = [];
+    let coreShortcutFallbacks = [];
 
     const coreShortcutActionByKey = {
       new_tab: 'new-tab',
@@ -109,11 +110,13 @@
         const pluginAllNext = [];
         const toolWindowNext = [];
         const functionKeyNext = [];
+        const coreNext = [];
 
         for (const [settingsKey, action] of Object.entries(coreShortcutActionByKey)) {
           if (!action) continue;
           const combo = normalizeShortcutString(keyboard[settingsKey]);
           if (!combo) continue;
+          coreNext.push({ combo, action });
           functionKeyNext.push({ combo, kind: 'core', action });
         }
 
@@ -158,11 +161,13 @@
         pluginAllShortcutFallbacks = pluginAllNext;
         toolWindowShortcutFallbacks = toolWindowNext;
         functionKeyShortcutFallbacks = functionKeyNext;
+        coreShortcutFallbacks = coreNext;
       } catch (_) {
         pluginCtrlAltShortcutFallbacks = [];
         pluginAllShortcutFallbacks = [];
         toolWindowShortcutFallbacks = [];
         functionKeyShortcutFallbacks = [];
+        coreShortcutFallbacks = [];
       }
     }
 
@@ -177,8 +182,21 @@
       }, true);
 
       document.addEventListener('keydown', (event) => {
-        if (isTextInputTarget(event.target)) return;
         const combo = normalizeShortcutEventForPluginFallback(event);
+        if (isMacPlatform && combo && combo.includes('cmd')) {
+          const coreHit = coreShortcutFallbacks.find((s) => s.combo === combo);
+          if (coreHit) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+            handleMenuAction(coreHit.action);
+            return;
+          }
+        }
+
+        if (isTextInputTarget(event.target)) return;
         if (!combo) return;
         const fKeyHit = functionKeyShortcutFallbacks.find((s) => s.combo === combo);
         if (fKeyHit) {

@@ -509,7 +509,7 @@ pub(crate) fn build_app_menu_with_plugins<R: tauri::Runtime>(
             MENU_MANAGE_TUNNELS_ID,
             "Manage SSH Tunnels\u{2026}",
             true,
-            Some(&primary_accelerator("Shift+T")),
+            Some(&config_key_to_accelerator(&keyboard.manage_tunnels)),
         )?;
         tools_items.push(Box::new(manage_tunnels));
 

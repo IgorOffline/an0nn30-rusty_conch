@@ -5,6 +5,7 @@
 //! emulation on the frontend side.
 
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::io::Write;
 
 use anyhow::{Context, Result};
@@ -40,16 +41,7 @@ impl PtyBackend {
 
         let actual_shell = match shell {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => {
-                #[cfg(unix)]
-                {
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-                }
-                #[cfg(not(unix))]
-                {
-                    "cmd.exe".to_string()
-                }
-            }
+            _ => default_shell_program(),
         };
 
         let mut cmd = CommandBuilder::new(&actual_shell);
@@ -107,13 +99,41 @@ impl PtyBackend {
     }
 }
 
+#[cfg(unix)]
+fn default_shell_program() -> String {
+    // Use the account's configured login shell instead of the inherited
+    // SHELL env var so "plain shell" tabs bypass wrapper commands like
+    // `bash -c tmux new-session` from terminal config.
+    let uid = unsafe { libc::getuid() };
+    let pwd = unsafe { libc::getpwuid(uid) };
+    if !pwd.is_null() {
+        let shell_ptr = unsafe { (*pwd).pw_shell };
+        if !shell_ptr.is_null() {
+            let shell = unsafe { CStr::from_ptr(shell_ptr) }
+                .to_string_lossy()
+                .trim()
+                .to_string();
+            if !shell.is_empty() {
+                return shell;
+            }
+        }
+    }
+
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
+#[cfg(not(unix))]
+fn default_shell_program() -> String {
+    "cmd.exe".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn default_shell_env_var_used() {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = default_shell_program();
         assert!(!shell.is_empty());
     }
 
