@@ -310,16 +310,63 @@
         }
       }
 
+      // Apply persisted layout before reveal to avoid visible startup rearrange.
+      try {
+        await startupAppConfigPromise;
+      } catch (_) {}
+
+      // Initialize orchestration/tool-window runtime before show so sidebars,
+      // zones, and panel visibility are already in final restored state.
+      if (window.conchOrchestrationRuntime && window.conchOrchestrationRuntime.create) {
+        const orchestrationRuntime = window.conchOrchestrationRuntime.create({
+          invoke,
+          listen,
+          listenOnCurrentWindow,
+          terminalHostEl,
+          currentWindow,
+          tabs,
+          panes,
+          getActiveTabId: () => activeTabId,
+          allocPaneId: () => nextPaneId++,
+          currentPane: () => currentPane(),
+          currentTab: () => currentTab(),
+          setFocusedPane: (paneId) => setFocusedPane(paneId),
+          closePane: (paneId) => closePane(paneId),
+          createTab: (options) => createTab(options),
+          createSshTab: (opts) => createSshTab(opts),
+          activateTab: (tabId) => activateTab(tabId),
+          splitPane: (direction) => splitPane(direction),
+          getPaneManager: () => paneManager,
+          isDebugEnabled: () => shortcutDebugEnabled,
+          debugLog: (...args) => console.log(...args),
+          debouncedFitAndResize: () => {
+            if (layoutRuntime && layoutRuntime.debouncedFitAndResize) return layoutRuntime.debouncedFitAndResize();
+            return debouncedFitAndResize();
+          },
+          rebuildTreeDOM: (tab) => rebuildTreeDOM(tab),
+        });
+        try {
+          const orchestrationResult = await orchestrationRuntime.init();
+          if (orchestrationResult) {
+            if (typeof orchestrationResult.debouncedSaveLayout === 'function') {
+              debouncedSaveLayout = orchestrationResult.debouncedSaveLayout;
+            }
+            paneDnd = orchestrationResult.paneDnd || null;
+          }
+        } catch (error) {
+          console.warn('Orchestration init failed:', error);
+        }
+      }
+
       const firstTabPromise = createTab().catch((e) => {
         showStatus('Failed to initialize first tab: ' + String(e));
       });
+      await firstTabPromise;
       try {
         await invoke('app_ready');
       } catch (e) {
         showStatus('Failed to show window: ' + String(e));
       }
-
-      await firstTabPromise;
 
       startupTermConfigPromise.then((termConfig) => {
         if (!termConfig) return;
@@ -348,51 +395,8 @@
         }
       }).catch(() => {});
 
-      startupAppConfigPromise.catch(() => {});
-
       // Finish non-critical UI work after the terminal is visible.
       setTimeout(async () => {
-        if (window.conchOrchestrationRuntime && window.conchOrchestrationRuntime.create) {
-          const orchestrationRuntime = window.conchOrchestrationRuntime.create({
-            invoke,
-            listen,
-            listenOnCurrentWindow,
-            terminalHostEl,
-            currentWindow,
-            tabs,
-            panes,
-            getActiveTabId: () => activeTabId,
-            allocPaneId: () => nextPaneId++,
-            currentPane: () => currentPane(),
-            currentTab: () => currentTab(),
-            setFocusedPane: (paneId) => setFocusedPane(paneId),
-            closePane: (paneId) => closePane(paneId),
-            createTab: (options) => createTab(options),
-            createSshTab: (opts) => createSshTab(opts),
-            activateTab: (tabId) => activateTab(tabId),
-            splitPane: (direction) => splitPane(direction),
-            getPaneManager: () => paneManager,
-            isDebugEnabled: () => shortcutDebugEnabled,
-            debugLog: (...args) => console.log(...args),
-            debouncedFitAndResize: () => {
-              if (layoutRuntime && layoutRuntime.debouncedFitAndResize) return layoutRuntime.debouncedFitAndResize();
-              return debouncedFitAndResize();
-            },
-            rebuildTreeDOM: (tab) => rebuildTreeDOM(tab),
-          });
-          try {
-            const orchestrationResult = await orchestrationRuntime.init();
-            if (orchestrationResult) {
-              if (typeof orchestrationResult.debouncedSaveLayout === 'function') {
-                debouncedSaveLayout = orchestrationResult.debouncedSaveLayout;
-              }
-              paneDnd = orchestrationResult.paneDnd || null;
-            }
-          } catch (error) {
-            console.warn('Deferred orchestration init failed:', error);
-          }
-        }
-
         // Preload the bundled Nerd Font in the background so later glyph
         // fallback is ready without delaying first paint.
         try {

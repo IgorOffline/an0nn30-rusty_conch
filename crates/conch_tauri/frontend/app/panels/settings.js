@@ -46,6 +46,7 @@
     { section: 'appearance', label: 'Appearance Mode', keywords: 'dark light system mode', targetId: 'appearance:mode' },
     { section: 'appearance', label: 'Notification Position', keywords: 'toast notifications top bottom', targetId: 'appearance:notification-position' },
     { section: 'appearance', label: 'Native Notifications', keywords: 'system notifications os notifications', targetId: 'appearance:native-notifications' },
+    { section: 'appearance', label: 'Disable Animations', keywords: 'reduce motion disable animations transitions effects performance', targetId: 'appearance:disable-animations' },
     { section: 'appearance', label: 'Window Decorations', keywords: 'titlebar transparent buttonless none full window chrome', targetId: 'appearance:window-decorations' },
     { section: 'appearance', label: 'Native Menu Bar', keywords: 'menu bar macos native menu', targetId: 'appearance:native-menu-bar' },
     { section: 'appearance', label: 'UI Font Family', keywords: 'ui font family interface typography', targetId: 'appearance:ui-font-family' },
@@ -88,6 +89,12 @@
 
   function ensureSettingsShape(settings) {
     if (!settings.conch) settings.conch = {};
+    if (!settings.conch.ui || typeof settings.conch.ui !== 'object') {
+      settings.conch.ui = {};
+    }
+    if (typeof settings.conch.ui.disable_animations !== 'boolean') {
+      settings.conch.ui.disable_animations = false;
+    }
     if (!settings.conch.files || typeof settings.conch.files !== 'object') {
       settings.conch.files = {};
     }
@@ -1157,6 +1164,20 @@
       (val) => { pendingSettings.conch.ui.native_notifications = val; }
     );
     setRowTarget(addRow(c, 'Native Notifications', 'Use system notifications when the app is not focused', nativeSwitch), 'appearance:native-notifications');
+
+    const animationsSwitch = makeSwitch(
+      pendingSettings.conch.ui.disable_animations === true,
+      (val) => { pendingSettings.conch.ui.disable_animations = val; }
+    );
+    setRowTarget(
+      addRow(
+        c,
+        'Disable Animations',
+        'Turn off UI motion and toast animations for a snappier experience on lower-end machines.',
+        animationsSwitch
+      ),
+      'appearance:disable-animations'
+    );
 
     addDivider(c);
 

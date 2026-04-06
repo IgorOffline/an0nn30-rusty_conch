@@ -123,6 +123,7 @@
       let borderlessMode = false;
       try {
         const appCfg = await invoke('get_app_config');
+        document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
         if ((appCfg.platform === 'windows' || appCfg.platform === 'linux') && appCfg.decorations !== 'none') {
           document.getElementById('app').classList.add('custom-titlebar');
           window._initTitlebarPending = true;

@@ -22,6 +22,13 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       color: var(--fg);
     }
+    html.no-animations *,
+    html.no-animations *::before,
+    html.no-animations *::after {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }
     body {
       display: flex; flex-direction: column;
     }
@@ -318,9 +325,10 @@
     // Apply UI font sizes from config.
     try {
       const appCfg = await invoke('get_app_config');
-      if (appCfg.ui_font_size_small) document.documentElement.style.setProperty('--ui-font-small', appCfg.ui_font_size_small + 'px');
-      if (appCfg.ui_font_size_list) document.documentElement.style.setProperty('--ui-font-list', appCfg.ui_font_size_list + 'px');
-      if (appCfg.ui_font_size_normal) document.documentElement.style.setProperty('--ui-font-normal', appCfg.ui_font_size_normal + 'px');
+      document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
+      if (appCfg.ui_font_small) document.documentElement.style.setProperty('--ui-font-small', appCfg.ui_font_small + 'px');
+      if (appCfg.ui_font_list) document.documentElement.style.setProperty('--ui-font-list', appCfg.ui_font_list + 'px');
+      if (appCfg.ui_font_normal) document.documentElement.style.setProperty('--ui-font-normal', appCfg.ui_font_normal + 'px');
       if (appCfg.ui_font_family) document.body.style.fontFamily = appCfg.ui_font_family;
     } catch (_) {}
 

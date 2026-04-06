@@ -84,6 +84,11 @@
           }
         } catch (_) {}
 
+        if (initialLayoutData) {
+          global.toolWindowManager.setPanelVisibility('left', initialLayoutData.files_panel_visible !== false, { save: false });
+          global.toolWindowManager.setPanelVisibility('right', initialLayoutData.ssh_panel_visible !== false, { save: false });
+        }
+
         global.toolWindowManager.register('file-explorer', {
           title: 'Files',
           type: 'built-in',
@@ -131,14 +136,10 @@
             }
           },
         });
-        if (initialLayoutData) {
-          global.toolWindowManager.setPanelVisibility('left', initialLayoutData.files_panel_visible !== false, { save: false });
-          global.toolWindowManager.setPanelVisibility('right', initialLayoutData.ssh_panel_visible !== false, { save: false });
-          if (initialLayoutData.zen_mode === true) {
-            global.toolWindowManager.setPanelVisibility('left', false, { save: false });
-            global.toolWindowManager.setPanelVisibility('right', false, { save: false });
-            bottomPanelEl.classList.add('hidden');
-          }
+        if (initialLayoutData && initialLayoutData.zen_mode === true) {
+          global.toolWindowManager.setPanelVisibility('left', false, { save: false });
+          global.toolWindowManager.setPanelVisibility('right', false, { save: false });
+          bottomPanelEl.classList.add('hidden');
         }
         refreshShortcutFallbacks();
       }

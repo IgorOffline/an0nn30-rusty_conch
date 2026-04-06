@@ -185,6 +185,8 @@ pub struct UiConfig {
     pub notification_position: String,
     /// Use native OS notifications when the app is not focused.
     pub native_notifications: bool,
+    /// Disable UI animations/transitions for low-end machines.
+    pub disable_animations: bool,
 }
 
 impl Default for UiConfig {
@@ -196,6 +198,7 @@ impl Default for UiConfig {
             native_menu_bar: true,
             notification_position: "bottom".into(),
             native_notifications: true,
+            disable_animations: false,
         }
     }
 }
@@ -353,6 +356,12 @@ mod tests {
     }
 
     #[test]
+    fn disable_animations_defaults_to_false() {
+        let cfg = UiConfig::default();
+        assert!(!cfg.disable_animations);
+    }
+
+    #[test]
     fn files_config_defaults_to_follow_enabled() {
         let cfg = FilesConfig::default();
         assert!(cfg.follow_path);
@@ -363,6 +372,7 @@ mod tests {
         let cfg: UiConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.notification_position, "bottom");
         assert!(cfg.native_notifications);
+        assert!(!cfg.disable_animations);
     }
 
     #[test]

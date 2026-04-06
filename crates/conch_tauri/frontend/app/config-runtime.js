@@ -53,6 +53,7 @@
         }
 
         const appCfg = await invoke('get_app_config');
+        document.documentElement.classList.toggle('no-animations', appCfg.disable_animations === true);
         if (appCfg.ui_font_small > 0) rootStyle.setProperty('--ui-font-small', appCfg.ui_font_small + 'px');
         if (appCfg.ui_font_list > 0) rootStyle.setProperty('--ui-font-list', appCfg.ui_font_list + 'px');
         if (appCfg.ui_font_normal > 0) rootStyle.setProperty('--ui-font-normal', appCfg.ui_font_normal + 'px');

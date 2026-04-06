@@ -28,3 +28,10 @@
     }
     #drag-handle.visible { display: block; }
 
+    html.no-animations *,
+    html.no-animations *::before,
+    html.no-animations *::after {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }

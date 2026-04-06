@@ -107,10 +107,17 @@
     toolWindows.set(id, tw);
     zones[zone].windows.push(id);
 
-    if (zones[zone].activeId === null) {
+    const side = sideForZone(zone);
+    const appRoot = document.getElementById('app');
+    const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
+    const sideHiddenOnBoot = (side === 'left' || side === 'right') && !isPanelVisible(side);
+    const shouldAutoActivate = !zenActive && !sideHiddenOnBoot;
+
+    if (zones[zone].activeId === null && shouldAutoActivate) {
       activate(id);
     } else {
       updateZone(zone);
+      updateSidebar(side);
       updateStrips();
     }
   }
@@ -138,6 +145,29 @@
     updateStrips();
   }
 
+  function shouldDeferRender(tw) {
+    if (!tw) return false;
+    const side = sideForZone(tw.zone);
+    if (side !== 'left' && side !== 'right') return false;
+    const appRoot = document.getElementById('app');
+    return !!(appRoot && appRoot.classList.contains('zen-mode'));
+  }
+
+  function ensureWindowElement(tw, zone) {
+    if (!tw || tw.el) return;
+    const targetZone = zone || zones[tw.zone];
+    if (!targetZone || !targetZone.contentEl) return;
+    tw.el = document.createElement('div');
+    tw.el.className = 'tool-window-content';
+    tw.el.dataset.toolWindow = tw.id;
+    const renderRootEl = document.createElement('div');
+    renderRootEl.className = 'tool-window-scroll-viewport';
+    tw.el.appendChild(renderRootEl);
+    tw.renderRootEl = renderRootEl;
+    targetZone.contentEl.appendChild(tw.el);
+    tw.renderFn(renderRootEl);
+  }
+
   // ---- Activation / Deactivation --------------------------------------------
 
   function activate(id) {
@@ -159,19 +189,8 @@
       panelState[side].visible = true;
     }
 
-    // Lazily create content container
-    if (!tw.el) {
-      tw.el = document.createElement('div');
-      tw.el.className = 'tool-window-content';
-      tw.el.dataset.toolWindow = id;
-      const renderRootEl = document.createElement('div');
-      renderRootEl.className = 'tool-window-scroll-viewport';
-      tw.el.appendChild(renderRootEl);
-      tw.renderRootEl = renderRootEl;
-      zone.contentEl.appendChild(tw.el);
-      tw.renderFn(renderRootEl);
-    }
-    tw.el.style.display = '';
+    if (!shouldDeferRender(tw)) ensureWindowElement(tw, zone);
+    if (tw.el) tw.el.style.display = '';
 
     updateZone(tw.zone);
     updateSidebar(side);
@@ -268,6 +287,11 @@
 
     const wins = zone.windows;
     const hasActive = zone.activeId !== null;
+    const activeTw = hasActive ? toolWindows.get(zone.activeId) : null;
+
+    if (hasActive && activeTw && !shouldDeferRender(activeTw)) {
+      ensureWindowElement(activeTw, zone);
+    }
 
     // Zone visibility
     if (wins.length === 0 || !hasActive) {
@@ -279,7 +303,6 @@
     // Zone header — just shows active window title, no tab buttons (strip handles tabs)
     let headerEl = zone.el.querySelector('.zone-header');
     if (hasActive && wins.length >= 1) {
-      const activeTw = toolWindows.get(zone.activeId);
       if (!headerEl) {
         headerEl = document.createElement('div');
         headerEl.className = 'zone-header';
@@ -842,6 +865,18 @@
   function setPanelVisibility(side, visible, opts) {
     if (!panelState[side]) return;
     panelState[side].visible = !!visible;
+    if (panelState[side].visible) {
+      const topZone = zones[side + '-top'];
+      const botZone = zones[side + '-bottom'];
+      if (topZone && botZone && topZone.activeId === null && botZone.activeId === null) {
+        const candidate = (topZone.windows && topZone.windows[0]) || (botZone.windows && botZone.windows[0]) || null;
+        if (candidate) activate(candidate);
+      }
+    }
+    if (panelState[side].visible) {
+      updateZone(side + '-top');
+      updateZone(side + '-bottom');
+    }
     updateSidebar(side);
     updateStrips();
     if (!opts || opts.save !== false) triggerSave();
