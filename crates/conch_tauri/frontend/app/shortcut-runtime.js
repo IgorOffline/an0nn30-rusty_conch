@@ -40,8 +40,20 @@
       split_vertical: 'split-vertical',
       split_horizontal: 'split-horizontal',
       close_pane: 'close-pane',
+      navigate_pane_up: 'navigate-pane-up',
+      navigate_pane_down: 'navigate-pane-down',
+      navigate_pane_left: 'navigate-pane-left',
+      navigate_pane_right: 'navigate-pane-right',
       settings: 'settings',
     };
+
+    function navigatePane(direction) {
+      const tab = getActiveTab();
+      const focusedPaneId = getFocusedPaneId();
+      if (!tab || focusedPaneId == null) return;
+      const adj = findAdjacentPane(focusedPaneId, direction, tab.containerEl);
+      if (adj != null) setFocusedPane(adj);
+    }
 
     function codeToKey(code) {
       if (!code) return '';
@@ -190,18 +202,19 @@
 
       document.addEventListener('keydown', (event) => {
         const combo = normalizeShortcutEventForPluginFallback(event);
-        const primaryMod = isMacPlatform ? 'cmd' : 'ctrl';
-        if (combo && combo.includes(primaryMod)) {
-          const coreHit = coreShortcutFallbacks.find((s) => s.combo === combo);
-          if (coreHit) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === 'function') {
-              event.stopImmediatePropagation();
-            }
-            handleMenuAction(coreHit.action);
-            return;
+        const coreHit = combo ? coreShortcutFallbacks.find((s) => s.combo === combo) : null;
+        if (coreHit) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
           }
+          if (coreHit.action === 'navigate-pane-up') navigatePane('up');
+          else if (coreHit.action === 'navigate-pane-down') navigatePane('down');
+          else if (coreHit.action === 'navigate-pane-left') navigatePane('left');
+          else if (coreHit.action === 'navigate-pane-right') navigatePane('right');
+          else handleMenuAction(coreHit.action);
+          return;
         }
 
         if (isTextInputTarget(event.target)) return;
@@ -291,18 +304,6 @@
         writeTextToCurrentPane(seq);
       }, true);
 
-      document.addEventListener('keydown', (event) => {
-        if ((event.metaKey || event.ctrlKey) && event.altKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
-          event.preventDefault();
-          event.stopPropagation();
-          const dir = event.key.replace('Arrow', '').toLowerCase();
-          const tab = getActiveTab();
-          const focusedPaneId = getFocusedPaneId();
-          if (!tab || focusedPaneId == null) return;
-          const adj = findAdjacentPane(focusedPaneId, dir, tab.containerEl);
-          if (adj != null) setFocusedPane(adj);
-        }
-      }, true);
     }
 
     async function init() {

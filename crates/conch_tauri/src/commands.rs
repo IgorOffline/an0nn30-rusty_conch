@@ -168,6 +168,7 @@ pub(crate) struct WindowLayout {
     files_panel_visible: Option<bool>,
     bottom_panel_visible: Option<bool>,
     bottom_panel_height: Option<f64>,
+    zen_mode: Option<bool>,
     tool_window_zones: Option<std::collections::HashMap<String, String>>,
     split_ratios: Option<SplitRatios>,
 }
@@ -190,6 +191,7 @@ pub(crate) struct SavedLayout {
     files_panel_visible: bool,
     bottom_panel_visible: bool,
     bottom_panel_height: f64,
+    zen_mode: bool,
     tool_window_zones: std::collections::HashMap<String, String>,
     left_split_ratio: f64,
     right_split_ratio: f64,
@@ -226,6 +228,7 @@ pub(crate) fn get_saved_layout() -> SavedLayout {
         files_panel_visible: state.layout.left_panel_visible,
         bottom_panel_visible: state.layout.bottom_panel_visible,
         bottom_panel_height: state.layout.bottom_panel_height as f64,
+        zen_mode: state.layout.zen_mode,
         tool_window_zones: state.layout.tool_window_zones,
         left_split_ratio: state.layout.left_split_ratio as f64,
         right_split_ratio: state.layout.right_split_ratio as f64,
@@ -259,6 +262,9 @@ pub(crate) fn save_window_layout(window: tauri::WebviewWindow, layout: WindowLay
     }
     if let Some(h) = layout.bottom_panel_height {
         state.layout.bottom_panel_height = h as f32;
+    }
+    if let Some(v) = layout.zen_mode {
+        state.layout.zen_mode = v;
     }
     if let Some(zones) = layout.tool_window_zones {
         state.layout.tool_window_zones = zones;

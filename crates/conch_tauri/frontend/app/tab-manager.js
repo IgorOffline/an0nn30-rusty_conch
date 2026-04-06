@@ -188,6 +188,7 @@
       const closeWindowWhenLast = options.closeWindowWhenLast !== false;
       const tab = tabs.get(tabId);
       if (!tab) return;
+      let closedSshPane = false;
 
       const paneIds = allPanesInTab(tabId);
       for (const pid of paneIds) {
@@ -195,6 +196,7 @@
         if (!pane) continue;
         unregisterPaneDnd(pid);
         if (notifyBackend && pane.kind === 'terminal' && pane.spawned) {
+          if (pane.type === 'ssh') closedSshPane = true;
           notifyTerminalClosed(pid, pane.type);
         }
         if (pane.cleanupMouseBridge) pane.cleanupMouseBridge();
@@ -226,6 +228,13 @@
         } catch (error) {
           showStatus('Failed to close window: ' + String(error));
         }
+      }
+
+      if (closedSshPane && typeof refreshSshSessions === 'function') {
+        refreshSshSessions();
+        setTimeout(() => {
+          refreshSshSessions();
+        }, 150);
       }
     }
 

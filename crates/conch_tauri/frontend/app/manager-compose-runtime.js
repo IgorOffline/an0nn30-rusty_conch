@@ -59,6 +59,9 @@
             const cmd = paneType === 'ssh' ? 'ssh_disconnect' : 'close_pty';
             invoke(cmd, { paneId }).catch(() => {});
           },
+          refreshSshSessions: () => {
+            if (global.sshPanel) global.sshPanel.refreshSessions();
+          },
           closeTab: (tabId) => closeTabDelegate(tabId),
           initTerminal: (root) => terminalRuntime.initTerminal(root),
           setupTmuxRightClickBridge: (term, terminalRoot) => terminalRuntime.setupTmuxRightClickBridge(term, terminalRoot),

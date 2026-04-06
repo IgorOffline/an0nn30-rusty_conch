@@ -8,6 +8,7 @@
     const onTerminalFocused = deps.onTerminalFocused;
     const unregisterPaneDnd = deps.unregisterPaneDnd;
     const notifyTerminalClosed = deps.notifyTerminalClosed;
+    const refreshSshSessions = deps.refreshSshSessions;
     const closeTab = deps.closeTab;
     const initTerminal = deps.initTerminal;
     const setupTmuxRightClickBridge = deps.setupTmuxRightClickBridge;
@@ -142,7 +143,9 @@
         return;
       }
 
+      let closedSshPane = false;
       if (pane.kind === 'terminal' && pane.spawned) {
+        if (pane.type === 'ssh') closedSshPane = true;
         notifyTerminalClosed(paneId, pane.type);
       }
 
@@ -160,6 +163,13 @@
         setFocusedPane(firstId);
       } else if (tab.focusedPaneId === paneId) {
         tab.focusedPaneId = global.splitTree.firstLeaf(tab.treeRoot);
+      }
+
+      if (closedSshPane && typeof refreshSshSessions === 'function') {
+        refreshSshSessions();
+        setTimeout(() => {
+          refreshSshSessions();
+        }, 150);
       }
     }
 

@@ -43,6 +43,8 @@ pub struct LayoutConfig {
     pub bottom_panel_visible: bool,
     /// Whether the status bar is visible.
     pub status_bar_visible: bool,
+    /// Whether zen mode is active.
+    pub zen_mode: bool,
     /// Tool window zone assignments: window-id → zone-name.
     pub tool_window_zones: HashMap<String, String>,
     /// Left sidebar top/bottom split ratio (0.0–1.0, top portion).
@@ -64,6 +66,7 @@ impl Default for LayoutConfig {
             right_panel_visible: true,
             bottom_panel_visible: true,
             status_bar_visible: true,
+            zen_mode: false,
             tool_window_zones: HashMap::new(),
             left_split_ratio: 0.5,
             right_split_ratio: 0.5,
@@ -122,6 +125,7 @@ mod tests {
                 right_panel_visible: false,
                 bottom_panel_visible: true,
                 status_bar_visible: false,
+                zen_mode: true,
                 tool_window_zones: zones,
                 left_split_ratio: 0.6,
                 right_split_ratio: 0.4,
@@ -183,5 +187,6 @@ left_panel_visible = false
             "default bottom_panel_visible"
         );
         assert!(ps.layout.status_bar_visible, "default status_bar_visible");
+        assert!(!ps.layout.zen_mode, "default zen_mode");
     }
 }

@@ -21,6 +21,18 @@
     const fitAndResizeCurrentTab = deps.fitAndResizeCurrentTab;
     const showAboutDialog = deps.showAboutDialog;
     const showUpdateAvailableToast = deps.showUpdateAvailableToast;
+    const initialLayout = global.__conchInitialLayout || {};
+    const zenState = {
+      active: global.__conchInitialZenMode === true,
+      leftVisible: initialLayout.files_panel_visible !== false,
+      rightVisible: initialLayout.ssh_panel_visible !== false,
+      bottomVisible: initialLayout.bottom_panel_visible !== false,
+    };
+    global.__conchZenRestoreState = {
+      leftVisible: !!zenState.leftVisible,
+      rightVisible: !!zenState.rightVisible,
+      bottomVisible: !!zenState.bottomVisible,
+    };
 
     function handleMenuAction(action) {
       if (action === 'paste') {
@@ -132,29 +144,53 @@
         return;
       }
       if (action === 'zen-mode') {
-        const filesHidden = global.toolWindowManager
-          ? !global.toolWindowManager.isPanelVisible('left')
-          : (global.filesPanel && global.filesPanel.isHidden());
-        const sshHidden = global.toolWindowManager
-          ? !global.toolWindowManager.isPanelVisible('right')
-          : (global.sshPanel && global.sshPanel.isHidden());
-        const allHidden = filesHidden && sshHidden;
-        if (allHidden) {
+        const appRoot = document.getElementById('app');
+        const bottomPanel = document.getElementById('bottom-panel');
+
+        if (!zenState.active) {
+          zenState.leftVisible = global.toolWindowManager
+            ? global.toolWindowManager.isPanelVisible('left')
+            : !!(global.filesPanel && !global.filesPanel.isHidden());
+          zenState.rightVisible = global.toolWindowManager
+            ? global.toolWindowManager.isPanelVisible('right')
+            : !!(global.sshPanel && !global.sshPanel.isHidden());
+          zenState.bottomVisible = !!(bottomPanel && !bottomPanel.classList.contains('hidden'));
+          global.__conchZenRestoreState = {
+            leftVisible: !!zenState.leftVisible,
+            rightVisible: !!zenState.rightVisible,
+            bottomVisible: !!zenState.bottomVisible,
+          };
+
           if (global.toolWindowManager) {
-            global.toolWindowManager.setPanelVisibility('left', true);
-            global.toolWindowManager.setPanelVisibility('right', true);
-          } else {
-            if (global.filesPanel) global.filesPanel.togglePanel();
-            if (global.sshPanel) global.sshPanel.togglePanel();
-          }
-        } else {
-          if (global.toolWindowManager) {
-            if (global.toolWindowManager.isPanelVisible('left')) global.toolWindowManager.setPanelVisibility('left', false);
-            if (global.toolWindowManager.isPanelVisible('right')) global.toolWindowManager.setPanelVisibility('right', false);
+            if (zenState.leftVisible) global.toolWindowManager.setPanelVisibility('left', false);
+            if (zenState.rightVisible) global.toolWindowManager.setPanelVisibility('right', false);
           } else {
             if (global.filesPanel && !global.filesPanel.isHidden()) global.filesPanel.togglePanel();
             if (global.sshPanel && !global.sshPanel.isHidden()) global.sshPanel.togglePanel();
           }
+          if (bottomPanel && !bottomPanel.classList.contains('hidden')) {
+            bottomPanel.classList.add('hidden');
+            setTimeout(() => fitAndResizeCurrentTab(), 50);
+          }
+          if (appRoot) appRoot.classList.add('zen-mode');
+          zenState.active = true;
+        } else {
+          if (global.toolWindowManager) {
+            global.toolWindowManager.setPanelVisibility('left', !!zenState.leftVisible);
+            global.toolWindowManager.setPanelVisibility('right', !!zenState.rightVisible);
+          } else {
+            if (global.filesPanel && zenState.leftVisible && global.filesPanel.isHidden()) global.filesPanel.togglePanel();
+            if (global.filesPanel && !zenState.leftVisible && !global.filesPanel.isHidden()) global.filesPanel.togglePanel();
+            if (global.sshPanel && zenState.rightVisible && global.sshPanel.isHidden()) global.sshPanel.togglePanel();
+            if (global.sshPanel && !zenState.rightVisible && !global.sshPanel.isHidden()) global.sshPanel.togglePanel();
+          }
+          if (bottomPanel) {
+            bottomPanel.classList.toggle('hidden', !zenState.bottomVisible);
+            setTimeout(() => fitAndResizeCurrentTab(), 50);
+          }
+          if (appRoot) appRoot.classList.remove('zen-mode');
+          zenState.active = false;
+          global.__conchZenRestoreState = null;
         }
         debouncedSaveLayout();
         return;

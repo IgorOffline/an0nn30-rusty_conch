@@ -141,7 +141,19 @@
 
         try {
           const layoutData = await invoke('get_saved_layout');
-          if (layoutData.bottom_panel_visible === false) {
+          window.__conchInitialLayout = layoutData;
+          window.__conchInitialZenMode = layoutData.zen_mode === true;
+          window.__conchZenRestoreState = {
+            leftVisible: layoutData.files_panel_visible !== false,
+            rightVisible: layoutData.ssh_panel_visible !== false,
+            bottomVisible: layoutData.bottom_panel_visible !== false,
+          };
+          if (layoutData.zen_mode === true) {
+            document.getElementById('app').classList.add('zen-mode');
+          } else {
+            document.getElementById('app').classList.remove('zen-mode');
+          }
+          if (layoutData.zen_mode === true || layoutData.bottom_panel_visible === false) {
             document.getElementById('bottom-panel').classList.add('hidden');
           } else {
             document.getElementById('bottom-panel').classList.remove('hidden');

@@ -20,32 +20,49 @@
         }
       };
 
+      function saveLayoutNow() {
+        const twm = global.toolWindowManager;
+        if (!twm) return;
+        const widths = twm.getSidebarWidths();
+        const appRoot = document.getElementById('app');
+        const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
+        const zenRestore = global.__conchZenRestoreState || {};
+        const leftVisible = zenActive && typeof zenRestore.leftVisible === 'boolean'
+          ? !!zenRestore.leftVisible
+          : twm.isPanelVisible('left');
+        const rightVisible = zenActive && typeof zenRestore.rightVisible === 'boolean'
+          ? !!zenRestore.rightVisible
+          : twm.isPanelVisible('right');
+        const bottomVisible = zenActive && typeof zenRestore.bottomVisible === 'boolean'
+          ? !!zenRestore.bottomVisible
+          : !bottomPanelEl.classList.contains('hidden');
+        invoke('save_window_layout', {
+          layout: {
+            ssh_panel_width: widths.right,
+            ssh_panel_visible: rightVisible,
+            files_panel_width: widths.left,
+            files_panel_visible: leftVisible,
+            bottom_panel_visible: bottomVisible,
+            bottom_panel_height: bottomPanelEl.offsetHeight,
+            zen_mode: !!(appRoot && appRoot.classList.contains('zen-mode')),
+            tool_window_zones: twm.getZoneAssignments(),
+            split_ratios: twm.getSplitRatios(),
+          },
+        }).catch(() => {});
+      }
+
       let windowResaveSaveTimer = null;
       function debouncedSaveLayout() {
         if (windowResaveSaveTimer) clearTimeout(windowResaveSaveTimer);
         windowResaveSaveTimer = setTimeout(() => {
-          const twm = global.toolWindowManager;
-          if (!twm) return;
-          const widths = twm.getSidebarWidths();
-          invoke('save_window_layout', {
-            layout: {
-              ssh_panel_width: widths.right,
-              ssh_panel_visible: twm.isPanelVisible('right'),
-              files_panel_width: widths.left,
-              files_panel_visible: twm.isPanelVisible('left'),
-              bottom_panel_visible: !bottomPanelEl.classList.contains('hidden'),
-              bottom_panel_height: bottomPanelEl.offsetHeight,
-              tool_window_zones: twm.getZoneAssignments(),
-              split_ratios: twm.getSplitRatios(),
-            },
-          }).catch(() => {});
-        }, 500);
+          saveLayoutNow();
+        }, 150);
       }
 
       if (global.toolWindowManager) {
         global.toolWindowManager.init({
           fitActiveTab: debouncedFitAndResize,
-          saveLayout: debouncedSaveLayout,
+          saveLayout: saveLayoutNow,
         });
 
         try {
@@ -117,11 +134,21 @@
         if (initialLayoutData) {
           global.toolWindowManager.setPanelVisibility('left', initialLayoutData.files_panel_visible !== false, { save: false });
           global.toolWindowManager.setPanelVisibility('right', initialLayoutData.ssh_panel_visible !== false, { save: false });
+          if (initialLayoutData.zen_mode === true) {
+            global.toolWindowManager.setPanelVisibility('left', false, { save: false });
+            global.toolWindowManager.setPanelVisibility('right', false, { save: false });
+            bottomPanelEl.classList.add('hidden');
+          }
         }
         refreshShortcutFallbacks();
       }
 
       global.addEventListener('resize', debouncedSaveLayout);
+      global.addEventListener('beforeunload', saveLayoutNow);
+      global.addEventListener('pagehide', saveLayoutNow);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') saveLayoutNow();
+      });
 
       {
         let dragging = false;
@@ -153,7 +180,7 @@
           bottomResizeEl.classList.remove('dragging');
           document.body.style.cursor = '';
           document.body.style.userSelect = '';
-          debouncedSaveLayout();
+          saveLayoutNow();
         });
       }
 
@@ -290,7 +317,7 @@
       }
 
       return {
-        debouncedSaveLayout,
+        debouncedSaveLayout: saveLayoutNow,
       };
     }
 

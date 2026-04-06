@@ -312,6 +312,8 @@
     if (!side || side === 'bottom') return;
     const sb = sidebars[side];
     if (!sb.wrapEl) return;
+    const appRoot = document.getElementById('app');
+    const zenActive = !!(appRoot && appRoot.classList.contains('zen-mode'));
 
     const topZone = zones[side + '-top'];
     const botZone = zones[side + '-bottom'];
@@ -319,7 +321,7 @@
     const botActive = botZone.activeId !== null;
     const panelVisible = panelState[side] ? panelState[side].visible : true;
 
-    if (!panelVisible || (!topActive && !botActive)) {
+    if (zenActive || !panelVisible || (!topActive && !botActive)) {
       sb.wrapEl.classList.add('hidden');
     } else {
       sb.wrapEl.classList.remove('hidden');
@@ -850,10 +852,8 @@
     setPanelVisibility(side, !panelState[side].visible);
   }
 
-  let _saveTimer = null;
   function triggerSave() {
-    if (_saveTimer) clearTimeout(_saveTimer);
-    _saveTimer = setTimeout(() => { if (saveLayoutFn) saveLayoutFn(); }, 400);
+    if (saveLayoutFn) saveLayoutFn();
   }
 
   // ---- Query helpers --------------------------------------------------------
