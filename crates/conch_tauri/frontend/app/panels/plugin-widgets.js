@@ -12,8 +12,46 @@
   // Tracks handles for panels registered at the bottom location.
   // Maps handle (number) → plugin name (string).
   const bottomPanelHandles = new Map();
+  let tmuxActiveTabListenerBound = false;
 
   function log(msg) { console.log('[plugin-widgets] ' + msg); }
+
+  function getActiveConchTabId() {
+    if (window.__conchActiveTabId != null) {
+      const value = String(window.__conchActiveTabId).trim();
+      if (value) return value;
+    }
+    const activeBtn = document.querySelector('.tab-btn.active[data-tab-id]');
+    if (!activeBtn) return '';
+    const fromDataset = String(activeBtn.dataset.tabId || '').trim();
+    return fromDataset || '';
+  }
+
+  function refreshTmuxActiveSessionIndicators() {
+    const activeTabId = getActiveConchTabId();
+    const hosts = document.querySelectorAll('.pw-html-host');
+    hosts.forEach((host) => {
+      const shadow = host.shadowRoot;
+      if (!shadow) return;
+      const rows = shadow.querySelectorAll('.tmx-row[data-session-tab-id]');
+      if (!rows.length) return;
+      rows.forEach((row) => {
+        const sessionTabId = String(row.getAttribute('data-session-tab-id') || '').trim();
+        const isCurrent = !!activeTabId && !!sessionTabId && sessionTabId === activeTabId;
+        row.classList.toggle('is-current', isCurrent);
+      });
+    });
+  }
+
+  function bindTmuxActiveTabListener() {
+    if (tmuxActiveTabListenerBound) return;
+    tmuxActiveTabListenerBound = true;
+    window.addEventListener('conch-active-tab-changed', () => {
+      requestAnimationFrame(() => {
+        refreshTmuxActiveSessionIndicators();
+      });
+    });
+  }
 
   function setDialogOverlayAttributes(overlay, label) {
     if (!overlay) return;
@@ -45,6 +83,7 @@
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
+    bindTmuxActiveTabListener();
 
     function ensureBottomPanelTab(panelInfo) {
       const { handle, plugin, name, location, widgets_json } = panelInfo || {};
@@ -843,6 +882,9 @@
       });
     };
     requestAnimationFrame(syncTmxAccordionHeights);
+    requestAnimationFrame(() => {
+      refreshTmuxActiveSessionIndicators();
+    });
 
     // Wire up data-action click events.
     shadow.addEventListener('click', (e) => {

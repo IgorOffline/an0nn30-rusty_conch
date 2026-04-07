@@ -1057,7 +1057,8 @@ local function render_html()
         local id = tostring(idx)
         state.action_targets[id] = s
         local expanded = is_session_expanded(s)
-        local row_class = (state.current_session ~= nil and s.name == state.current_session) and "tmx-row is-current" or "tmx-row"
+        local row_class = "tmx-row"
+        local session_tab_id = tracked_tab_id_for_session(s.name or "") or ""
         local chevron = expanded and "&#9662;" or "&#9656;"
         local tabs = expanded and tabs_for_session(s) or {}
         local tab_rows = {}
@@ -1085,7 +1086,7 @@ local function render_html()
 
         rows[#rows + 1] = [[
           <div class="tmx-session">
-            <div class="]] .. row_class .. [[">
+            <div class="]] .. row_class .. [[" data-session-tab-id="]] .. html_escape(session_tab_id) .. [[">
               <button class="tmx-row-main" data-action="toggle_session:]] .. id .. [[" data-context-action="show_session_menu:]] .. id .. [[" title="Click to expand tabs. Right-click for actions.">
                 <span class="tmx-name-wrap">
                   <span class="tmx-chevron">]] .. chevron .. [[</span>
@@ -1303,12 +1304,12 @@ local function render_html()
         height: 6px;
         border-radius: 999px;
         background: transparent;
-        border: 1px solid var(--tab-border);
+        opacity: 0;
         flex: 0 0 auto;
       }
       .tmx-row.is-current .tmx-current-dot {
-        background: var(--accent);
-        border-color: var(--accent);
+        background: var(--green);
+        opacity: 1;
       }
       .tmx-name {
         font-weight: 500;

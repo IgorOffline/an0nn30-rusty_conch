@@ -165,6 +165,12 @@
       if (!tabs.has(tabId)) return;
 
       setActiveTabId(tabId);
+      if (global) {
+        global.__conchActiveTabId = tabId;
+        try {
+          global.dispatchEvent(new CustomEvent('conch-active-tab-changed', { detail: { tabId } }));
+        } catch (_) {}
+      }
       for (const tab of tabs.values()) {
         const active = tab.id === tabId;
         tab.button.classList.toggle('active', active);
@@ -246,6 +252,7 @@
       const label = allocateTabLabel();
 
       const button = makeTabButton(label, () => closeTab(tabId));
+      button.dataset.tabId = String(tabId);
       button.classList.add('entering');
 
       const containerEl = document.createElement('div');
@@ -347,6 +354,7 @@
       const label = opts.spec || 'SSH';
 
       const button = makeTabButton(label, () => closeTab(tabId));
+      button.dataset.tabId = String(tabId);
       button.classList.add('entering');
 
       const containerEl = document.createElement('div');
