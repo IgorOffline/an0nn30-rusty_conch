@@ -40,3 +40,4 @@ build.ps1
 .superpowers/
 .worktrees/
 plugins/
+.codex
