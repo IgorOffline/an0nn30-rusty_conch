@@ -349,6 +349,7 @@
     }),
   });
   let lastThemeCssVars = null;
+  let lastNativeWindowTheme = '__unset__';
 
   function mapThemeCssVars(themeColors) {
     if (!themeColors || typeof themeColors !== 'object') return null;
@@ -399,6 +400,36 @@
 
   function getAvailableSkins() {
     return KNOWN_SKINS.map((skin) => ({ id: skin.id, label: skin.label }));
+  }
+
+  function resolveNativeWindowTheme(appCfg, skinId) {
+    if (!appCfg || typeof appCfg !== 'object') return undefined;
+    if (String(appCfg.platform || '').toLowerCase() !== 'macos') return undefined;
+    if (String(appCfg.decorations || '').toLowerCase() !== 'full') return undefined;
+
+    if (skinId === 'metal') return 'dark';
+
+    const appearanceMode = String(appCfg.appearance_mode || 'system').toLowerCase();
+    if (appearanceMode === 'dark') return 'dark';
+    if (appearanceMode === 'light') return 'light';
+    return null;
+  }
+
+  function applyNativeWindowTheme(appCfg, skinId) {
+    const nextTheme = resolveNativeWindowTheme(appCfg, skinId);
+    if (typeof nextTheme === 'undefined') return;
+
+    const cacheKey = nextTheme == null ? '__system__' : String(nextTheme);
+    if (cacheKey === lastNativeWindowTheme) return;
+
+    const tauriWindow = global.__TAURI__ && global.__TAURI__.window;
+    if (!tauriWindow || typeof tauriWindow.getCurrentWindow !== 'function') return;
+    const currentWindow = tauriWindow.getCurrentWindow();
+    if (!currentWindow || typeof currentWindow.setTheme !== 'function') return;
+
+    currentWindow.setTheme(nextTheme).then(() => {
+      lastNativeWindowTheme = cacheKey;
+    }).catch(() => {});
   }
 
   function applyThemeCss(themeColors) {
@@ -453,6 +484,7 @@
     const skinId = normalizeSkinId(appCfg.ui_skin);
     root.dataset.skin = skinId;
     applySkinCssVariables(rootStyle, skinId);
+    applyNativeWindowTheme(appCfg, skinId);
 
     if (appCfg.ui_font_family) {
       document.body.style.fontFamily = appCfg.ui_font_family + ', ' + DEFAULT_UI_FONT_STACK;

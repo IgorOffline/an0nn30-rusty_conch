@@ -27,28 +27,28 @@ html[data-skin='metal'] #drag-handle,
 html[data-skin='metal'] #custom-titlebar,
 html[data-skin='metal'] .settings-titlebar,
 html[data-skin='metal'] #settings-titlebar {
-  background: linear-gradient(#e8edf4, #cad4e0);
-  color: #2b3139;
-  border-bottom: 1px solid #8d9aad;
+  background: linear-gradient(#4a4f57, #2d3138);
+  color: #e6e9ed;
+  border-bottom: 1px solid #1f2328;
 }
 
 html[data-skin='metal'] .titlebar-title,
 html[data-skin='metal'] .settings-titlebar-title {
-  color: #333c47;
+  color: #f1f3f6;
   font-weight: 600;
 }
 
 html[data-skin='metal'] .titlebar-menu-btn,
 html[data-skin='metal'] .titlebar-btn,
 html[data-skin='metal'] .settings-titlebar-btn {
-  color: #2d3642;
+  color: #d8dde3;
 }
 
 html[data-skin='metal'] .titlebar-menu-btn:hover,
 html[data-skin='metal'] .titlebar-menu-btn.active,
 html[data-skin='metal'] .titlebar-btn:hover,
 html[data-skin='metal'] .settings-titlebar-btn:hover {
-  background: linear-gradient(#fdfefe, #dce4ee);
+  background: linear-gradient(#5a6069, #3d434c);
 }
 
 html[data-skin='metal'] #tabbar {

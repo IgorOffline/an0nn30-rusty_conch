@@ -12,46 +12,10 @@
   // Tracks handles for panels registered at the bottom location.
   // Maps handle (number) → plugin name (string).
   const bottomPanelHandles = new Map();
-  let tmuxActiveTabListenerBound = false;
+  // Tracks when a plugin last pushed panel widget updates via host events.
+  const panelUpdateAt = new Map();
 
   function log(msg) { console.log('[plugin-widgets] ' + msg); }
-
-  function getActiveConchTabId() {
-    if (window.__conchActiveTabId != null) {
-      const value = String(window.__conchActiveTabId).trim();
-      if (value) return value;
-    }
-    const activeBtn = document.querySelector('.tab-btn.active[data-tab-id]');
-    if (!activeBtn) return '';
-    const fromDataset = String(activeBtn.dataset.tabId || '').trim();
-    return fromDataset || '';
-  }
-
-  function refreshTmuxActiveSessionIndicators() {
-    const activeTabId = getActiveConchTabId();
-    const hosts = document.querySelectorAll('.pw-html-host');
-    hosts.forEach((host) => {
-      const shadow = host.shadowRoot;
-      if (!shadow) return;
-      const rows = shadow.querySelectorAll('.tmx-row[data-session-tab-id]');
-      if (!rows.length) return;
-      rows.forEach((row) => {
-        const sessionTabId = String(row.getAttribute('data-session-tab-id') || '').trim();
-        const isCurrent = !!activeTabId && !!sessionTabId && sessionTabId === activeTabId;
-        row.classList.toggle('is-current', isCurrent);
-      });
-    });
-  }
-
-  function bindTmuxActiveTabListener() {
-    if (tmuxActiveTabListenerBound) return;
-    tmuxActiveTabListenerBound = true;
-    window.addEventListener('conch-active-tab-changed', () => {
-      requestAnimationFrame(() => {
-        refreshTmuxActiveSessionIndicators();
-      });
-    });
-  }
 
   function setDialogOverlayAttributes(overlay, label) {
     if (!overlay) return;
@@ -83,7 +47,6 @@
   function init(opts) {
     invoke = opts.invoke;
     listen = opts.listen;
-    bindTmuxActiveTabListener();
 
     function ensureBottomPanelTab(panelInfo) {
       const { handle, plugin, name, location, widgets_json } = panelInfo || {};
@@ -128,6 +91,7 @@
     // Listen for widget updates from plugins.
     listen('plugin-widgets-updated', (event) => {
       const { handle, plugin, widgets_json } = event.payload;
+      if (plugin) panelUpdateAt.set(plugin, Date.now());
       if (bottomPanelHandles.has(handle)) {
         // Route bottom-panel plugin widgets to the notification panel tab system.
         if (window.notificationPanel) {
@@ -786,11 +750,22 @@
     const payload = { kind: 'widget', ...widgetEvent };
     if (viewId) payload.view_id = viewId;
     const eventJson = JSON.stringify(payload);
+    const sentAt = Date.now();
     invoke('plugin_widget_event', { pluginName, eventJson })
       .then(() => {
-        if (!skipRefresh) {
+        if (skipRefresh) return;
+        if (viewId) {
           refreshPluginView(pluginName, viewId);
+          return;
         }
+        // Panel views are usually push-updated by plugin host events. To avoid
+        // duplicate pull renders (which can cause UI flicker), only fall back
+        // to request_plugin_render when no push update arrived after this event.
+        setTimeout(() => {
+          const lastUpdateAt = panelUpdateAt.get(pluginName) || 0;
+          if (lastUpdateAt >= sentAt) return;
+          refreshPluginView(pluginName, viewId);
+        }, 120);
       })
       .catch((e) => {
         console.error('plugin_widget_event error:', e);
@@ -841,7 +816,6 @@
     '--magenta', '--input-bg', '--hover-bg', '--text-secondary', '--text-muted',
     '--ui-font-small', '--ui-font-list', '--ui-font-normal',
   ];
-  const _pendingToggleSync = new Set();
 
   function renderHtmlWidget(w, pluginName, viewId) {
     const host = document.createElement('div');
@@ -867,63 +841,12 @@
     container.innerHTML = w.content;
     shadow.appendChild(container);
 
-    const syncTmxAccordionHeights = () => {
-      shadow.querySelectorAll('.tmx-tabs-wrap').forEach((wrap) => {
-        const shell = wrap.querySelector('.tmx-tabs-shell');
-        const openHeight = Math.ceil((shell && shell.scrollHeight) || 0);
-        wrap.style.setProperty('--tmx-open-height', `${openHeight}px`);
-        if (wrap.classList.contains('is-open')) {
-          wrap.style.maxHeight = `${openHeight}px`;
-          wrap.style.opacity = '1';
-        } else {
-          wrap.style.maxHeight = '0px';
-          wrap.style.opacity = '0';
-        }
-      });
-    };
-    requestAnimationFrame(syncTmxAccordionHeights);
-    requestAnimationFrame(() => {
-      refreshTmuxActiveSessionIndicators();
-    });
-
     // Wire up data-action click events.
     shadow.addEventListener('click', (e) => {
       const actionEl = e.target.closest('[data-action]');
       if (actionEl) {
         const action = actionEl.getAttribute('data-action');
-        if (action && action.startsWith('toggle_session:')) {
-          const sessionEl = actionEl.closest('.tmx-session');
-          const tabsWrap = sessionEl && sessionEl.querySelector('.tmx-tabs-wrap');
-          const chevron = sessionEl && sessionEl.querySelector('.tmx-chevron');
-          if (tabsWrap) {
-            const currentlyOpen = tabsWrap.classList.contains('is-open');
-            const shell = tabsWrap.querySelector('.tmx-tabs-shell');
-            const openHeight = Math.ceil((shell && shell.scrollHeight) || 0);
-            tabsWrap.style.setProperty('--tmx-open-height', `${openHeight}px`);
-            if (currentlyOpen) {
-              tabsWrap.classList.remove('is-open');
-              tabsWrap.style.maxHeight = '0px';
-              tabsWrap.style.opacity = '0';
-              if (chevron) chevron.innerHTML = '&#9656;';
-            } else {
-              tabsWrap.classList.add('is-open');
-              tabsWrap.style.maxHeight = `${openHeight}px`;
-              tabsWrap.style.opacity = '1';
-              if (chevron) chevron.innerHTML = '&#9662;';
-            }
-          }
-
-          const toggleKey = `${pluginName}::${viewId || ''}::${action}`;
-          if (_pendingToggleSync.has(toggleKey)) return;
-          _pendingToggleSync.add(toggleKey);
-          setTimeout(() => {
-            sendEvent(pluginName, { type: 'button_click', id: action }, viewId);
-            _pendingToggleSync.delete(toggleKey);
-          }, 180);
-          return;
-        }
-        const skipRefresh = action && action.startsWith('open_tab:');
-        sendEvent(pluginName, { type: 'button_click', id: action }, viewId, { skipRefresh });
+        sendEvent(pluginName, { type: 'button_click', id: action }, viewId);
       }
     });
 
